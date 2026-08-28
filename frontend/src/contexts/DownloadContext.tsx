@@ -1,191 +1,321 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState, ReactNode } from 'react';
 import { api } from '../services/api';
+import { BurnJob, BurnJobStatus } from '../types';
 
-interface Download {
+export type DownloadStatus = BurnJobStatus | 'requesting' | 'started';
+
+export interface Download {
   id: string;
   ratingKey: string;
   partKey: string;
   filename: string;
   title: string;
   progress: number;
-  status: 'downloading' | 'completed' | 'error';
+  status: DownloadStatus;
+  mode: 'original' | 'burned';
+  subtitleLabel?: string;
+  jobId?: string;
+  size?: number;
   error?: string;
-  isBulkDownload?: boolean; // True for season/album zips (no progress tracking)
 }
 
 interface DownloadContextType {
   downloads: Download[];
-  startDownload: (ratingKey: string, partKey: string, filename: string, title: string) => Promise<void>;
-  removeDownload: (id: string) => void;
-}
-
-const DownloadContext = createContext<DownloadContextType | undefined>(undefined);
-
-export const useDownloads = () => {
-  const context = useContext(DownloadContext);
-  if (!context) {
-    throw new Error('useDownloads must be used within a DownloadProvider');
-  }
-  return context;
-};
-
-interface DownloadProviderProps {
-  children: ReactNode;
-}
-
-export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) => {
-  const [downloads, setDownloads] = useState<Download[]>([]);
-
-  // Warn user before closing/refreshing if downloads are in progress
-  useEffect(() => {
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      const activeDownloads = downloads.filter(d => d.status === 'downloading');
-
-      if (activeDownloads.length > 0) {
-        // Standard way to show browser confirmation dialog
-        e.preventDefault();
-        e.returnValue = ''; // Chrome requires returnValue to be set
-      }
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-    };
-  }, [downloads]);
-
-  const startDownload = async (
+  startOriginalDownload: (
     ratingKey: string,
     partKey: string,
     filename: string,
     title: string
-  ): Promise<void> => {
-    const downloadId = `${ratingKey}-${partKey}-${Date.now()}`;
+  ) => Promise<void>;
+  startBurnJob: (
+    ratingKey: string,
+    partKey: string,
+    filename: string,
+    title: string,
+    subtitleStreamId: number | string,
+    subtitleLabel: string
+  ) => Promise<void>;
+  downloadPrepared: (id: string) => Promise<void>;
+  cancelBurnJob: (id: string) => Promise<void>;
+  removeDownload: (id: string) => void;
+}
 
-    // Check if this is a bulk download (season or album ZIP)
-    const isBulkDownload = partKey.includes('/season/') || partKey.includes('/album/');
+const STORAGE_KEY = 'librarydownloadarr:burn-jobs';
+const ACTIVE_STATUSES = new Set<DownloadStatus>(['queued', 'preparing']);
 
-    // Add download to state
-    const newDownload: Download = {
-      id: downloadId,
-      ratingKey,
-      partKey,
-      filename,
-      title,
-      progress: 0,
-      status: 'downloading',
-      isBulkDownload,
+const DownloadContext = createContext<DownloadContextType | undefined>(undefined);
+
+function errorMessage(error: unknown): string {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'response' in error &&
+    typeof error.response === 'object' &&
+    error.response !== null &&
+    'data' in error.response
+  ) {
+    const data = error.response.data as { error?: string };
+    if (data.error) return data.error;
+  }
+  return error instanceof Error ? error.message : 'The download could not be started.';
+}
+
+function triggerBrowserDownload(url: string, filename: string): void {
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function storedDownloads(userId: string): Download[] {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    const parsed = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:${userId}`) || '[]') as Download[];
+    return parsed.filter((download) => download.mode === 'burned' && download.jobId);
+  } catch {
+    localStorage.removeItem(`${STORAGE_KEY}:${userId}`);
+    return [];
+  }
+}
+
+function responseStatus(error: unknown): number | undefined {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'response' in error &&
+    typeof error.response === 'object' &&
+    error.response !== null &&
+    'status' in error.response &&
+    typeof error.response.status === 'number'
+  ) {
+    return error.response.status;
+  }
+  return undefined;
+}
+
+function mergeJob(download: Download, job: BurnJob): Download {
+  return {
+    ...download,
+    id: job.id,
+    jobId: job.id,
+    ratingKey: job.ratingKey || download.ratingKey,
+    partKey: job.partKey || download.partKey,
+    filename: job.filename || download.filename,
+    progress: Number.isFinite(job.progress) ? Math.max(0, Math.min(100, job.progress)) : download.progress,
+    status: job.status,
+    size: job.size,
+    error: job.error,
+  };
+}
+
+export const useDownloads = () => {
+  const context = useContext(DownloadContext);
+  if (!context) throw new Error('useDownloads must be used within a DownloadProvider');
+  return context;
+};
+
+export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }> = ({
+  children,
+  userId,
+}) => {
+  const [downloads, setDownloads] = useState<Download[]>(() => storedDownloads(userId));
+
+  const activeJobKey = useMemo(
+    () =>
+      downloads
+        .filter((download) => download.jobId && ACTIVE_STATUSES.has(download.status))
+        .map((download) => download.jobId)
+        .sort()
+        .join(','),
+    [downloads]
+  );
+
+  useEffect(() => {
+    localStorage.setItem(
+      `${STORAGE_KEY}:${userId}`,
+      JSON.stringify(downloads.filter((download) => download.mode === 'burned' && download.jobId))
+    );
+  }, [downloads, userId]);
+
+  useEffect(() => {
+    const jobIds = activeJobKey.split(',').filter(Boolean);
+    if (jobIds.length === 0) return;
+
+    let active = true;
+    const refresh = async () => {
+      const results = await Promise.allSettled(jobIds.map((jobId) => api.getBurnJob(jobId)));
+      if (!active) return;
+      setDownloads((current) =>
+        current.map((download) => {
+          const index = jobIds.indexOf(download.jobId || '');
+          if (index < 0) return download;
+          const result = results[index];
+          if (result.status === 'fulfilled') return mergeJob(download, result.value);
+          const status = responseStatus(result.reason);
+          if (status === 403 || status === 404) {
+            return {
+              ...download,
+              status: 'failed',
+              error: status === 403
+                ? 'Your Plex access to this server is no longer active.'
+                : 'This preparation job is no longer available.',
+            };
+          }
+          return download;
+        })
+      );
     };
 
-    setDownloads((prev) => [...prev, newDownload]);
+    void refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [activeJobKey]);
+
+  const startOriginalDownload: DownloadContextType['startOriginalDownload'] = async (
+    ratingKey,
+    partKey,
+    filename,
+    title
+  ) => {
+    const id = `original-${ratingKey}-${partKey}`;
+    setDownloads((current) => [
+      ...current.filter((download) => download.id !== id),
+      {
+        id,
+        ratingKey,
+        partKey,
+        filename,
+        title,
+        progress: 0,
+        status: 'requesting',
+        mode: 'original',
+      },
+    ]);
 
     try {
-      // Check if partKey is already a full URL (for bulk downloads) or a path fragment
-      const downloadUrl = partKey.startsWith('/api/')
-        ? partKey // Already a full URL for bulk downloads
-        : api.getDownloadUrl(ratingKey, partKey); // Single file download
+      const ticket = await api.createDownloadTicket(ratingKey, partKey);
+      triggerBrowserDownload(ticket.url, ticket.filename || filename);
+      setDownloads((current) =>
+        current.map((download) =>
+          download.id === id
+            ? { ...download, filename: ticket.filename || filename, progress: 100, status: 'started' }
+            : download
+        )
+      );
+      window.setTimeout(() => {
+        setDownloads((current) => current.filter((download) => download.id !== id));
+      }, 8000);
+    } catch (error) {
+      setDownloads((current) =>
+        current.map((download) =>
+          download.id === id ? { ...download, status: 'failed', error: errorMessage(error) } : download
+        )
+      );
+    }
+  };
 
-      // Fetch with progress tracking
-      const response = await fetch(downloadUrl, {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('token')}`,
-        },
+  const startBurnJob: DownloadContextType['startBurnJob'] = async (
+    ratingKey,
+    partKey,
+    filename,
+    title,
+    subtitleStreamId,
+    subtitleLabel
+  ) => {
+    const pendingId = `burn-${ratingKey}-${partKey}-${subtitleStreamId}`;
+    setDownloads((current) => [
+      ...current.filter((download) => download.id !== pendingId),
+      {
+        id: pendingId,
+        ratingKey,
+        partKey,
+        filename,
+        title,
+        progress: 0,
+        status: 'requesting',
+        mode: 'burned',
+        subtitleLabel,
+      },
+    ]);
+
+    try {
+      const job = await api.createBurnJob(ratingKey, partKey, subtitleStreamId);
+      setDownloads((current) => {
+        const pending = current.find((download) => download.id === pendingId);
+        if (!pending) return current;
+        return [
+          ...current.filter((download) => download.id !== pendingId && download.id !== job.id),
+          mergeJob(pending, job),
+        ];
       });
-
-      if (!response.ok) {
-        // Try to extract error message from JSON response
-        let errorMessage = 'Download failed';
-        try {
-          const errorData = await response.json();
-          errorMessage = errorData.error || errorMessage;
-        } catch {
-          // If JSON parsing fails, use status text
-          errorMessage = response.statusText || errorMessage;
-        }
-        throw new Error(errorMessage);
-      }
-
-      const contentLength = response.headers.get('content-length');
-      const total = contentLength ? parseInt(contentLength, 10) : 0;
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('Stream not available');
-      }
-
-      const chunks: Uint8Array[] = [];
-      let receivedLength = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) break;
-
-        chunks.push(value);
-        receivedLength += value.length;
-
-        // Update progress - only for non-bulk downloads with known size
-        // Bulk downloads (zips) don't have Content-Length, so we can't track progress
-        if (!isBulkDownload && total > 0) {
-          const progress = Math.round((receivedLength / total) * 100);
-          setDownloads((prev) =>
-            prev.map((d) =>
-              d.id === downloadId
-                ? { ...d, progress }
-                : d
-            )
-          );
-        }
-      }
-
-      // Create blob and download
-      const blob = new Blob(chunks as BlobPart[]);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
-      // Mark as completed
-      setDownloads((prev) =>
-        prev.map((d) =>
-          d.id === downloadId
-            ? { ...d, status: 'completed', progress: 100 }
-            : d
+    } catch (error) {
+      setDownloads((current) =>
+        current.map((download) =>
+          download.id === pendingId ? { ...download, status: 'failed', error: errorMessage(error) } : download
         )
       );
+    }
+  };
 
-      // Remove after 3 seconds
-      setTimeout(() => {
-        setDownloads((prev) => prev.filter((d) => d.id !== downloadId));
-      }, 3000);
-    } catch (error: any) {
-      // Mark as error
-      setDownloads((prev) =>
-        prev.map((d) =>
-          d.id === downloadId
-            ? { ...d, status: 'error', error: error.message }
-            : d
+  const downloadPrepared: DownloadContextType['downloadPrepared'] = async (id) => {
+    const download = downloads.find((item) => item.id === id);
+    if (!download?.jobId || download.status !== 'ready') return;
+    try {
+      const ticket = await api.createBurnJobTicket(download.jobId);
+      triggerBrowserDownload(ticket.url, ticket.filename || download.filename);
+      setDownloads((current) =>
+        current.map((item) => (item.id === id ? { ...item, error: undefined } : item))
+      );
+    } catch (error) {
+      setDownloads((current) =>
+        current.map((item) =>
+          item.id === id ? { ...item, error: errorMessage(error) } : item
         )
       );
+    }
+  };
 
-      // Remove after 5 seconds
-      setTimeout(() => {
-        setDownloads((prev) => prev.filter((d) => d.id !== downloadId));
-      }, 5000);
+  const cancelBurnJob: DownloadContextType['cancelBurnJob'] = async (id) => {
+    const download = downloads.find((item) => item.id === id);
+    if (!download?.jobId) {
+      setDownloads((current) => current.filter((item) => item.id !== id));
+      return;
+    }
+    try {
+      const job = await api.cancelBurnJob(download.jobId);
+      setDownloads((current) =>
+        current.map((item) => (item.id === id ? mergeJob(item, job) : item))
+      );
+    } catch (error) {
+      setDownloads((current) =>
+        current.map((item) =>
+          item.id === id ? { ...item, status: 'failed', error: errorMessage(error) } : item
+        )
+      );
     }
   };
 
   const removeDownload = (id: string) => {
-    setDownloads((prev) => prev.filter((d) => d.id !== id));
+    setDownloads((current) => current.filter((download) => download.id !== id));
   };
 
   return (
-    <DownloadContext.Provider value={{ downloads, startDownload, removeDownload }}>
+    <DownloadContext.Provider
+      value={{
+        downloads,
+        startOriginalDownload,
+        startBurnJob,
+        downloadPrepared,
+        cancelBurnJob,
+        removeDownload,
+      }}
+    >
       {children}
     </DownloadContext.Provider>
   );

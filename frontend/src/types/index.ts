@@ -48,19 +48,61 @@ export interface MediaPart {
   height: number;
   aspectRatio: number;
   videoCodec: string;
+  audioCodec?: string;
+  audioChannels?: number;
   videoResolution: string;
   container: string;
   videoFrameRate: string;
   Part: Part[];
 }
 
+export interface MediaStream {
+  id: number | string;
+  index?: number;
+  streamType?: number;
+  streamTypeId?: number;
+  codec?: string;
+  language?: string;
+  languageCode?: string;
+  title?: string;
+  displayTitle?: string;
+  forced?: boolean;
+  hearingImpaired?: boolean;
+  key?: string;
+  embedded?: boolean;
+  burnSupported?: boolean;
+}
+
 export interface Part {
   id: number;
   key: string;
   duration: number;
-  file: string;
+  file?: string;
   size: number;
   container: string;
+  Stream?: MediaStream[];
+}
+
+export interface DownloadTicket {
+  url: string;
+  expiresAt: string;
+  filename: string;
+}
+
+export type BurnJobStatus = 'queued' | 'preparing' | 'ready' | 'failed' | 'cancelled';
+
+export interface BurnJob {
+  id: string;
+  ratingKey: string;
+  partKey: string;
+  subtitleStreamId: number | string;
+  status: BurnJobStatus;
+  progress: number;
+  filename?: string;
+  size?: number;
+  error?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface PlexPin {

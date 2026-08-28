@@ -80,10 +80,32 @@ export const Login: React.FC = () => {
             return;
           }
 
+          if (err.response?.status === 401) {
+            clearInterval(pollInterval);
+            setError(err.response?.data?.error || 'Plex authorization expired. Please start sign-in again.');
+            setIsPlexLoading(false);
+            return;
+          }
+
           // Check if this is a 500 (server error) - likely machine ID not configured
           if (err.response?.status === 500) {
             clearInterval(pollInterval);
             setError(err.response?.data?.error || 'Server error. Please contact the administrator.');
+            setIsPlexLoading(false);
+            return;
+          }
+
+          if (err.response?.status === 429) {
+            clearInterval(pollInterval);
+            const retryAfter = Number(err.response.headers?.['retry-after']);
+            const waitMinutes = Number.isFinite(retryAfter)
+              ? Math.max(1, Math.ceil(retryAfter / 60))
+              : undefined;
+            setError(
+              waitMinutes
+                ? `Too many Plex sign-in checks. Try again in about ${waitMinutes} minute${waitMinutes === 1 ? '' : 's'}.`
+                : 'Too many Plex sign-in checks. Try again after the rate limit resets.'
+            );
             setIsPlexLoading(false);
             return;
           }

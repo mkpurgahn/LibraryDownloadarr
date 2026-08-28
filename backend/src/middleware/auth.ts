@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { DatabaseService } from '../models/database';
 import { logger } from '../utils/logger';
+import { ensurePlexMembership, MembershipError } from '../services/membershipService';
+import { PlexService, plexService } from '../services/plexService';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -16,7 +18,7 @@ export interface AuthRequest extends Request {
   };
 }
 
-export const createAuthMiddleware = (db: DatabaseService) => {
+export const createAuthMiddleware = (db: DatabaseService, service: PlexService = plexService) => {
   return async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const authHeader = req.headers.authorization;
@@ -41,7 +43,7 @@ export const createAuthMiddleware = (db: DatabaseService) => {
         };
         req.authSession = {
           id: session.id,
-          token: session.token,
+          token,
         };
         return next();
       }
@@ -49,22 +51,25 @@ export const createAuthMiddleware = (db: DatabaseService) => {
       // Try plex user
       const plexUser = db.getPlexUserById(session.userId);
       if (plexUser) {
+        const activeUser = await ensurePlexMembership(db, plexUser.id, false, service);
         req.user = {
-          id: plexUser.id,
-          username: plexUser.username,
-          isAdmin: plexUser.isAdmin,
-          plexToken: plexUser.plexToken,
-          serverUrl: plexUser.serverUrl,
+          id: activeUser!.id,
+          username: activeUser!.username,
+          isAdmin: activeUser!.isAdmin,
+          plexToken: activeUser!.plexToken,
         };
         req.authSession = {
           id: session.id,
-          token: session.token,
+          token,
         };
         return next();
       }
 
       return res.status(401).json({ error: 'User not found' });
     } catch (error) {
+      if (error instanceof MembershipError) {
+        return res.status(403).json({ error: error.message, code: 'PLEX_ACCESS_REVOKED' });
+      }
       logger.error('Authentication error', { error });
       return res.status(500).json({ error: 'Authentication failed' });
     }

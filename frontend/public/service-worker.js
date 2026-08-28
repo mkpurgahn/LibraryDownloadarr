@@ -1,4 +1,4 @@
-const CACHE_NAME = 'librarydownloadarr-v2';
+const CACHE_NAME = 'librarydownloadarr-v4';
 const urlsToCache = [
   '/',
   '/index.html',
@@ -30,15 +30,9 @@ self.addEventListener('activate', (event) => {
 
 // Fetch with network-first strategy
 self.addEventListener('fetch', (event) => {
-  // Skip caching for download endpoints (they're too large and shouldn't be cached)
   const url = new URL(event.request.url);
-  const isDownloadRequest = url.pathname.includes('/download') ||
-                           url.pathname.includes('/season/') ||
-                           url.pathname.includes('/album/');
-
-  // For download requests, just fetch without caching
-  if (isDownloadRequest) {
-    event.respondWith(fetch(event.request));
+  const isApiRequest = url.origin === self.location.origin && url.pathname.startsWith('/api/');
+  if (event.request.method !== 'GET' || isApiRequest || url.origin !== self.location.origin) {
     return;
   }
 
@@ -76,9 +70,6 @@ self.addEventListener('fetch', (event) => {
 
         return response;
       })
-      .catch(() => {
-        // Fallback to cache if network fails
-        return caches.match(event.request);
-      })
+      .catch(async () => (await caches.match(event.request)) || Response.error())
   );
 });

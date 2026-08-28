@@ -1,24 +1,50 @@
 services:
   librarydownloadarr:
     build: .
+    image: librarydownloadarr:local
     container_name: librarydownloadarr
     restart: unless-stopped
-    ports:
-      - "5069:5069"
+    # Nginx Proxy Manager reaches librarydownloadarr:5069 on the proxy network.
+    # Uncomment only for host-local diagnostics:
+    # ports:
+    #   - "127.0.0.1:5069:5069"
     environment:
       # Server configuration
       - PORT=5069
       - LOG_LEVEL=debug
+      # One trusted hop for Nginx Proxy Manager. Use 0 when exposing the app directly.
+      - TRUST_PROXY_HOPS=1
+      - PLEX_POLL_RATE_LIMIT=75
       # Database path (persisted to volume)
       - DATABASE_PATH=/app/data/librarydownloadarr.db
+      # Required for authenticated encryption of Plex tokens. Generate once and keep stable.
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:?set TOKEN_ENCRYPTION_KEY in .env}
+      # Container paths containing Plex media. Comma-separate multiple roots.
+      # Match the path Plex reports in Part.file.
+      - MEDIA_ROOTS=/data/media
+      - BURN_CACHE_DIR=/app/cache
+      - DOWNLOAD_TICKET_TTL_SECONDS=86400
+      - PLEX_MEMBERSHIP_TTL_SECONDS=300
+      - PLEX_ALLOW_INSECURE_TLS=false
+      - FFMPEG_PATH=/usr/bin/ffmpeg
+      - FFMPEG_VIDEO_ENCODER=${FFMPEG_VIDEO_ENCODER:-h264_vaapi}
+      - FFMPEG_QSV_DEVICE=/dev/dri/renderD128
+      - BURN_GLOBAL_CONCURRENCY=1
+      - BURN_PER_USER_CONCURRENCY=1
+      - BURN_ARTIFACT_TTL_HOURS=168
       # Timezone configuration (set to your local timezone)
       - TZ=America/New_York
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - /mnt/cache/appdata/librarydownloadarr/data:/app/data
+      - /mnt/cache/appdata/librarydownloadarr/logs:/app/logs
+      - /mnt/cache/appdata/librarydownloadarr/cache:/app/cache
+      - /mnt/user/data/media:/data/media:ro
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
     networks:
-      - librarydownloadarr
+      - proxy
 
 networks:
-  librarydownloadarr:
-    driver: bridge
+  proxy:
+    external: true
+    name: proxy

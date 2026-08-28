@@ -36,11 +36,11 @@ export const createSettingsRouter = (db: DatabaseService) => {
     try {
       const { plexUrl, plexToken } = req.body;
 
-      if (plexUrl) {
-        db.setSetting('plex_url', plexUrl);
+      if (plexUrl !== undefined && (typeof plexUrl !== 'string' || !/^https?:\/\//.test(plexUrl) || plexUrl.length > 2048)) {
+        return res.status(400).json({ error: 'A valid http(s) Plex URL is required' });
       }
-      if (plexToken) {
-        db.setSetting('plex_token', plexToken);
+      if (plexToken !== undefined && (typeof plexToken !== 'string' || plexToken.length < 8 || plexToken.length > 1024)) {
+        return res.status(400).json({ error: 'A valid Plex token is required' });
       }
 
       // Update Plex service connection and auto-fetch server identity
@@ -49,13 +49,14 @@ export const createSettingsRouter = (db: DatabaseService) => {
         const token = plexToken || db.getSetting('plex_token') || '';
 
         if (url && token) {
-          plexService.setServerConnection(url, token);
-
           // Auto-fetch machine ID and server name
           try {
-            const serverInfo = await plexService.getServerIdentity(token);
+            const client = plexService.createServerClient(url, token);
+            const serverInfo = await client.getServerIdentity();
 
             if (serverInfo?.machineIdentifier) {
+              db.setSetting('plex_url', url);
+              db.setSetting('plex_token', token);
               db.setSetting('plex_machine_id', serverInfo.machineIdentifier);
               db.setSetting('plex_server_name', serverInfo.friendlyName);
 
@@ -63,10 +64,11 @@ export const createSettingsRouter = (db: DatabaseService) => {
                 machineId: serverInfo.machineIdentifier,
                 serverName: serverInfo.friendlyName
               });
+            } else {
+              return res.status(400).json({ error: 'Plex server identity could not be verified' });
             }
           } catch (error) {
-            logger.warn('Failed to auto-fetch server identity', { error });
-            // Don't fail the settings save if identity fetch fails
+            return res.status(400).json({ error: 'Plex server identity could not be verified' });
           }
         }
       }
@@ -90,7 +92,10 @@ export const createSettingsRouter = (db: DatabaseService) => {
         const isConnected = await plexService.testConnectionWithCredentials(plexUrl, plexToken);
         return res.json({ connected: isConnected });
       } else {
-        const isConnected = await plexService.testConnection();
+        const url = db.getSetting('plex_url');
+        const token = db.getSetting('plex_token');
+        const isConnected = Boolean(url && token) &&
+          await plexService.testConnectionWithCredentials(url!, token!);
         return res.json({ connected: isConnected });
       }
     } catch (error) {

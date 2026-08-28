@@ -27,7 +27,7 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 const App: React.FC = () => {
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const { checkAuth, token } = useAuthStore();
+  const { checkAuth, token, user } = useAuthStore();
 
   useEffect(() => {
     initialize();
@@ -58,81 +58,87 @@ const App: React.FC = () => {
     );
   }
 
+  const routes = (
+    <Routes>
+      {setupRequired ? (
+        <>
+          <Route path="/setup" element={<Setup />} />
+          <Route path="*" element={<Navigate to="/setup" replace />} />
+        </>
+      ) : (
+        <>
+          <Route path="/login" element={<Login />} />
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <Dashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/library/:libraryKey"
+            element={
+              <ProtectedRoute>
+                <LibraryView />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/media/:ratingKey"
+            element={
+              <ProtectedRoute>
+                <MediaDetail />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute>
+                <Settings />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/search"
+            element={
+              <ProtectedRoute>
+                <SearchResults />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/download-history"
+            element={
+              <ProtectedRoute>
+                <DownloadHistory />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/logs"
+            element={
+              <ProtectedRoute>
+                <Logs />
+              </ProtectedRoute>
+            }
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </>
+      )}
+    </Routes>
+  );
+
   return (
-    <DownloadProvider>
-      <BrowserRouter>
-        <DownloadManager />
-        <Routes>
-          {setupRequired ? (
-            <>
-              <Route path="/setup" element={<Setup />} />
-              <Route path="*" element={<Navigate to="/setup" replace />} />
-            </>
-          ) : (
-            <>
-              <Route path="/login" element={<Login />} />
-            <Route
-              path="/"
-              element={
-                <ProtectedRoute>
-                  <Dashboard />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/library/:libraryKey"
-              element={
-                <ProtectedRoute>
-                  <LibraryView />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/media/:ratingKey"
-              element={
-                <ProtectedRoute>
-                  <MediaDetail />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/settings"
-              element={
-                <ProtectedRoute>
-                  <Settings />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/search"
-              element={
-                <ProtectedRoute>
-                  <SearchResults />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/admin/download-history"
-              element={
-                <ProtectedRoute>
-                  <DownloadHistory />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/admin/logs"
-              element={
-                <ProtectedRoute>
-                  <Logs />
-                </ProtectedRoute>
-              }
-            />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </>
-        )}
-      </Routes>
+    <BrowserRouter>
+      {token && user ? (
+        <DownloadProvider key={user.id} userId={user.id}>
+          <DownloadManager />
+          {routes}
+        </DownloadProvider>
+      ) : routes}
     </BrowserRouter>
-    </DownloadProvider>
   );
 };
 

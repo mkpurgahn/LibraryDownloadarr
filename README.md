@@ -70,25 +70,41 @@ version: '3.8'
 
 services:
   librarydownloadarr:
-    image: ghcr.io/kikootwo/librarydownloadarr:latest
+    build: .
+    image: librarydownloadarr:local
     container_name: librarydownloadarr
     restart: unless-stopped
-    ports:
-      - "5069:5069"
+    # NPM reaches librarydownloadarr:5069 through the external proxy network.
+    # Optional host-local diagnostics:
+    # ports:
+    #   - "127.0.0.1:5069:5069"
     environment:
       - PORT=5069
       - LOG_LEVEL=info
+      - TRUST_PROXY_HOPS=1
+      - PLEX_POLL_RATE_LIMIT=75
       - DATABASE_PATH=/app/data/librarydownloadarr.db
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY}
+      # Match the path Plex reports in Part.file.
+      - MEDIA_ROOTS=/data/media
+      - BURN_CACHE_DIR=/app/cache
+      - FFMPEG_VIDEO_ENCODER=h264_vaapi
+      - FFMPEG_QSV_DEVICE=/dev/dri/renderD128
       - TZ=America/New_York  # Change to your timezone
     volumes:
-      - ./data:/app/data      # Database and application data
-      - ./logs:/app/logs      # Application logs
+      - /mnt/cache/appdata/librarydownloadarr/data:/app/data
+      - /mnt/cache/appdata/librarydownloadarr/logs:/app/logs
+      - /mnt/cache/appdata/librarydownloadarr/cache:/app/cache
+      - /mnt/user/data/media:/data/media:ro
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
     networks:
-      - librarydownloadarr
+      - proxy
 
 networks:
-  librarydownloadarr:
-    driver: bridge
+  proxy:
+    external: true
+    name: proxy
 ```
 
 **Start the application:**
@@ -97,7 +113,10 @@ networks:
 docker-compose up -d
 ```
 
-**Access the application at:** `http://localhost:5069`
+In Nginx Proxy Manager, set the upstream hostname to `librarydownloadarr` and
+the upstream port to `5069`. Use HTTP between NPM and the container. If your
+NPM installation uses `proxy_net` instead, change the external network name in
+Compose.
 
 ### Method 2: Docker Run
 
@@ -107,15 +126,29 @@ If you prefer using `docker run` directly:
 docker run -d \
   --name librarydownloadarr \
   --restart unless-stopped \
-  -p 5069:5069 \
+  --network proxy \
+  --device /dev/dri/renderD128:/dev/dri/renderD128 \
   -e PORT=5069 \
   -e LOG_LEVEL=info \
+  -e TRUST_PROXY_HOPS=1 \
+  -e PLEX_POLL_RATE_LIMIT=75 \
   -e DATABASE_PATH=/app/data/librarydownloadarr.db \
+  -e TOKEN_ENCRYPTION_KEY="$TOKEN_ENCRYPTION_KEY" \
+  -e MEDIA_ROOTS=/data/media \
+  -e BURN_CACHE_DIR=/app/cache \
+  -e FFMPEG_VIDEO_ENCODER=h264_vaapi \
+  -e FFMPEG_QSV_DEVICE=/dev/dri/renderD128 \
   -e TZ=America/New_York \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  ghcr.io/kikootwo/librarydownloadarr:latest
+  -v /mnt/cache/appdata/librarydownloadarr/data:/app/data \
+  -v /mnt/cache/appdata/librarydownloadarr/logs:/app/logs \
+  -v /mnt/cache/appdata/librarydownloadarr/cache:/app/cache \
+  -v /mnt/user/data/media:/data/media:ro \
+  librarydownloadarr:local
 ```
+
+The container-side media mount path must match the path Plex reports in
+`Part.file`. This Unraid Plex container reports `/data/media/...`, so the
+download portal mounts `/mnt/user/data/media` at `/data/media` too.
 
 ### Method 3: Build from Source
 
@@ -123,7 +156,7 @@ If you want to build the image yourself:
 
 ```bash
 # Clone the repository
-git clone https://github.com/kikootwo/LibraryDownloadarr.git
+git clone https://github.com/mkpurgahn/LibraryDownloadarr.git
 cd LibraryDownloadarr
 
 # Build and start with Docker Compose
@@ -137,9 +170,29 @@ Customize your deployment with environment variables:
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `PORT` | Application port | `5069` | `3000` |
+| `TRUST_PROXY_HOPS` | Exact number of trusted reverse-proxy hops; keep `0` for direct deployments | `0` | `1` for Nginx Proxy Manager |
+| `PLEX_POLL_RATE_LIMIT` | Plex PIN authentication checks allowed per 15 minutes | `75` | `75` |
 | `LOG_LEVEL` | Logging verbosity | `info` | `debug`, `warn`, `error` |
 | `DATABASE_PATH` | SQLite database location | `/app/data/librarydownloadarr.db` | `/data/db.sqlite` |
+| `TOKEN_ENCRYPTION_KEY` | Required stable secret used to encrypt Plex tokens; minimum 32 characters | none | output of `openssl rand -base64 48` |
+| `MEDIA_ROOTS` | Comma-separated local roots allowed for original media resolution | none | `/data/media,/archive` |
+| `BURN_CACHE_DIR` | Writable derivative and subtitle cache | `/app/data/burn-cache` | `/app/cache` |
+| `DOWNLOAD_TICKET_TTL_SECONDS` | Scoped original/derivative ticket lifetime | `86400` | `43200` |
+| `PLEX_MEMBERSHIP_TTL_SECONDS` | Maximum interval between active-membership checks | `300` | `120` |
+| `PLEX_ALLOW_INSECURE_TLS` | Explicit opt-in for self-signed/local Plex TLS | `false` | `true` |
+| `FFMPEG_PATH` | FFmpeg executable | `ffmpeg` | `/usr/bin/ffmpeg` |
+| `FFMPEG_VIDEO_ENCODER` | Burn output encoder | `libx264` | `h264_vaapi` |
+| `FFMPEG_QSV_DEVICE` | Intel QSV render device | `/dev/dri/renderD128` | `/dev/dri/renderD128` |
+| `BURN_GLOBAL_CONCURRENCY` | Maximum simultaneous burns | `1` | `2` |
+| `BURN_PER_USER_CONCURRENCY` | Maximum simultaneous burns per user | `1` | `1` |
+| `BURN_ARTIFACT_TTL_HOURS` | Completed derivative retention | `168` | `72` |
 | `TZ` | Timezone for logs and dates | `America/New_York` | `Europe/London`, `Asia/Tokyo` |
+
+`TOKEN_ENCRYPTION_KEY` is a required migration secret. On first startup after
+upgrading, existing plaintext Plex tokens and session tokens are migrated in
+place: Plex tokens are encrypted with AES-256-GCM and sessions are stored only
+as SHA-256 token hashes. Keep the secret stable. Startup fails rather than
+discarding existing users if it is missing or too short.
 
 ### Initial Setup
 
@@ -161,7 +214,15 @@ Customize your deployment with environment variables:
 
 ### Reverse Proxy Setup (Production)
 
-For production deployments, use a reverse proxy with HTTPS:
+For production deployments, use a reverse proxy with HTTPS. The application
+port must not be directly exposed to the internet; only the reverse proxy
+should be able to reach it. The Compose example attaches LibraryDownloadarr to
+the existing external `proxy` network and publishes no host port. Configure
+Nginx Proxy Manager with upstream `librarydownloadarr:5069`. It sets
+`TRUST_PROXY_HOPS=1` for that one proxy hop so Express and
+`express-rate-limit` safely use the forwarded client address.
+Never enable proxy trust on a directly exposed deployment, because clients
+could spoof forwarding headers.
 
 #### Nginx Example
 
@@ -228,32 +289,81 @@ LibraryDownloadarr uses a dual authentication system:
 - Downloads use the user's own Plex token
 - Shared library restrictions apply
 
+Membership is checked against the configured exact Plex machine identifier.
+There is no fallback to another server in the user's Plex account. Membership
+is revalidated on a bounded TTL and whenever a download ticket or subtitle burn
+job is created. The local admin password remains available for setup and
+recovery.
+
 ### Download Process
 
 1. **User browses libraries** available to their Plex account
 2. **Search or browse** for desired media
 3. **Click download** on a movie, episode, or track
-4. **File streams through LibraryDownloadarr** to the user's browser
-5. **Download recorded** in history (visible to admins)
+4. **A scoped ticket is created** for the exact user, ratingKey, Part, and file
+5. **The local original file streams with HTTP Range support**, including
+   `HEAD`, `200`, `206`, and `416`, so browser retries can resume safely
+6. **Download recorded** in history (visible to admins)
+
+Tickets are cryptographically random, stored only as hashes, expire after 24
+hours by default, and do not grant API or session access. Originals are never
+modified. `Part.file` is resolved with the Plex owner token only after the
+user's token proves access, canonicalized with `realpath`, and restricted to
+`MEDIA_ROOTS`.
+
+Selecting no subtitle always returns the untouched original immediately.
+Selecting an authorized subtitle creates an asynchronous burn job. Text
+subtitles use libass; supported bitmap subtitles use FFmpeg overlay. Outputs
+default to H.264 + AAC MP4 and are atomically published into `BURN_CACHE_DIR`.
+For Unraid Intel UHD 730, mount `/dev/dri` and set
+`FFMPEG_VIDEO_ENCODER=h264_vaapi`; development should use `libx264`. The image
+also supports `h264_qsv`, but VAAPI is the verified path for this Unraid host.
+
+Season and album ZIP downloads are no longer supported because streamed
+archives cannot resume safely. Download individual episodes or tracks through
+scoped tickets instead.
+
+### Download and Burn API
+
+All creation and job-management endpoints require the normal Bearer session
+header. The byte route accepts only its scoped ticket.
+
+| Method | Endpoint | Result |
+|--------|----------|--------|
+| `POST` | `/api/media/:ratingKey/download-ticket` with `{ partKey }` | `{ url, expiresAt, filename }` |
+| `POST` | `/api/media/:ratingKey/burn-jobs` with `{ partKey, subtitleStreamId }` | `202 { job }` |
+| `GET` | `/api/media/burn-jobs/:jobId` | `{ job }` |
+| `DELETE` | `/api/media/burn-jobs/:jobId` | cancellation result |
+| `POST` | `/api/media/burn-jobs/:jobId/ticket` | `{ url, expiresAt, filename }` |
+| `GET` / `HEAD` | `/api/media/downloads/:ticket` | original or derivative bytes with Range semantics |
+| `GET` | `/api/media/season/:seasonRatingKey/download` | `410`; download individual episodes |
+| `GET` | `/api/media/album/:albumRatingKey/download` | `410`; download individual tracks |
+
+Burn job statuses are `queued`, `preparing`, `ready`, `failed`, and
+`cancelled`; progress is reported from 0 to 100 with an error, filename, and
+size when applicable. Media metadata includes each Part's authorized subtitle
+tracks with stable ID/index, language, display title, codec, forced/SDH flags,
+and embedded/external classification.
 
 ### Data Storage
 
 - **Database**: SQLite database stores users, sessions, settings, and download history
 - **Logs**: Application logs written to `logs/` directory
-- **No Media Storage**: LibraryDownloadarr doesn't store media files—it streams them directly from your Plex server
+- **Read-only Media Access**: Original media is mounted read-only and is never deleted or modified
+- **Derivative Cache**: Optional subtitle-burned MP4 files are stored only in the configured writable cache and cleaned up by TTL
 
 ### System Requirements
 
 **Minimal:**
 - CPU: 1 core
 - RAM: 512 MB
-- Storage: 100 MB (plus space for logs and database)
+- Storage: 100 MB plus logs and enough cache for one generated MP4
 - Network: Access to Plex server
 
 **Recommended:**
 - CPU: 2+ cores (for concurrent downloads)
 - RAM: 1 GB
-- Storage: 1 GB
+- Storage: enough cache for the configured burn concurrency and retention TTL
 - Network: Good bandwidth between LibraryDownloadarr and Plex server
 
 ---

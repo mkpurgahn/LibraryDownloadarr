@@ -1,894 +1,547 @@
-import { Router } from 'express';
-import { DatabaseService } from '../models/database';
-import { plexService } from '../services/plexService';
-import { logger } from '../utils/logger';
-import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
 import axios from 'axios';
+import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import https from 'https';
+import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
-import { createZipStream, ZipFileEntry } from '../utils/zipUtils';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
+import { config } from '../config';
+import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
+import { BurnJob, DatabaseService } from '../models/database';
+import { buildBurnCommand, BurnManager, burnCacheKey, classifySubtitle } from '../services/burnService';
+import { streamLocalFile } from '../services/downloadService';
+import { ensurePlexMembership, MembershipError } from '../services/membershipService';
+import {
+  canonicalizeMediaPath,
+  ensureAccessiblePart,
+  fingerprintContents,
+  fingerprintFile,
+  resolveAuthorizedPart,
+} from '../services/mediaAccess';
+import { sanitizeMedia, sanitizeMediaList } from '../services/mediaSanitizer';
+import { PlexServerClient, PlexService, plexService } from '../services/plexService';
+import { logger } from '../utils/logger';
+import { readSessionCookie } from '../utils/sessionCookie';
 
-// HTTPS agent that bypasses SSL certificate validation for local Plex servers
-// This is necessary when connecting to Plex servers with self-signed certificates
-// or when using local IPs with plex.direct certificates
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false
+interface MediaRouterDependencies {
+  plex?: PlexService;
+  burnManager?: BurnManager;
+}
+
+const validRatingKey = (value: string): boolean => /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+const validPartKey = (value: unknown): value is string =>
+  typeof value === 'string' && value.length <= 512 && /^\/library\/parts\/[^?#]+$/.test(value);
+const validStreamId = (value: unknown): boolean =>
+  (typeof value === 'string' || typeof value === 'number') && /^[A-Za-z0-9._:-]{1,128}$/.test(String(value));
+const validId = (value: string): boolean => /^[A-Za-z0-9_-]{10,128}$/.test(value);
+
+const publicJob = (job: BurnJob): object => ({
+  id: job.id,
+  ratingKey: job.ratingKey,
+  partKey: job.partKey,
+  subtitleStreamId: job.subtitleStreamId,
+  status: job.status,
+  progress: job.progress,
+  error: job.error || null,
+  filename: job.filename || null,
+  size: job.size ?? null,
+  createdAt: new Date(job.createdAt).toISOString(),
+  updatedAt: new Date(job.updatedAt).toISOString(),
 });
 
-export const createMediaRouter = (db: DatabaseService) => {
+const formattedMediaTitle = (metadata: any): string => {
+  const library = metadata.librarySectionTitle || 'Unknown Library';
+  if (metadata.type === 'episode') {
+    return `${library} - ${metadata.grandparentTitle || 'Unknown Show'} - ${metadata.parentTitle || 'Unknown Season'} - E${String(metadata.index || 0).padStart(2, '0')} - ${metadata.title || 'Unknown Episode'}`;
+  }
+  if (metadata.type === 'track') {
+    return `${library} - ${metadata.parentTitle || 'Unknown Album'} - ${metadata.title || 'Unknown Track'}`;
+  }
+  return `${library} - ${metadata.title || 'Unknown Media'}`;
+};
+
+export const createMediaRouter = (
+  db: DatabaseService,
+  dependencies: MediaRouterDependencies = {}
+) => {
   const router = Router();
-  const authMiddleware = createAuthMiddleware(db);
+  const service = dependencies.plex || plexService;
+  const burnManager = dependencies.burnManager || new BurnManager(db);
+  const authMiddleware = createAuthMiddleware(db, service);
+  const creationLimiter = rateLimit({
+    windowMs: config.rateLimit.windowMs,
+    limit: config.rateLimit.creationMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
-  // Helper function to format media title for download logs
-  const formatMediaTitle = (metadata: any, libraryTitle?: string): string => {
-    const type = metadata.type;
-    const library = libraryTitle || 'Unknown Library';
-
-    if (type === 'episode') {
-      // Format: "{Library} - {ShowTitle} - {SeasonTitle} - E{##} - {EpisodeName}"
-      const showName = metadata.grandparentTitle || 'Unknown Show';
-      const seasonTitle = metadata.parentTitle || 'Unknown Season';
-      const episodeNum = metadata.index ? String(metadata.index).padStart(2, '0') : '00';
-      const episodeTitle = metadata.title || 'Unknown Episode';
-      return `${library} - ${showName} - ${seasonTitle} - E${episodeNum} - ${episodeTitle}`;
+  const credentials = (req: AuthRequest): { user: PlexServerClient; owner: PlexServerClient; serverUrl: string } => {
+    const serverUrl = db.getSetting('plex_url');
+    const ownerToken = db.getSetting('plex_token');
+    const userToken = req.user?.plexToken || (req.user?.isAdmin ? ownerToken : undefined);
+    if (!serverUrl || !ownerToken || !userToken) {
+      throw new Error('Plex server and owner token must be configured');
     }
-
-    if (type === 'track') {
-      // Format: "{Library} - {AlbumTitle} - {TrackName}"
-      const albumName = metadata.parentTitle || 'Unknown Album';
-      const trackTitle = metadata.title || 'Unknown Track';
-      return `${library} - ${albumName} - ${trackTitle}`;
-    }
-
-    if (type === 'movie') {
-      // Format: "{Library} - {MovieTitle}"
-      return `${library} - ${metadata.title || 'Unknown Movie'}`;
-    }
-
-    // For seasons, albums, or anything else: "{Library} - {Title}"
-    return `${library} - ${metadata.title || 'Unknown Media'}`;
-  };
-
-  // Helper function to get user credentials with proper fallback
-  // SECURITY: Always use admin's server URL, never user-specific URLs
-  const getUserCredentials = (req: AuthRequest): { token: string | undefined; serverUrl: string; error?: string } => {
-    const userToken = req.user?.plexToken;
-    const isAdmin = req.user?.isAdmin;
-    const adminToken = db.getSetting('plex_token') || undefined;
-    const adminUrl = db.getSetting('plex_url') || '';
-
-    // All users (including admins) must use admin's configured server URL
-    // This prevents users from using the app to download from arbitrary Plex servers
-    if (!adminUrl) {
-      return {
-        token: undefined,
-        serverUrl: '',
-        error: 'Plex server not configured. Please contact administrator.'
-      };
-    }
-
-    // If user has their own token, use it with admin's server URL
-    if (userToken) {
-      return { token: userToken, serverUrl: adminUrl };
-    }
-
-    // Admin can fall back to admin token (for setup/testing)
-    if (isAdmin && adminToken) {
-      return { token: adminToken, serverUrl: adminUrl };
-    }
-
-    // User without token = no access
     return {
-      token: undefined,
-      serverUrl: '',
-      error: 'Access denied. Please log out and log in again to configure your Plex access.'
+      user: service.createServerClient(serverUrl, userToken),
+      owner: service.createServerClient(serverUrl, ownerToken),
+      serverUrl,
     };
   };
 
-  // Get recently added media
-  router.get('/recently-added', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 20;
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(500).json({ error: 'Plex server not configured' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-      const media = await plexService.getRecentlyAdded(token, limit);
-      return res.json({ media });
-    } catch (error) {
-      logger.error('Failed to get recently added', { error });
-      return res.status(500).json({ error: 'Failed to get recently added media' });
+  const forceMembership = async (req: AuthRequest): Promise<void> => {
+    if (!req.user?.isAdmin) {
+      const refreshed = await ensurePlexMembership(db, req.user!.id, true, service);
+      req.user!.plexToken = refreshed!.plexToken;
     }
-  });
-
-  // Get download history (user's own downloads)
-  router.get('/download-history', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
-      const history = db.getDownloadHistory(req.user!.id, limit);
-      return res.json({ history });
-    } catch (error) {
-      logger.error('Failed to get download history', { error });
-      return res.status(500).json({ error: 'Failed to get download history' });
-    }
-  });
-
-  // Get all download history (admin only - shows all users' downloads)
-  router.get('/download-history/all', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      // Only admins can view all downloads
-      if (!req.user?.isAdmin) {
-        return res.status(403).json({ error: 'Admin access required' });
-      }
-
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
-      const history = db.getAllDownloadHistory(limit);
-      return res.json({ history });
-    } catch (error) {
-      logger.error('Failed to get all download history', { error });
-      return res.status(500).json({ error: 'Failed to get all download history' });
-    }
-  });
-
-  // Get download stats (global for all users)
-  router.get('/download-stats', authMiddleware, async (_req: AuthRequest, res) => {
-    try {
-      // Get stats for all users (don't pass userId)
-      const stats = db.getDownloadStats();
-      return res.json({ stats });
-    } catch (error) {
-      logger.error('Failed to get download stats', { error });
-      return res.status(500).json({ error: 'Failed to get download stats' });
-    }
-  });
-
-  // Helper function to calculate relevance score
-  const calculateRelevanceScore = (item: any, query: string): number => {
-    const queryLower = query.toLowerCase();
-    const title = (item.title || '').toLowerCase();
-    const originalTitle = (item.originalTitle || '').toLowerCase();
-    const year = item.year?.toString() || '';
-    const summary = (item.summary || '').toLowerCase();
-
-    let score = 0;
-
-    // Exact title match: highest score
-    if (title === queryLower) {
-      score += 100;
-    }
-    // Title starts with query
-    else if (title.startsWith(queryLower)) {
-      score += 80;
-    }
-    // Title contains query
-    else if (title.includes(queryLower)) {
-      score += 60;
-    }
-
-    // Original title matches
-    if (originalTitle.includes(queryLower)) {
-      score += 30;
-    }
-
-    // Year matches
-    if (year === query) {
-      score += 50;
-    }
-
-    // Summary contains query
-    if (summary.includes(queryLower)) {
-      score += 20;
-    }
-
-    // Boost movies and shows over other types
-    if (item.type === 'movie' || item.type === 'show') {
-      score += 10;
-    }
-
-    // Boost recently added items slightly
-    if (item.addedAt) {
-      const daysOld = (Date.now() - item.addedAt * 1000) / (1000 * 60 * 60 * 24);
-      if (daysOld < 30) {
-        score += 5;
-      }
-    }
-
-    return score;
   };
 
-  // Search media
-  router.get('/search', authMiddleware, async (req: AuthRequest, res) => {
+  const validateTicketAccess = async (ticket: BurnJob | {
+    userId: string;
+    ratingKey: string;
+    partKey: string;
+  }): Promise<void> => {
+    if (db.getAdminUserById(ticket.userId)) return;
+    const user = await ensurePlexMembership(db, ticket.userId, true, service);
+    const serverUrl = db.getSetting('plex_url');
+    if (!user?.plexToken || !serverUrl) {
+      throw new MembershipError('Plex sign-in must be renewed');
+    }
+    await ensureAccessiblePart(
+      ticket.ratingKey,
+      ticket.partKey,
+      service.createServerClient(serverUrl, user.plexToken)
+    );
+  };
+
+  const prepareExternalSubtitle = async (
+    subtitle: NonNullable<Awaited<ReturnType<typeof resolveAuthorizedPart>>['subtitle']>,
+    owner: PlexServerClient
+  ): Promise<void> => {
+    if (!subtitle.external || subtitle.file) return;
+    if (!subtitle.key || !subtitle.key.startsWith('/')) {
+      throw new Error('External subtitle track has no resolvable Plex resource');
+    }
+    await fsPromises.mkdir(config.burn.cacheDir, { recursive: true });
+    const extension = subtitle.codec === 'subrip' ? 'srt' : subtitle.codec.replace(/[^a-z0-9]/gi, '') || 'sub';
+    const workPath = path.join(
+      config.burn.cacheDir,
+      `.subtitle-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.partial`
+    );
+    const maximumBytes = 50 * 1024 * 1024;
     try {
-      const { q } = req.query;
-      if (!q || typeof q !== 'string') {
-        return res.status(400).json({ error: 'Search query is required' });
-      }
-
-      if (q.trim().length < 2) {
-        return res.status(400).json({ error: 'Search query must be at least 2 characters' });
-      }
-
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        logger.warn('Search access denied', { userId: req.user?.id, error });
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        logger.error('Search failed: Plex not configured', { userId: req.user?.id });
-        return res.status(500).json({ error: 'Plex server not configured' });
-      }
-
-      logger.debug('Performing search', { query: q, userId: req.user?.id });
-
-      plexService.setServerConnection(serverUrl, token);
-      let results = await plexService.search(q, token);
-
-      // Ensure results is an array
-      if (!Array.isArray(results)) {
-        logger.warn('Search returned non-array results', { results });
-        results = [];
-      }
-
-      // Calculate relevance scores and sort by them
-      const scoredResults = results.map(item => ({
-        ...item,
-        _relevanceScore: calculateRelevanceScore(item, q)
-      }));
-
-      // Sort by relevance score (descending)
-      scoredResults.sort((a, b) => b._relevanceScore - a._relevanceScore);
-
-      // Remove the score field before sending to client
-      const finalResults = scoredResults.map(({ _relevanceScore, ...item }) => item);
-
-      logger.debug('Search completed', { query: q, resultCount: finalResults.length });
-
-      return res.json({ results: finalResults });
-    } catch (error: any) {
-      logger.error('Search failed', {
-        error: error.message,
-        stack: error.stack,
-        query: req.query.q,
-        userId: req.user?.id
+      const resource = owner.getResourceRequest(subtitle.key);
+      const response = await axios.get(resource.url, {
+        headers: resource.headers,
+        maxRedirects: resource.maxRedirects,
+        responseType: 'stream',
+        httpsAgent: new https.Agent({ rejectUnauthorized: !config.plex.allowInsecureTls }),
       });
-      return res.status(500).json({
-        error: 'Search failed',
-        details: error.message
+      const declaredLength = Number(response.headers['content-length']);
+      if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+        response.data.destroy();
+        throw new Error('External subtitle exceeds the 50 MiB limit');
+      }
+      let receivedBytes = 0;
+      const limiter = new Transform({
+        transform(chunk, _encoding, callback) {
+          receivedBytes += chunk.length;
+          callback(
+            receivedBytes > maximumBytes
+              ? new Error('External subtitle exceeds the 50 MiB limit')
+              : null,
+            chunk
+          );
+        },
       });
-    }
-  });
-
-  // Get media metadata
-  router.get('/:ratingKey', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const { ratingKey } = req.params;
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
+      await pipeline(response.data, limiter, fs.createWriteStream(workPath, { flags: 'wx' }));
+      const stat = await fsPromises.stat(workPath);
+      if (!stat.isFile() || stat.size === 0) {
+        throw new Error('External subtitle download was empty');
       }
-
-      if (!token || !serverUrl) {
-        return res.status(500).json({ error: 'Plex server not configured' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-      const metadata = await plexService.getMediaMetadata(ratingKey, token);
-      return res.json({ metadata });
-    } catch (error) {
-      logger.error('Failed to get media metadata', { error });
-      return res.status(500).json({ error: 'Failed to get media metadata' });
-    }
-  });
-
-  // Get seasons for a TV show
-  router.get('/:ratingKey/seasons', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const { ratingKey } = req.params;
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(500).json({ error: 'Plex server not configured' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-      const seasons = await plexService.getSeasons(ratingKey, token);
-      return res.json({ seasons });
-    } catch (error) {
-      logger.error('Failed to get seasons', { error });
-      return res.status(500).json({ error: 'Failed to get seasons' });
-    }
-  });
-
-  // Get episodes for a season
-  router.get('/:ratingKey/episodes', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const { ratingKey } = req.params;
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(500).json({ error: 'Plex server not configured' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-      const episodes = await plexService.getEpisodes(ratingKey, token);
-      return res.json({ episodes });
-    } catch (error) {
-      logger.error('Failed to get episodes', { error });
-      return res.status(500).json({ error: 'Failed to get episodes' });
-    }
-  });
-
-  // Get tracks for an album
-  router.get('/:ratingKey/tracks', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const { ratingKey } = req.params;
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(500).json({ error: 'Plex server not configured' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-      const tracks = await plexService.getTracks(ratingKey, token);
-      return res.json({ tracks });
-    } catch (error) {
-      logger.error('Failed to get tracks', { error });
-      return res.status(500).json({ error: 'Failed to get tracks' });
-    }
-  });
-
-  // Download media
-  router.get('/:ratingKey/download', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const { ratingKey } = req.params;
-      const { partKey } = req.query;
-
-      if (!partKey || typeof partKey !== 'string') {
-        return res.status(400).json({ error: 'Part key is required' });
-      }
-
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(401).json({ error: 'Plex token required - configure in settings' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-
-      const metadata = await plexService.getMediaMetadata(ratingKey, token);
-
-      // Log metadata for debugging permission issues
-      logger.info('Download request metadata', {
-        userId: req.user?.id,
-        username: req.user?.username,
-        isAdmin: req.user?.isAdmin,
-        ratingKey,
-        mediaTitle: metadata.title,
-        allowSync: metadata.allowSync,
-        allowSyncType: typeof metadata.allowSync,
-        metadataKeys: Object.keys(metadata).filter(k => k.includes('allow') || k.includes('sync') || k.includes('permission'))
-      });
-
-      // Check if user has download permission
-      // Logic: Block ONLY if allowSync is explicitly disabled (false/0)
-      // - Admin users: always allowed (they manage the server)
-      // - Owned server users: allowSync undefined = allowed (no restriction)
-      // - Shared server users: allowSync false/0 = explicitly disabled
-      const isExplicitlyDisabled = metadata.allowSync === false ||
-                                   metadata.allowSync === 0 ||
-                                   metadata.allowSync === '0';
-
-      if (isExplicitlyDisabled && !req.user?.isAdmin) {
-        logger.warn('Download denied: user lacks download permission', {
-          userId: req.user?.id,
-          username: req.user?.username,
-          isAdmin: req.user?.isAdmin,
-          ratingKey,
-          mediaTitle: metadata.title,
-          allowSync: metadata.allowSync
-        });
-        return res.status(403).json({
-          error: 'Download not allowed. The server administrator has disabled downloads for your account.'
-        });
-      }
-
-      // Get library information for better download title
-      let libraryTitle = metadata.librarySectionTitle || 'Unknown Library';
-      if (!libraryTitle || libraryTitle === 'Unknown Library') {
-        // Try to fetch library name from librarySectionID
-        if (metadata.librarySectionID) {
-          try {
-            const libraries = await plexService.getLibraries(token);
-            const library = libraries.find(l => l.key === metadata.librarySectionID);
-            if (library) {
-              libraryTitle = library.title;
-            }
-          } catch (err) {
-            logger.warn('Failed to fetch library info for download', { librarySectionID: metadata.librarySectionID });
-          }
-        }
-      }
-
-      const downloadUrl = plexService.getDownloadUrl(partKey, token);
-
-      // Stream the file through our server
-      let response;
-      try {
-        response = await axios({
-          method: 'GET',
-          url: downloadUrl,
-          responseType: 'stream',
-          httpsAgent: httpsAgent,
-        });
-      } catch (downloadError: any) {
-        // If Plex returns 403, it means the user doesn't have download permission
-        if (downloadError.response?.status === 403) {
-          logger.warn('Download denied by Plex server (403)', {
-            userId: req.user?.id,
-            username: req.user?.username,
-            isAdmin: req.user?.isAdmin,
-            ratingKey,
-            mediaTitle: metadata.title,
-            allowSync: metadata.allowSync,
-            plexErrorStatus: 403
-          });
-          return res.status(403).json({
-            error: 'Download not allowed. The Plex server has denied access to this file. Check your download permissions in Plex settings.'
-          });
-        }
-        // Re-throw other errors
-        throw downloadError;
-      }
-
-      // Get file size from response headers (works for all media types)
-      const fileSize = response.headers['content-length']
-        ? parseInt(response.headers['content-length'], 10)
+      const contentFingerprint = await fingerprintContents(workPath);
+      const finalPath = path.join(config.burn.cacheDir, `subtitle-${contentFingerprint}.${extension}`);
+      const existing = await fsPromises.stat(finalPath).catch(() => undefined);
+      const existingFingerprint = existing?.isFile() && existing.size > 0
+        ? await fingerprintContents(finalPath).catch(() => undefined)
         : undefined;
-
-      // Log the download with formatted title including library name and actual file size
-      const formattedTitle = formatMediaTitle(metadata, libraryTitle);
-      db.logDownload(
-        req.user!.id,
-        formattedTitle,
-        ratingKey,
-        fileSize
-      );
-
-      // Set headers for download
-      const filename = metadata.Media?.[0]?.Part?.[0]?.file.split('/').pop() || 'download';
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
-      if (fileSize) {
-        res.setHeader('Content-Length', fileSize.toString());
+      if (existingFingerprint === contentFingerprint) {
+        await fsPromises.rm(workPath, { force: true });
+      } else {
+        await fsPromises.rename(workPath, finalPath);
       }
-
-      response.data.pipe(res);
-
-      logger.info(`Download started for ${formattedTitle} by user ${req.user?.username}`);
-      return;
+      subtitle.file = finalPath;
     } catch (error) {
-      logger.error('Download failed', { error });
-      if (!res.headersSent) {
-        return res.status(500).json({ error: 'Download failed' });
-      }
+      await fsPromises.rm(workPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const handleRouteError = (res: any, error: unknown, message: string): any => {
+    if (res.headersSent) {
+      res.destroy(error instanceof Error ? error : undefined);
       return;
+    }
+    if (error instanceof MembershipError) {
+      return res.status(403).json({ error: error.message, code: 'PLEX_ACCESS_REVOKED' });
+    }
+    const detail = error instanceof Error ? error.message : message;
+    logger.error(message, { error });
+    if (/does not belong|not accessible|cannot resolve|outside MEDIA_ROOTS|not configured/.test(detail)) {
+      return res.status(403).json({ error: detail });
+    }
+    if (/Unsupported subtitle|no local file|External subtitle/.test(detail)) {
+      return res.status(422).json({ error: detail });
+    }
+    if (/changed since the ticket|ticket must be renewed/.test(detail)) {
+      return res.status(409).json({ error: detail });
+    }
+    return res.status(500).json({ error: message });
+  };
+
+  router.route('/downloads/:ticket')
+    .get(async (req, res) => {
+      if (!validId(req.params.ticket)) return res.status(404).json({ error: 'Download ticket not found' });
+      const ticket = db.getDownloadTicket(req.params.ticket);
+      if (!ticket) return res.status(404).json({ error: 'Download ticket expired or invalid' });
+      try {
+        await validateTicketAccess(ticket);
+        const filePath = await canonicalizeMediaPath(
+          ticket.filePath,
+          ticket.artifactId ? [config.burn.cacheDir] : config.media.roots
+        );
+        await streamLocalFile(req, res, filePath, ticket.filename, ticket.sourceFingerprint);
+        return;
+      } catch (error) {
+        return handleRouteError(res, error, 'Download failed');
+      }
+    })
+    .head(async (req, res) => {
+      if (!validId(req.params.ticket)) return res.status(404).end();
+      const ticket = db.getDownloadTicket(req.params.ticket);
+      if (!ticket) return res.status(404).end();
+      try {
+        await validateTicketAccess(ticket);
+        const filePath = await canonicalizeMediaPath(
+          ticket.filePath,
+          ticket.artifactId ? [config.burn.cacheDir] : config.media.roots
+        );
+        await streamLocalFile(req, res, filePath, ticket.filename, ticket.sourceFingerprint);
+        return;
+      } catch (error) {
+        return handleRouteError(res, error, 'Download failed');
+      }
+    });
+
+  router.get('/burn-jobs/:jobId', authMiddleware, (req: AuthRequest, res) => {
+    if (!validId(req.params.jobId)) return res.status(404).json({ error: 'Burn job not found' });
+    const job = db.getBurnJob(req.params.jobId);
+    if (!job || job.userId !== req.user!.id) return res.status(404).json({ error: 'Burn job not found' });
+    return res.json({ job: publicJob(job) });
+  });
+
+  router.delete('/burn-jobs/:jobId', authMiddleware, (req: AuthRequest, res) => {
+    if (!validId(req.params.jobId)) return res.status(404).json({ error: 'Burn job not found' });
+    const result = burnManager.cancel(req.params.jobId, req.user!.id);
+    if (!result.job) return res.status(404).json({ error: 'Burn job not found' });
+    return res.json({ cancelled: result.cancelled, job: publicJob(result.job) });
+  });
+
+  router.post(
+    '/burn-jobs/:jobId/ticket',
+    creationLimiter,
+    authMiddleware,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!validId(req.params.jobId)) return res.status(404).json({ error: 'Burn job not found' });
+        await forceMembership(req);
+        const job = db.getBurnJob(req.params.jobId);
+        if (!job || job.userId !== req.user!.id) return res.status(404).json({ error: 'Burn job not found' });
+        await ensureAccessiblePart(job.ratingKey, job.partKey, credentials(req).user);
+        if (job.status !== 'ready' || !job.artifactId) {
+          return res.status(409).json({ error: 'Burn job is not ready' });
+        }
+        const artifact = db.getArtifact(job.artifactId);
+        if (!artifact || artifact.expiresAt <= Date.now()) {
+          return res.status(410).json({ error: 'Burn artifact expired' });
+        }
+        const artifactPath = await canonicalizeMediaPath(artifact.filePath, [config.burn.cacheDir]);
+        const expiresAt = Math.min(Date.now() + config.media.ticketTtlMs, artifact.expiresAt);
+        const ticket = db.createDownloadTicket({
+          userId: req.user!.id,
+          ratingKey: job.ratingKey,
+          partKey: job.partKey,
+          filePath: artifactPath,
+          sourceFingerprint: await fingerprintFile(artifactPath),
+          artifactId: artifact.id,
+          filename: artifact.filename,
+          expiresAt,
+        });
+        return res.json({
+          url: `/api/media/downloads/${ticket.token}`,
+          expiresAt: new Date(expiresAt).toISOString(),
+          filename: ticket.filename,
+        });
+      } catch (error) {
+        return handleRouteError(res, error, 'Failed to create derivative ticket');
+      }
+    }
+  );
+
+  router.post(
+    '/:ratingKey/download-ticket',
+    creationLimiter,
+    authMiddleware,
+    async (req: AuthRequest, res) => {
+      const { ratingKey } = req.params;
+      const { partKey } = req.body;
+      if (!validRatingKey(ratingKey) || !validPartKey(partKey)) {
+        return res.status(400).json({ error: 'Valid ratingKey and partKey are required' });
+      }
+      try {
+        await forceMembership(req);
+        const clients = credentials(req);
+        const authorized = await resolveAuthorizedPart(
+          ratingKey, partKey, clients.user, clients.owner, config.media.roots
+        );
+        const filename = path.basename(authorized.sourcePath);
+        const expiresAt = Date.now() + config.media.ticketTtlMs;
+        const ticket = db.createDownloadTicket({
+          userId: req.user!.id,
+          ratingKey,
+          partKey,
+          filePath: authorized.sourcePath,
+          sourceFingerprint: authorized.sourceFingerprint,
+          filename,
+          expiresAt,
+        });
+        db.logDownload(
+          req.user!.id,
+          formattedMediaTitle(authorized.metadata),
+          ratingKey,
+          authorized.part.size
+        );
+        return res.json({
+          url: `/api/media/downloads/${ticket.token}`,
+          expiresAt: new Date(expiresAt).toISOString(),
+          filename,
+        });
+      } catch (error) {
+        return handleRouteError(res, error, 'Failed to create download ticket');
+      }
+    }
+  );
+
+  router.post(
+    '/:ratingKey/burn-jobs',
+    creationLimiter,
+    authMiddleware,
+    async (req: AuthRequest, res) => {
+      const { ratingKey } = req.params;
+      const { partKey, subtitleStreamId } = req.body;
+      if (!validRatingKey(ratingKey) || !validPartKey(partKey) || !validStreamId(subtitleStreamId)) {
+        return res.status(400).json({ error: 'Valid ratingKey, partKey, and subtitleStreamId are required' });
+      }
+      try {
+        await forceMembership(req);
+        const clients = credentials(req);
+        const authorized = await resolveAuthorizedPart(
+          ratingKey, partKey, clients.user, clients.owner, config.media.roots, String(subtitleStreamId)
+        );
+        const subtitle = authorized.subtitle!;
+        await prepareExternalSubtitle(subtitle, clients.owner);
+        classifySubtitle(subtitle.codec);
+        let subtitleFingerprint = '';
+        if (subtitle.external) {
+          if (!subtitle.file) throw new Error('External subtitle track has no local file path');
+          subtitle.file = await canonicalizeMediaPath(
+            subtitle.file,
+            [...config.media.roots, config.burn.cacheDir]
+          );
+          subtitleFingerprint = await fingerprintContents(subtitle.file);
+        }
+        buildBurnCommand(authorized.sourcePath, 'validation.mp4', subtitle, config.burn);
+        const cacheKey = burnCacheKey(
+          authorized.sourceFingerprint,
+          subtitle.id,
+          subtitleFingerprint,
+          config.burn.encoder,
+          config.burn.qsvDevice
+        );
+        const filename = `${path.parse(authorized.sourcePath).name}.${subtitle.languageCode || subtitle.language || 'subtitled'}.mp4`;
+        const artifact = db.getArtifactByCacheKey(cacheKey);
+        const job = db.createBurnJob({
+          userId: req.user!.id,
+          ratingKey,
+          partKey,
+          subtitleStreamId: subtitle.id,
+          sourcePath: authorized.sourcePath,
+          sourceFingerprint: authorized.sourceFingerprint,
+          subtitleFingerprint: subtitleFingerprint || undefined,
+          cacheKey,
+          error: undefined,
+          filename,
+          size: artifact?.size,
+          artifactId: artifact?.id,
+          mediaDurationMs: authorized.part.duration || authorized.metadata.duration,
+          subtitleJson: JSON.stringify(subtitle),
+        });
+        if (artifact && fs.existsSync(artifact.filePath)) {
+          db.updateBurnJob(job.id, {
+            status: 'ready', progress: 100, artifactId: artifact.id,
+            filename: artifact.filename, size: artifact.size,
+          });
+        } else {
+          burnManager.enqueue(job);
+        }
+        return res.status(202).json({ job: publicJob(db.getBurnJob(job.id)!) });
+      } catch (error) {
+        return handleRouteError(res, error, 'Failed to create subtitle burn job');
+      }
+    }
+  );
+
+  router.get('/recently-added', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+      const media = await credentials(req).user.getRecentlyAdded(limit);
+      return res.json({ media: sanitizeMediaList(media) });
+    } catch (error) {
+      return handleRouteError(res, error, 'Failed to get recently added media');
     }
   });
 
-  // Get season download size info
+  router.get('/download-history', authMiddleware, (req: AuthRequest, res) => {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    return res.json({ history: db.getDownloadHistory(req.user!.id, limit) });
+  });
+
+  router.get('/download-history/all', authMiddleware, (req: AuthRequest, res) => {
+    if (!req.user?.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+    return res.json({ history: db.getAllDownloadHistory(limit) });
+  });
+
+  router.get('/download-stats', authMiddleware, (_req, res) => res.json({ stats: db.getDownloadStats() }));
+
+  router.get('/search', authMiddleware, async (req: AuthRequest, res) => {
+    const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (query.length < 2 || query.length > 200) return res.status(400).json({ error: 'Invalid search query' });
+    try {
+      const results = await credentials(req).user.search(query);
+      return res.json({ results: sanitizeMediaList(results) });
+    } catch (error) {
+      return handleRouteError(res, error, 'Search failed');
+    }
+  });
+
   router.get('/season/:seasonRatingKey/size', authMiddleware, async (req: AuthRequest, res) => {
     try {
-      const { seasonRatingKey } = req.params;
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(401).json({ error: 'Plex token required - configure in settings' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-
-      // Get all episodes in the season
-      const episodes = await plexService.getEpisodes(seasonRatingKey, token);
-
-      if (!episodes || episodes.length === 0) {
-        return res.status(404).json({ error: 'No episodes found in this season' });
-      }
-
-      // Calculate total size
-      let totalSize = 0;
-      let fileCount = 0;
-
-      for (const episode of episodes) {
-        if (episode.Media?.[0]?.Part?.[0]) {
-          const part = episode.Media[0].Part[0];
-          totalSize += part.size || 0;
-          fileCount++;
-        }
-      }
-
-      return res.json({
-        totalSize,
-        fileCount,
-        totalSizeGB: (totalSize / 1073741824).toFixed(2)
-      });
+      const episodes = await credentials(req).user.getEpisodes(req.params.seasonRatingKey);
+      const parts = episodes.flatMap(item => item.Media?.flatMap(media => media.Part || []) || []);
+      const totalSize = parts.reduce((sum, part) => sum + (part.size || 0), 0);
+      return res.json({ totalSize, fileCount: parts.length, totalSizeGB: (totalSize / 1073741824).toFixed(2) });
     } catch (error) {
-      logger.error('Failed to get season size', { error });
-      return res.status(500).json({ error: 'Failed to get season size' });
+      return handleRouteError(res, error, 'Failed to get season size');
     }
   });
 
-  // Get album download size info
   router.get('/album/:albumRatingKey/size', authMiddleware, async (req: AuthRequest, res) => {
     try {
-      const { albumRatingKey } = req.params;
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(401).json({ error: 'Plex token required - configure in settings' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-
-      // Get all tracks in the album
-      const tracks = await plexService.getTracks(albumRatingKey, token);
-
-      if (!tracks || tracks.length === 0) {
-        return res.status(404).json({ error: 'No tracks found in this album' });
-      }
-
-      // Calculate total size
-      let totalSize = 0;
-      let fileCount = 0;
-
-      for (const track of tracks) {
-        if (track.Media?.[0]?.Part?.[0]) {
-          const part = track.Media[0].Part[0];
-          totalSize += part.size || 0;
-          fileCount++;
-        }
-      }
-
-      return res.json({
-        totalSize,
-        fileCount,
-        totalSizeGB: (totalSize / 1073741824).toFixed(2)
-      });
+      const tracks = await credentials(req).user.getTracks(req.params.albumRatingKey);
+      const parts = tracks.flatMap(item => item.Media?.flatMap(media => media.Part || []) || []);
+      const totalSize = parts.reduce((sum, part) => sum + (part.size || 0), 0);
+      return res.json({ totalSize, fileCount: parts.length, totalSizeGB: (totalSize / 1073741824).toFixed(2) });
     } catch (error) {
-      logger.error('Failed to get album size', { error });
-      return res.status(500).json({ error: 'Failed to get album size' });
+      return handleRouteError(res, error, 'Failed to get album size');
     }
   });
 
-  // Download entire season as zip
-  router.get('/season/:seasonRatingKey/download', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const { seasonRatingKey } = req.params;
+  const bulkDownloadRemoved = (_req: AuthRequest, res: any): any =>
+    res.status(410).json({
+      error: 'Bulk ZIP downloads were removed because they are not resumable. Download individual files instead.',
+    });
+  router.get('/season/:seasonRatingKey/download', authMiddleware, bulkDownloadRemoved);
+  router.get('/album/:albumRatingKey/download', authMiddleware, bulkDownloadRemoved);
 
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(401).json({ error: 'Plex token required - configure in settings' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-
-      // Get season metadata
-      const seasonMetadata = await plexService.getMediaMetadata(seasonRatingKey, token);
-
-      // Get all episodes in the season
-      const episodes = await plexService.getEpisodes(seasonRatingKey, token);
-
-      if (!episodes || episodes.length === 0) {
-        return res.status(404).json({ error: 'No episodes found in this season' });
-      }
-
-      // Check download permissions for each episode
-      // Admin users bypass permission checks
-      const isAdmin = req.user?.isAdmin;
-      if (!isAdmin) {
-        for (const episode of episodes) {
-          const isExplicitlyDisabled = episode.allowSync === false ||
-                                       episode.allowSync === 0 ||
-                                       episode.allowSync === '0';
-          if (isExplicitlyDisabled) {
-            logger.warn('Season download denied: user lacks download permission for at least one episode', {
-              userId: req.user?.id,
-              seasonRatingKey,
-              episodeRatingKey: episode.ratingKey,
-              episodeTitle: episode.title
-            });
-            return res.status(403).json({
-              error: 'Download not allowed. Some episodes in this season are not available for download.'
-            });
-          }
-        }
-      }
-
-      // Prepare files for zipping
-      const files: ZipFileEntry[] = [];
-      let totalSize = 0;
-
-      for (const episode of episodes) {
-        if (episode.Media?.[0]?.Part?.[0]) {
-          const part = episode.Media[0].Part[0];
-          const downloadUrl = plexService.getDownloadUrl(part.key, token);
-          // Use path.basename to ensure we only get the filename, not the full path
-          const filename = path.basename(part.file) || `Episode_${episode.index}.${part.container}`;
-          const size = part.size || 0;
-
-          files.push({
-            url: downloadUrl,
-            filename,
-            size
-          });
-
-          totalSize += size;
-        }
-      }
-
-      // Warn if total size is over 10GB (10737418240 bytes)
-      const tenGB = 10737418240;
-      if (totalSize > tenGB) {
-        logger.warn('Large season download initiated', {
-          userId: req.user?.id,
-          seasonRatingKey,
-          totalSizeGB: (totalSize / 1073741824).toFixed(2),
-          episodeCount: files.length
-        });
-      }
-
-      // Generate zip filename: "ShowName - SXX.zip"
-      const showName = seasonMetadata.grandparentTitle || 'Unknown Show';
-      const seasonNumber = seasonMetadata.index || seasonMetadata.parentIndex || 0;
-      const zipFilename = `${showName} - S${String(seasonNumber).padStart(2, '0')}.zip`;
-
-      // Log the download
-      const libraryTitle = seasonMetadata.librarySectionTitle || 'Unknown Library';
-      const downloadTitle = `${libraryTitle} - ${showName} - ${seasonMetadata.title} (${files.length} episodes)`;
-      db.logDownload(
-        req.user!.id,
-        downloadTitle,
-        seasonRatingKey,
-        totalSize
-      );
-
-      logger.info(`Season download started: ${downloadTitle} by user ${req.user?.username}`);
-
-      // Stream zip to client
-      await createZipStream(res, files, zipFilename);
-
-      return;
-    } catch (error) {
-      logger.error('Season download failed', { error });
-      if (!res.headersSent) {
-        return res.status(500).json({ error: 'Season download failed' });
-      }
-      return;
-    }
-  });
-
-  // Download entire album as zip
-  router.get('/album/:albumRatingKey/download', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const { albumRatingKey } = req.params;
-
-      const { token, serverUrl, error } = getUserCredentials(req);
-
-      if (error) {
-        return res.status(403).json({ error });
-      }
-
-      if (!token || !serverUrl) {
-        return res.status(401).json({ error: 'Plex token required - configure in settings' });
-      }
-
-      plexService.setServerConnection(serverUrl, token);
-
-      // Get album metadata
-      const albumMetadata = await plexService.getMediaMetadata(albumRatingKey, token);
-
-      // Get all tracks in the album
-      const tracks = await plexService.getTracks(albumRatingKey, token);
-
-      if (!tracks || tracks.length === 0) {
-        return res.status(404).json({ error: 'No tracks found in this album' });
-      }
-
-      // Check download permissions for each track
-      // Admin users bypass permission checks
-      const isAdmin = req.user?.isAdmin;
-      if (!isAdmin) {
-        for (const track of tracks) {
-          const isExplicitlyDisabled = track.allowSync === false ||
-                                       track.allowSync === 0 ||
-                                       track.allowSync === '0';
-          if (isExplicitlyDisabled) {
-            logger.warn('Album download denied: user lacks download permission for at least one track', {
-              userId: req.user?.id,
-              albumRatingKey,
-              trackRatingKey: track.ratingKey,
-              trackTitle: track.title
-            });
-            return res.status(403).json({
-              error: 'Download not allowed. Some tracks in this album are not available for download.'
-            });
-          }
-        }
-      }
-
-      // Prepare files for zipping
-      const files: ZipFileEntry[] = [];
-      let totalSize = 0;
-
-      for (const track of tracks) {
-        if (track.Media?.[0]?.Part?.[0]) {
-          const part = track.Media[0].Part[0];
-          const downloadUrl = plexService.getDownloadUrl(part.key, token);
-          // Use path.basename to ensure we only get the filename, not the full path
-          const filename = path.basename(part.file) || `Track_${track.index}.${part.container}`;
-          const size = part.size || 0;
-
-          files.push({
-            url: downloadUrl,
-            filename,
-            size
-          });
-
-          totalSize += size;
-        }
-      }
-
-      // Warn if total size is over 10GB (10737418240 bytes)
-      const tenGB = 10737418240;
-      if (totalSize > tenGB) {
-        logger.warn('Large album download initiated', {
-          userId: req.user?.id,
-          albumRatingKey,
-          totalSizeGB: (totalSize / 1073741824).toFixed(2),
-          trackCount: files.length
-        });
-      }
-
-      // Generate zip filename: "Album.zip"
-      const zipFilename = `${albumMetadata.title}.zip`;
-
-      // Log the download
-      const libraryTitle = albumMetadata.librarySectionTitle || 'Unknown Library';
-      const downloadTitle = `${libraryTitle} - ${albumMetadata.title} (${files.length} tracks)`;
-      db.logDownload(
-        req.user!.id,
-        downloadTitle,
-        albumRatingKey,
-        totalSize
-      );
-
-      logger.info(`Album download started: ${downloadTitle} by user ${req.user?.username}`);
-
-      // Stream zip to client
-      await createZipStream(res, files, zipFilename);
-
-      return;
-    } catch (error) {
-      logger.error('Album download failed', { error });
-      if (!res.headersSent) {
-        return res.status(500).json({ error: 'Album download failed' });
-      }
-      return;
-    }
-  });
-
-  // Get thumbnail/poster proxy
-  // Support both Authorization header and query parameter token for image requests
   router.get('/thumb/:ratingKey', async (req: AuthRequest, res) => {
+    const imagePath = typeof req.query.path === 'string' ? req.query.path : '';
+    const sessionToken = readSessionCookie(req);
+    if (!imagePath.startsWith('/') || imagePath.startsWith('//') || imagePath.length > 1024) {
+      return res.status(400).json({ error: 'A valid thumbnail path is required' });
+    }
+    if (!sessionToken) return res.status(401).json({ error: 'Thumbnail session is required' });
+    const session = db.getSessionByToken(sessionToken);
+    if (!session) return res.status(401).json({ error: 'Invalid session' });
     try {
-      const { path, token } = req.query;
-
-      if (!path || typeof path !== 'string') {
-        return res.status(400).json({ error: 'Thumbnail path is required' });
+      const admin = db.getAdminUserById(session.userId);
+      const user = admin ? undefined : await ensurePlexMembership(db, session.userId, false, service);
+      const token = user?.plexToken || (admin ? db.getSetting('plex_token') : undefined);
+      const serverUrl = db.getSetting('plex_url');
+      if (!token || !serverUrl) return res.status(403).json({ error: 'Plex access unavailable' });
+      if (!validRatingKey(req.params.ratingKey)) {
+        return res.status(400).json({ error: 'Invalid ratingKey' });
       }
-
-      // Check authentication from query parameter first (for <img> tags), then from header
-      let user = req.user;
-      if (!user && token && typeof token === 'string') {
-        const session = db.getSessionByToken(token);
-        if (session) {
-          const adminUser = db.getAdminUserById(session.userId);
-          if (adminUser) {
-            user = {
-              id: adminUser.id,
-              username: adminUser.username,
-              isAdmin: adminUser.isAdmin,
-            };
-          } else {
-            const plexUser = db.getPlexUserById(session.userId);
-            if (plexUser) {
-              user = {
-                id: plexUser.id,
-                username: plexUser.username,
-                isAdmin: plexUser.isAdmin,
-                plexToken: plexUser.plexToken,
-                serverUrl: plexUser.serverUrl,
-              };
-            }
-          }
-        }
+      const client = service.createServerClient(serverUrl, token);
+      const metadata = await client.getMediaMetadata(req.params.ratingKey);
+      if (imagePath !== metadata.thumb && imagePath !== metadata.art) {
+        return res.status(403).json({ error: 'Thumbnail path does not belong to the requested media item' });
       }
-
-      if (!user) {
-        return res.status(401).json({ error: 'No token provided' });
-      }
-
-      // Temporarily set req.user for getUserCredentials helper
-      req.user = user;
-      const { token: plexToken, serverUrl, error: credError } = getUserCredentials(req);
-
-      if (credError) {
-        return res.status(403).json({ error: credError });
-      }
-
-      if (!plexToken || !serverUrl) {
-        return res.status(401).json({ error: 'Plex token required - configure in settings' });
-      }
-
-      const thumbUrl = plexService.getThumbnailUrl(path, plexToken);
-      const response = await axios({
-        method: 'GET',
-        url: thumbUrl,
+      const resource = client.getResourceRequest(imagePath);
+      const response = await axios.get(resource.url, {
+        headers: resource.headers,
+        maxRedirects: resource.maxRedirects,
         responseType: 'stream',
-        httpsAgent: httpsAgent,
+        httpsAgent: new https.Agent({ rejectUnauthorized: !config.plex.allowInsecureTls }),
       });
-
       res.setHeader('Content-Type', response.headers['content-type'] || 'image/jpeg');
-      if (response.headers['content-length']) {
-        res.setHeader('Content-Length', response.headers['content-length']);
-      }
-
-      response.data.pipe(res);
+      if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
+      await pipeline(response.data, res);
       return;
     } catch (error) {
-      logger.error('Thumbnail proxy failed', { error });
-      if (!res.headersSent) {
-        return res.status(500).json({ error: 'Failed to load thumbnail' });
-      }
-      return;
+      return handleRouteError(res, error, 'Failed to load thumbnail');
+    }
+  });
+
+  router.get('/:ratingKey/seasons', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const seasons = await credentials(req).user.getSeasons(req.params.ratingKey);
+      return res.json({ seasons: sanitizeMediaList(seasons) });
+    } catch (error) {
+      return handleRouteError(res, error, 'Failed to get seasons');
+    }
+  });
+
+  router.get('/:ratingKey/episodes', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const episodes = await credentials(req).user.getEpisodes(req.params.ratingKey);
+      return res.json({ episodes: sanitizeMediaList(episodes) });
+    } catch (error) {
+      return handleRouteError(res, error, 'Failed to get episodes');
+    }
+  });
+
+  router.get('/:ratingKey/tracks', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const tracks = await credentials(req).user.getTracks(req.params.ratingKey);
+      return res.json({ tracks: sanitizeMediaList(tracks) });
+    } catch (error) {
+      return handleRouteError(res, error, 'Failed to get tracks');
+    }
+  });
+
+  router.get('/:ratingKey/download', authMiddleware, (_req, res) =>
+    res.status(410).json({ error: 'Use POST /api/media/:ratingKey/download-ticket for resumable downloads' }));
+
+  router.get('/:ratingKey', authMiddleware, async (req: AuthRequest, res) => {
+    if (!validRatingKey(req.params.ratingKey)) return res.status(400).json({ error: 'Invalid ratingKey' });
+    try {
+      const metadata = await credentials(req).user.getMediaMetadata(req.params.ratingKey);
+      return res.json({ metadata: sanitizeMedia(metadata) });
+    } catch (error) {
+      return handleRouteError(res, error, 'Failed to get media metadata');
     }
   });
 

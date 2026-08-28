@@ -1,13 +1,32 @@
 import { Router } from 'express';
 import bcrypt from 'bcrypt';
 import { DatabaseService } from '../models/database';
-import { plexService } from '../services/plexService';
+import {
+  PlexAccountUnauthorizedError,
+  PlexServerAccessDeniedError,
+  plexService,
+} from '../services/plexService';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
+import rateLimit from 'express-rate-limit';
+import { config } from '../config';
+import { clearSessionCookie, setSessionCookie } from '../utils/sessionCookie';
 
 export const createAuthRouter = (db: DatabaseService) => {
   const router = Router();
   const authMiddleware = createAuthMiddleware(db);
+  const loginLimiter = rateLimit({
+    windowMs: config.rateLimit.windowMs,
+    limit: config.rateLimit.loginMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  const plexPollLimiter = rateLimit({
+    windowMs: config.rateLimit.windowMs,
+    limit: config.rateLimit.plexPollMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
   // Check if initial setup is required
   router.get('/setup/required', (_req, res) => {
@@ -16,7 +35,7 @@ export const createAuthRouter = (db: DatabaseService) => {
   });
 
   // Initial admin setup
-  router.post('/setup', async (req, res) => {
+  router.post('/setup', loginLimiter, async (req, res) => {
     try {
       if (db.hasAdminUser()) {
         return res.status(400).json({ error: 'Setup already completed' });
@@ -24,8 +43,11 @@ export const createAuthRouter = (db: DatabaseService) => {
 
       const { username, password } = req.body;
 
-      if (!username || !password) {
+      if (typeof username !== 'string' || typeof password !== 'string') {
         return res.status(400).json({ error: 'Username and password are required' });
+      }
+      if (!/^[A-Za-z0-9_.-]{3,64}$/.test(username) || password.length < 12 || password.length > 256) {
+        return res.status(400).json({ error: 'Username is invalid or password is shorter than 12 characters' });
       }
 
       // Hash password
@@ -41,6 +63,7 @@ export const createAuthRouter = (db: DatabaseService) => {
 
       // Create session
       const session = db.createSession(adminUser.id);
+      setSessionCookie(req, res, session.token);
 
       logger.info(`Initial admin setup completed for user: ${username}`);
 
@@ -61,11 +84,11 @@ export const createAuthRouter = (db: DatabaseService) => {
   });
 
   // Admin login
-  router.post('/login', async (req, res) => {
+  router.post('/login', loginLimiter, async (req, res) => {
     try {
       const { username, password } = req.body;
 
-      if (!username || !password) {
+      if (typeof username !== 'string' || typeof password !== 'string' || username.length > 64 || password.length > 256) {
         return res.status(400).json({ error: 'Username and password are required' });
       }
 
@@ -81,6 +104,7 @@ export const createAuthRouter = (db: DatabaseService) => {
 
       db.updateAdminLastLogin(user.id);
       const session = db.createSession(user.id);
+      setSessionCookie(req, res, session.token);
 
       logger.info(`User logged in: ${username}`);
 
@@ -100,7 +124,7 @@ export const createAuthRouter = (db: DatabaseService) => {
   });
 
   // Plex OAuth: Generate PIN
-  router.post('/plex/pin', async (_req, res) => {
+  router.post('/plex/pin', loginLimiter, async (_req, res) => {
     try {
       const pin = await plexService.generatePin();
       return res.json({
@@ -119,11 +143,11 @@ export const createAuthRouter = (db: DatabaseService) => {
   });
 
   // Plex OAuth: Check PIN and authenticate
-  router.post('/plex/authenticate', async (req, res) => {
+  router.post('/plex/authenticate', plexPollLimiter, async (req, res) => {
     try {
       const { pinId } = req.body;
 
-      if (!pinId) {
+      if (!Number.isInteger(pinId) || pinId <= 0) {
         return res.status(400).json({ error: 'PIN ID is required' });
       }
 
@@ -153,14 +177,14 @@ export const createAuthRouter = (db: DatabaseService) => {
       // Get user's accessible servers and validate they have access to admin's server
       let userToken: string;
       try {
-        const userServers = await plexService.getUserServers(authResponse.authToken);
-        const connection = plexService.findBestServerConnection(userServers, adminMachineId);
-
-        if (!connection.serverUrl) {
+        const membership = await plexService.validateExactServerMembership(
+          authResponse.authToken,
+          adminMachineId
+        );
+        if (!membership.serverToken) {
           logger.warn('User does not have access to admin Plex server', {
             username: authResponse.user.username,
             adminMachineId,
-            userServersCount: userServers.length
           });
           return res.status(403).json({
             error: 'Access denied. You do not have access to this Plex server.'
@@ -168,16 +192,29 @@ export const createAuthRouter = (db: DatabaseService) => {
         }
 
         // For shared servers, use the server's accessToken; for owned servers, use the user's auth token
-        userToken = connection.accessToken || authResponse.authToken;
+        userToken = membership.serverToken;
 
         logger.debug('User validated for admin server', {
           username: authResponse.user.username,
-          hasAccessToken: !!connection.accessToken,
-          isSharedServer: !!connection.accessToken
+          hasAccessToken: userToken !== authResponse.authToken,
+          isSharedServer: userToken !== authResponse.authToken
         });
       } catch (error) {
-        logger.error('Failed to validate user server access', { error });
-        return res.status(500).json({ error: 'Failed to validate server access' });
+        if (error instanceof PlexAccountUnauthorizedError) {
+          return res.status(401).json({
+            error: 'Plex authorization expired. Please start sign-in again.',
+          });
+        }
+        if (error instanceof PlexServerAccessDeniedError) {
+          logger.warn('Plex identity denied for configured server', {
+            username: authResponse.user.username,
+            adminMachineId,
+          });
+          return res.status(403).json({
+            error: 'Access denied. You do not have access to this Plex server.',
+          });
+        }
+        throw error;
       }
 
       // Create or update plex user (no serverUrl stored - always use admin's)
@@ -185,11 +222,13 @@ export const createAuthRouter = (db: DatabaseService) => {
         username: authResponse.user.username,
         email: authResponse.user.email,
         plexToken: userToken,
+        plexAccountToken: authResponse.authToken,
         plexId: authResponse.user.uuid,
       });
 
       // Create session
       const session = db.createSession(plexUser.id);
+      setSessionCookie(req, res, session.token);
 
       logger.info(`Plex user authenticated: ${plexUser.username}`);
 
@@ -214,7 +253,14 @@ export const createAuthRouter = (db: DatabaseService) => {
 
   // Get current user
   router.get('/me', authMiddleware, (req: AuthRequest, res) => {
-    return res.json({ user: req.user });
+    setSessionCookie(req, res, req.authSession!.token);
+    return res.json({
+      user: {
+        id: req.user!.id,
+        username: req.user!.username,
+        isAdmin: req.user!.isAdmin,
+      },
+    });
   });
 
   // Logout
@@ -223,6 +269,7 @@ export const createAuthRouter = (db: DatabaseService) => {
       if (req.authSession?.token) {
         db.deleteSession(req.authSession.token);
       }
+      clearSessionCookie(req, res);
       return res.json({ message: 'Logged out successfully' });
     } catch (error) {
       logger.error('Logout error', { error });
@@ -239,8 +286,8 @@ export const createAuthRouter = (db: DatabaseService) => {
         return res.status(400).json({ error: 'Current password and new password are required' });
       }
 
-      if (newPassword.length < 6) {
-        return res.status(400).json({ error: 'New password must be at least 6 characters long' });
+      if (typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 256) {
+        return res.status(400).json({ error: 'New password must be at least 12 characters long' });
       }
 
       // Only admin users (those with password_hash) can change passwords

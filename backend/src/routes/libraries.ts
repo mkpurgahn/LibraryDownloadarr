@@ -3,6 +3,7 @@ import { DatabaseService } from '../models/database';
 import { plexService } from '../services/plexService';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
+import { sanitizeMediaList } from '../services/mediaSanitizer';
 
 export const createLibrariesRouter = (db: DatabaseService) => {
   const router = Router();
@@ -62,8 +63,7 @@ export const createLibrariesRouter = (db: DatabaseService) => {
         isAdmin: req.user?.isAdmin
       });
 
-      plexService.setServerConnection(serverUrl, token);
-      const libraries = await plexService.getLibraries(token);
+      const libraries = await plexService.createServerClient(serverUrl, token).getLibraries();
       return res.json({ libraries });
     } catch (error: any) {
       logger.error('Failed to get libraries', {
@@ -90,14 +90,11 @@ export const createLibrariesRouter = (db: DatabaseService) => {
         return res.status(500).json({ error: 'Plex server not configured' });
       }
 
-      plexService.setServerConnection(serverUrl, token);
-
-      const content = await plexService.getLibraryContent(
+      const content = await plexService.createServerClient(serverUrl, token).getLibraryContent(
         libraryKey,
-        token,
         viewType as string | undefined
       );
-      return res.json({ content });
+      return res.json({ content: sanitizeMediaList(content) });
     } catch (error) {
       logger.error('Failed to get library content', { error });
       return res.status(500).json({ error: 'Failed to get library content' });

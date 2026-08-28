@@ -6,6 +6,8 @@ import {
   MediaItem,
   PlexPin,
   Settings,
+  BurnJob,
+  DownloadTicket,
 } from '../types';
 
 class ApiClient {
@@ -32,7 +34,9 @@ class ApiClient {
     this.client.interceptors.response.use(
       (response) => response,
       (error) => {
-        if (error.response?.status === 401) {
+        const requestUrl = String(error.config?.url || '');
+        const isAuthenticationRequest = requestUrl.startsWith('/auth/');
+        if (error.response?.status === 401 && !isAuthenticationRequest) {
           localStorage.removeItem('token');
           window.location.href = '/login';
         }
@@ -157,8 +161,38 @@ class ApiClient {
     return response.data.stats;
   }
 
-  getDownloadUrl(ratingKey: string, partKey: string): string {
-    return `/api/media/${ratingKey}/download?partKey=${encodeURIComponent(partKey)}`;
+  async createDownloadTicket(ratingKey: string, partKey: string): Promise<DownloadTicket> {
+    const response = await this.client.post<DownloadTicket>(`/media/${ratingKey}/download-ticket`, {
+      partKey,
+    });
+    return response.data;
+  }
+
+  async createBurnJob(
+    ratingKey: string,
+    partKey: string,
+    subtitleStreamId: number | string
+  ): Promise<BurnJob> {
+    const response = await this.client.post<{ job: BurnJob }>(`/media/${ratingKey}/burn-jobs`, {
+      partKey,
+      subtitleStreamId,
+    });
+    return response.data.job;
+  }
+
+  async getBurnJob(jobId: string): Promise<BurnJob> {
+    const response = await this.client.get<{ job: BurnJob }>(`/media/burn-jobs/${jobId}`);
+    return response.data.job;
+  }
+
+  async cancelBurnJob(jobId: string): Promise<BurnJob> {
+    const response = await this.client.delete<{ job: BurnJob }>(`/media/burn-jobs/${jobId}`);
+    return response.data.job;
+  }
+
+  async createBurnJobTicket(jobId: string): Promise<DownloadTicket> {
+    const response = await this.client.post<DownloadTicket>(`/media/burn-jobs/${jobId}/ticket`);
+    return response.data;
   }
 
   async getSeasonSize(seasonRatingKey: string): Promise<{ totalSize: number; fileCount: number; totalSizeGB: string }> {
@@ -175,17 +209,8 @@ class ApiClient {
     return response.data;
   }
 
-  getSeasonDownloadUrl(seasonRatingKey: string): string {
-    return `/api/media/season/${seasonRatingKey}/download`;
-  }
-
-  getAlbumDownloadUrl(albumRatingKey: string): string {
-    return `/api/media/album/${albumRatingKey}/download`;
-  }
-
   getThumbnailUrl(ratingKey: string, path: string): string {
-    const token = localStorage.getItem('token');
-    return `/api/media/thumb/${ratingKey}?path=${encodeURIComponent(path)}&token=${token}`;
+    return `/api/media/thumb/${ratingKey}?path=${encodeURIComponent(path)}`;
   }
 
   // Settings endpoints
