@@ -178,6 +178,12 @@ Customize your deployment with environment variables:
 | `MEDIA_ROOTS` | Comma-separated local roots allowed for original media resolution | none | `/data/media,/archive` |
 | `BURN_CACHE_DIR` | Writable derivative and subtitle cache | `/app/data/burn-cache` | `/app/cache` |
 | `DOWNLOAD_TICKET_TTL_SECONDS` | Scoped original/derivative ticket lifetime | `86400` | `43200` |
+| `DOWNLOAD_PUBLIC_ORIGIN` | Optional HTTPS origin for ticket URLs so large media can bypass an application tunnel or CDN | relative URLs | `https://files.example.com` |
+| `PORTMAP_INTERNAL_HOST` | Internal reverse-proxy address used by the optional `direct-origin` UPnP profile | `192.168.1.158` | `192.168.1.20` |
+| `PORTMAP_INTERNAL_PORT` | Internal HTTPS port used by the optional `direct-origin` profile | `443` | `443` |
+| `PORTMAP_EXTERNAL_PORT` | Public HTTPS port maintained by the optional `direct-origin` profile | `8443` | `8443` |
+| `PORTMAP_LEASE_SECONDS` | Requested UPnP lease duration | `1200` | `1200` |
+| `PORTMAP_REFRESH_SECONDS` | Delay between UPnP mapping renewals | `600` | `600` |
 | `PLEX_MEMBERSHIP_TTL_SECONDS` | Maximum interval between active-membership checks | `300` | `120` |
 | `PLEX_ALLOW_INSECURE_TLS` | Explicit opt-in for self-signed/local Plex TLS | `false` | `true` |
 | `FFMPEG_PATH` | FFmpeg executable | `ffmpeg` | `/usr/bin/ffmpeg` |
@@ -193,6 +199,16 @@ upgrading, existing plaintext Plex tokens and session tokens are migrated in
 place: Plex tokens are encrypted with AES-256-GCM and sessions are stored only
 as SHA-256 token hashes. Keep the secret stable. Startup fails rather than
 discarding existing users if it is missing or too short.
+
+When the portal is routed through a tunnel but media should transfer directly,
+set `DOWNLOAD_PUBLIC_ORIGIN` to the direct HTTPS hostname. Install a trusted
+certificate on that hostname and expose its HTTPS listener. Routers that only
+offer short-lived UPnP leases can use the opt-in `direct-origin` Compose profile
+to renew the mapping:
+
+```bash
+docker compose --profile direct-origin up -d
+```
 
 ### Initial Setup
 

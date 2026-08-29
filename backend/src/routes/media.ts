@@ -36,6 +36,12 @@ const validPartKey = (value: unknown): value is string =>
 const validStreamId = (value: unknown): boolean =>
   (typeof value === 'string' || typeof value === 'number') && /^[A-Za-z0-9._:-]{1,128}$/.test(String(value));
 const validId = (value: string): boolean => /^[A-Za-z0-9_-]{10,128}$/.test(value);
+const downloadTicketUrl = (token: string): string => {
+  const pathname = `/api/media/downloads/${encodeURIComponent(token)}`;
+  return config.media.publicDownloadOrigin
+    ? `${config.media.publicDownloadOrigin}${pathname}`
+    : pathname;
+};
 
 const publicJob = (job: BurnJob): object => ({
   id: job.id,
@@ -280,7 +286,7 @@ export const createMediaRouter = (
           expiresAt,
         });
         return res.json({
-          url: `/api/media/downloads/${ticket.token}`,
+          url: downloadTicketUrl(ticket.token),
           expiresAt: new Date(expiresAt).toISOString(),
           filename: ticket.filename,
         });
@@ -354,7 +360,7 @@ export const createMediaRouter = (
             tickets.push({
               ratingKey: item.ratingKey,
               partKey: item.partKey,
-              url: `/api/media/downloads/${ticket.token}`,
+              url: downloadTicketUrl(ticket.token),
               expiresAt: new Date(expiresAt).toISOString(),
               filename,
             });
@@ -413,7 +419,7 @@ export const createMediaRouter = (
           authorized.part.size
         );
         return res.json({
-          url: `/api/media/downloads/${ticket.token}`,
+          url: downloadTicketUrl(ticket.token),
           expiresAt: new Date(expiresAt).toISOString(),
           filename,
         });

@@ -24,6 +24,8 @@ services:
       - MEDIA_ROOTS=/data/media
       - BURN_CACHE_DIR=/app/cache
       - DOWNLOAD_TICKET_TTL_SECONDS=86400
+      # Optional separate HTTPS origin for direct media delivery outside a tunnel/CDN.
+      - DOWNLOAD_PUBLIC_ORIGIN=${DOWNLOAD_PUBLIC_ORIGIN:-}
       - PLEX_MEMBERSHIP_TTL_SECONDS=300
       - PLEX_ALLOW_INSECURE_TLS=false
       - FFMPEG_PATH=/usr/bin/ffmpeg
@@ -43,6 +45,33 @@ services:
       - /dev/dri/renderD128:/dev/dri/renderD128
     networks:
       - proxy
+
+  # Optional UPnP lease keeper for installations where the router reserves WAN 443.
+  # Enable explicitly with: docker compose --profile direct-origin up -d
+  direct-origin-portmap:
+    image: alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+    container_name: librarydownloadarr-portmap
+    restart: unless-stopped
+    profiles:
+      - direct-origin
+    network_mode: host
+    environment:
+      - PORTMAP_INTERNAL_HOST=${PORTMAP_INTERNAL_HOST:-192.168.1.158}
+      - PORTMAP_INTERNAL_PORT=${PORTMAP_INTERNAL_PORT:-443}
+      - PORTMAP_EXTERNAL_PORT=${PORTMAP_EXTERNAL_PORT:-8443}
+      - PORTMAP_LEASE_SECONDS=${PORTMAP_LEASE_SECONDS:-1200}
+      - PORTMAP_REFRESH_SECONDS=${PORTMAP_REFRESH_SECONDS:-600}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        apk add --no-cache miniupnpc
+        while true; do
+          upnpc -e "LibraryDownloadarr direct HTTPS" \
+            -a "$${PORTMAP_INTERNAL_HOST}" "$${PORTMAP_INTERNAL_PORT}" \
+            "$${PORTMAP_EXTERNAL_PORT}" TCP "$${PORTMAP_LEASE_SECONDS}"
+          sleep "$${PORTMAP_REFRESH_SECONDS}"
+        done
 
 networks:
   proxy:

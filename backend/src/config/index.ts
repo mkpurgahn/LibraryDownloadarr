@@ -18,6 +18,29 @@ const listFromEnv = (name: string): string[] =>
     .filter(Boolean)
     .map(value => path.resolve(value));
 
+const originFromEnv = (name: string): string => {
+  const value = (process.env[name] || '').trim();
+  if (!value) return '';
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an absolute HTTPS origin`);
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== '/' ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error(`${name} must be an HTTPS origin without credentials, a path, query, or fragment`);
+  }
+  return parsed.origin;
+};
+
 export const config = {
   server: {
     port: intFromEnv('PORT', 5069),
@@ -38,6 +61,7 @@ export const config = {
   media: {
     roots: listFromEnv('MEDIA_ROOTS'),
     ticketTtlMs: intFromEnv('DOWNLOAD_TICKET_TTL_SECONDS', 24 * 60 * 60) * 1000,
+    publicDownloadOrigin: originFromEnv('DOWNLOAD_PUBLIC_ORIGIN'),
   },
   burn: {
     cacheDir: path.resolve(process.env.BURN_CACHE_DIR || path.join(process.cwd(), 'data', 'burn-cache')),

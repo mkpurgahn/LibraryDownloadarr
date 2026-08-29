@@ -336,6 +336,36 @@ test('original tickets are scoped and expire', async () => {
   assert.equal(expiredResponse.status, 404);
 });
 
+test('ticket responses can target a separate HTTPS download origin', async () => {
+  const originalOrigin = config.media.publicDownloadOrigin;
+  config.media.publicDownloadOrigin = 'https://files.example.test:8443';
+  try {
+    const single = await request(`/api/media/${ratingKey}/download-ticket`, {
+      method: 'POST',
+      body: JSON.stringify({ partKey }),
+    });
+    assert.equal(single.status, 200);
+    const singleBody = await single.json() as { url: string };
+    assert.match(
+      singleBody.url,
+      /^https:\/\/files\.example\.test:8443\/api\/media\/downloads\/[A-Za-z0-9_-]+$/
+    );
+
+    const batch = await request('/api/media/download-tickets', {
+      method: 'POST',
+      body: JSON.stringify({ items: [{ ratingKey, partKey }] }),
+    });
+    assert.equal(batch.status, 200);
+    const batchBody = await batch.json() as { tickets: Array<{ url: string }> };
+    assert.match(
+      batchBody.tickets[0].url,
+      /^https:\/\/files\.example\.test:8443\/api\/media\/downloads\/[A-Za-z0-9_-]+$/
+    );
+  } finally {
+    config.media.publicDownloadOrigin = originalOrigin;
+  }
+});
+
 test('batch ticket creation supports multiple resumable originals in one request', async () => {
   const response = await request('/api/media/download-tickets', {
     method: 'POST',
@@ -472,8 +502,23 @@ test('derivative ticket creation enforces job ownership', async () => {
 
   const denied = await request(`/api/media/burn-jobs/${job.id}/ticket`, { method: 'POST' }, adminTwoToken);
   assert.equal(denied.status, 404);
-  const allowed = await request(`/api/media/burn-jobs/${job.id}/ticket`, { method: 'POST' }, adminOneToken);
-  assert.equal(allowed.status, 200);
+  const originalOrigin = config.media.publicDownloadOrigin;
+  config.media.publicDownloadOrigin = 'https://files.example.test:8443';
+  try {
+    const allowed = await request(
+      `/api/media/burn-jobs/${job.id}/ticket`,
+      { method: 'POST' },
+      adminOneToken
+    );
+    assert.equal(allowed.status, 200);
+    const body = await allowed.json() as { url: string };
+    assert.match(
+      body.url,
+      /^https:\/\/files\.example\.test:8443\/api\/media\/downloads\/[A-Za-z0-9_-]+$/
+    );
+  } finally {
+    config.media.publicDownloadOrigin = originalOrigin;
+  }
 });
 
 test('season and album ZIP download routes return 410 guidance', async () => {
