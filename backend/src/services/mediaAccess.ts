@@ -4,6 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { Stats } from 'fs';
 import { PlexMedia, PlexPart, PlexServerClient, PlexSubtitleTrack } from './plexService';
+import { probeEmbeddedSubtitles } from './subtitleProbe';
 
 export interface AuthorizedPart {
   metadata: PlexMedia;
@@ -85,11 +86,6 @@ export const resolveAuthorizedPart = async (
   const userMetadata = await ensureAccessiblePart(ratingKey, partKey, userClient);
   const userPart = findPart(userMetadata, partKey)!;
 
-  const userSubtitle = subtitleStreamId ? findSubtitle(userPart, subtitleStreamId) : undefined;
-  if (subtitleStreamId && !userSubtitle) {
-    throw new Error('Subtitle track does not belong to the selected media part');
-  }
-
   const ownerMetadata = await ownerClient.getMediaMetadata(ratingKey);
   const ownerMediaVersion = findMediaVersion(ownerMetadata, partKey);
   const ownerPart = (ownerMediaVersion?.Part || []).find(part => part.key === partKey);
@@ -97,18 +93,25 @@ export const resolveAuthorizedPart = async (
     throw new Error('The configured Plex owner cannot resolve the selected local file');
   }
 
-  const ownerSubtitle = subtitleStreamId ? findSubtitle(ownerPart, subtitleStreamId) : undefined;
+  const sourcePath = await canonicalizeMediaPath(ownerPart.file, mediaRoots);
+  const sourceFingerprint = await fingerprintFile(sourcePath);
+  let ownerSubtitle = subtitleStreamId
+    ? findSubtitle(ownerPart, subtitleStreamId) || findSubtitle(userPart, subtitleStreamId)
+    : undefined;
+  if (subtitleStreamId && !ownerSubtitle) {
+    ownerSubtitle = (await probeEmbeddedSubtitles(sourcePath, sourceFingerprint))
+      .find(track => track.id === subtitleStreamId);
+  }
   if (subtitleStreamId && !ownerSubtitle) {
     throw new Error('Subtitle track could not be resolved on the selected media part');
   }
 
-  const sourcePath = await canonicalizeMediaPath(ownerPart.file, mediaRoots);
   return {
     metadata: userMetadata,
     mediaVersion: ownerMediaVersion!,
     part: ownerPart,
     subtitle: ownerSubtitle,
     sourcePath,
-    sourceFingerprint: await fingerprintFile(sourcePath),
+    sourceFingerprint,
   };
 };

@@ -97,6 +97,9 @@ export interface BatchDownloadTarget {
   partKey: string;
   filename: string;
   title: string;
+  container?: string;
+  videoCodec?: string;
+  audioCodec?: string;
 }
 
 export interface BatchDownloadTicket extends DownloadTicket {
@@ -106,6 +109,15 @@ export interface BatchDownloadTicket extends DownloadTicket {
 
 export interface BatchDownloadResult {
   tickets: BatchDownloadTicket[];
+  errors: Array<{
+    ratingKey: string;
+    partKey: string;
+    error: string;
+  }>;
+}
+
+export interface BatchCompatibleResult {
+  jobs: BurnJob[];
   errors: Array<{
     ratingKey: string;
     partKey: string;

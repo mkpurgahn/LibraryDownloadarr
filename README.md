@@ -11,7 +11,7 @@
 
 ## Overview
 
-LibraryDownloadarr is a modern, self-hosted web application that provides a beautiful interface for downloading media from your Plex Media Server. Built with a sleek dark theme reminiscent of the *arr ecosystem (Sonarr, Radarr, Overseerr), it offers a user-friendly way to browse your Plex libraries and download original media files with a single click.
+LibraryDownloadarr is a modern, self-hosted web application that provides a beautiful interface for downloading media from your Plex Media Server. Built with a sleek dark theme reminiscent of the *arr ecosystem (Sonarr, Radarr, Overseerr), it offers a user-friendly way to browse Plex libraries and download ready-to-play MP4 video with a single click.
 
 **Key Features:**
 - 🎬 **Plex OAuth Integration** - Users sign in with their existing Plex accounts
@@ -326,11 +326,13 @@ recovery.
 
 1. **User browses libraries** available to their Plex account
 2. **Search or browse** for desired media
-3. **Click download** on a movie, episode, or track
-4. **A scoped ticket is created** for the exact user, ratingKey, Part, and file
-5. **The local original file streams with HTTP Range support**, including
-   `HEAD`, `200`, `206`, and `416`, so browser retries can resume safely
-6. **Download recorded** in history (visible to admins)
+3. **Click Download MP4** on a movie or episode, or select multiple episodes
+4. **Existing MP4 video starts immediately; other video joins the persistent conversion queue**
+5. **The download starts automatically** when preparation finishes
+6. **A scoped ticket is created** for the exact user, ratingKey, Part, and file
+7. **The local file streams with HTTP Range support**, including `HEAD`, `200`,
+   `206`, and `416`, so browser retries can resume safely
+8. **Download recorded** in history (visible to admins)
 
 Tickets are cryptographically random, stored only as hashes, expire after 24
 hours by default, and do not grant API or session access. Originals are never
@@ -338,19 +340,24 @@ modified. `Part.file` is resolved with the Plex owner token only after the
 user's token proves access, canonicalized with `realpath`, and restricted to
 `MEDIA_ROOTS`.
 
-Selecting no subtitle always returns the untouched original immediately.
-Desktop Chromium browsers can optionally split one original file across up to
-four long Range requests and write the chunks directly to a user-selected
-file. Pausing commits a non-secret checkpoint; resuming requires selecting the
-same partial file. Browsers without the File System Access API keep the native
-resumable download path.
+Video is MP4-first automatically. Existing MP4 sources download directly.
+H.264/AAC sources in other containers are repackaged without re-encoding,
+H.264 sources with other audio keep the video and convert audio to stereo AAC,
+and other video codecs are transcoded to H.264/AAC. Audio-only media retains
+its original format.
 
-Compatible MP4 preparation is also opt-in. H.264/AAC sources are repackaged
-without re-encoding, H.264 sources with other audio keep the video and convert
-audio to stereo AAC, and other video codecs are transcoded to H.264/AAC.
-Selecting an authorized subtitle creates an asynchronous burn job. Text
-subtitles use libass; supported bitmap subtitles use FFmpeg overlay. Outputs
-default to H.264 + AAC MP4 and are atomically published into `BURN_CACHE_DIR`.
+Desktop Chromium browsers automatically split single-file video downloads
+across up to four long Range requests and write the chunks directly to a
+user-selected file. Pausing commits a non-secret checkpoint; resuming requires
+selecting the same partial file. Browsers without the File System Access API
+use the native resumable download path. Batch and season conversions queue
+safely and start native browser downloads as each MP4 becomes ready.
+
+Selecting an authorized subtitle creates an asynchronous burn job, then starts
+the resulting MP4 download automatically. Text subtitles use libass; supported
+bitmap subtitles use FFmpeg overlay. If Plex omits real embedded subtitle
+streams, the authorized local media file is inspected with `ffprobe`. Outputs
+are atomically published into `BURN_CACHE_DIR`.
 For Unraid Intel UHD 730, mount `/dev/dri` and set
 `FFMPEG_VIDEO_ENCODER=h264_vaapi`; development should use `libx264`. The image
 also supports `h264_qsv`, but VAAPI is the verified path for this Unraid host.
@@ -366,6 +373,8 @@ header. The byte route accepts only its scoped ticket.
 
 | Method | Endpoint | Result |
 |--------|----------|--------|
+| `POST` | `/api/media/download-tickets` with `{ items }` | batch `{ tickets, errors }` |
+| `POST` | `/api/media/compatible-jobs` with `{ items }` | batch `202 { jobs, errors }` |
 | `POST` | `/api/media/:ratingKey/download-ticket` with `{ partKey }` | `{ url, expiresAt, filename }` |
 | `POST` | `/api/media/:ratingKey/compatible-jobs` with `{ partKey }` | `202 { job }` |
 | `POST` | `/api/media/:ratingKey/burn-jobs` with `{ partKey, subtitleStreamId }` | `202 { job }` |
@@ -387,7 +396,7 @@ and embedded/external classification.
 - **Database**: SQLite database stores users, sessions, settings, and download history
 - **Logs**: Application logs written to `logs/` directory
 - **Read-only Media Access**: Original media is mounted read-only and is never deleted or modified
-- **Derivative Cache**: Optional compatible and subtitle-burned MP4 files are stored only in the configured writable cache, cleaned up by TTL, and bounded by `BURN_CACHE_MAX_GB`
+- **Derivative Cache**: Automatically prepared and subtitle-burned MP4 files are stored only in the configured writable cache, cleaned up by TTL, and bounded by `BURN_CACHE_MAX_GB`
 
 ### System Requirements
 

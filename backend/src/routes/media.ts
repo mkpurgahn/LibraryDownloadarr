@@ -12,7 +12,6 @@ import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
 import { BurnJob, DatabaseService } from '../models/database';
 import {
   buildBurnCommand,
-  buildCompatibleCommand,
   BurnManager,
   burnCacheKey,
   classifySubtitle,
@@ -28,7 +27,8 @@ import {
   resolveAuthorizedPart,
 } from '../services/mediaAccess';
 import { sanitizeMedia, sanitizeMediaList } from '../services/mediaSanitizer';
-import { PlexServerClient, PlexService, plexService } from '../services/plexService';
+import { PlexMedia, PlexServerClient, PlexService, plexService } from '../services/plexService';
+import { probeEmbeddedSubtitles } from '../services/subtitleProbe';
 import { logger } from '../utils/logger';
 import { readSessionCookie } from '../utils/sessionCookie';
 
@@ -142,6 +142,123 @@ export const createMediaRouter = (
     }
   };
 
+  const needsEmbeddedSubtitleHydration = (metadata: PlexMedia): boolean =>
+    (metadata.Media || []).some(media =>
+      (media.Part || []).some(part =>
+        (part.subtitles?.length || 0) === 0 &&
+        !(part.Stream || []).some(
+          stream => Number(stream.streamType ?? stream.streamTypeId) === 3
+        )
+      )
+    );
+
+  const hydrateMissingEmbeddedSubtitles = async (
+    metadata: PlexMedia,
+    ownerMetadata: PlexMedia
+  ): Promise<PlexMedia> => {
+    const ownerParts = ownerMetadata.Media?.flatMap(media => media.Part || []) || [];
+    for (const media of metadata.Media || []) {
+      for (const part of media.Part || []) {
+        const hasPlexSubtitles =
+          (part.subtitles?.length || 0) > 0 ||
+          (part.Stream || []).some(
+            stream => Number(stream.streamType ?? stream.streamTypeId) === 3
+          );
+        if (hasPlexSubtitles) continue;
+        const ownerPart = ownerParts.find(candidate => candidate.key === part.key);
+        if (!ownerPart?.file) continue;
+        try {
+          const sourcePath = await canonicalizeMediaPath(ownerPart.file, config.media.roots);
+          const sourceFingerprint = await fingerprintFile(sourcePath);
+          const subtitles = await probeEmbeddedSubtitles(sourcePath, sourceFingerprint);
+          if (subtitles.length === 0) continue;
+          part.subtitles = subtitles;
+          part.Stream = [
+            ...(part.Stream || []),
+            ...subtitles.map(track => ({
+              id: track.id,
+              index: track.index,
+              streamType: 3,
+              codec: track.codec,
+              language: track.language,
+              languageCode: track.languageCode,
+              title: track.title,
+              displayTitle: track.title,
+              forced: track.forced,
+              hearingImpaired: track.hearingImpaired,
+              embedded: true,
+            })),
+          ];
+        } catch (error) {
+          logger.warn('Embedded subtitle probe failed', {
+            ratingKey: metadata.ratingKey,
+            partKey: part.key,
+            error,
+          });
+        }
+      }
+    }
+    return metadata;
+  };
+
+  const createCompatiblePreparation = (
+    userId: string,
+    ratingKey: string,
+    partKey: string,
+    authorized: Awaited<ReturnType<typeof resolveAuthorizedPart>>
+  ): BurnJob => {
+    const videoCodec = String(
+      authorized.part.Stream?.find(
+        stream => Number(stream.streamType ?? stream.streamTypeId) === 1
+      )?.codec ||
+      authorized.mediaVersion.videoCodec ||
+      ''
+    );
+    if (!videoCodec) {
+      throw new Error('Compatible MP4 requires a media part with a video stream');
+    }
+    const strategy = chooseCompatibleStrategy(
+      authorized.mediaVersion,
+      authorized.part.Stream
+    );
+    const cacheKey = burnCacheKey(
+      authorized.sourceFingerprint,
+      COMPATIBLE_STREAM_ID,
+      strategy,
+      strategy === 'transcode' ? config.burn.encoder : 'copy',
+      strategy === 'transcode' ? config.burn.qsvDevice : ''
+    );
+    const filename = `${path.parse(authorized.sourcePath).name}.mp4`;
+    const artifact = db.getArtifactByCacheKey(cacheKey);
+    const job = db.createBurnJob({
+      userId,
+      ratingKey,
+      partKey,
+      subtitleStreamId: COMPATIBLE_STREAM_ID,
+      sourcePath: authorized.sourcePath,
+      sourceFingerprint: authorized.sourceFingerprint,
+      cacheKey,
+      error: undefined,
+      filename,
+      size: artifact?.size,
+      artifactId: artifact?.id,
+      mediaDurationMs: authorized.part.duration || authorized.metadata.duration,
+      subtitleJson: JSON.stringify({ strategy }),
+    });
+    if (artifact && fs.existsSync(artifact.filePath)) {
+      db.updateBurnJob(job.id, {
+        status: 'ready',
+        progress: 100,
+        artifactId: artifact.id,
+        filename: artifact.filename,
+        size: artifact.size,
+      });
+    } else {
+      burnManager.enqueue(job);
+    }
+    return db.getBurnJob(job.id)!;
+  };
+
   const validateTicketAccess = async (ticket: BurnJob | {
     userId: string;
     ratingKey: string;
@@ -236,7 +353,7 @@ export const createMediaRouter = (
     if (/does not belong|not accessible|cannot resolve|outside MEDIA_ROOTS|not configured/.test(detail)) {
       return res.status(403).json({ error: detail });
     }
-    if (/Unsupported subtitle|no local file|External subtitle|requires a media part with a video stream/.test(detail)) {
+    if (/Unsupported subtitle|Subtitle track|no local file|External subtitle|requires a media part with a video stream/.test(detail)) {
       return res.status(422).json({ error: detail });
     }
     if (/changed since the ticket|ticket must be renewed/.test(detail)) {
@@ -468,6 +585,77 @@ export const createMediaRouter = (
   );
 
   router.post(
+    '/compatible-jobs',
+    creationLimiter,
+    authMiddleware,
+    async (req: AuthRequest, res) => {
+      const items = req.body?.items;
+      if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
+        return res.status(400).json({ error: 'Select between 1 and 100 media files.' });
+      }
+      if (
+        items.some(
+          item =>
+            !item ||
+            typeof item !== 'object' ||
+            !validRatingKey(String(item.ratingKey || '')) ||
+            !validPartKey(item.partKey)
+        )
+      ) {
+        return res.status(400).json({
+          error: 'Every selected file requires a valid ratingKey and partKey.',
+        });
+      }
+
+      try {
+        await forceMembership(req);
+        const clients = credentials(req);
+        const uniqueItems = Array.from(
+          new Map(
+            items.map(item => [
+              `${item.ratingKey}:${item.partKey}`,
+              { ratingKey: String(item.ratingKey), partKey: String(item.partKey) },
+            ])
+          ).values()
+        );
+        const jobs: object[] = [];
+        const errors: object[] = [];
+        for (const item of uniqueItems) {
+          try {
+            const authorized = await resolveAuthorizedPart(
+              item.ratingKey,
+              item.partKey,
+              clients.user,
+              clients.owner,
+              config.media.roots
+            );
+            jobs.push(publicJob(createCompatiblePreparation(
+              req.user!.id,
+              item.ratingKey,
+              item.partKey,
+              authorized
+            )));
+          } catch (error) {
+            logger.warn('Selected media file could not be prepared as MP4', {
+              ratingKey: item.ratingKey,
+              partKey: item.partKey,
+              error,
+            });
+            errors.push({
+              ratingKey: item.ratingKey,
+              partKey: item.partKey,
+              error: 'This file could not be prepared as MP4.',
+            });
+          }
+        }
+        return res.status(202).json({ jobs, errors });
+      } catch (error) {
+        return handleRouteError(res, error, 'Failed to prepare selected MP4 files');
+      }
+    }
+  );
+
+  router.post(
     '/:ratingKey/compatible-jobs',
     creationLimiter,
     authMiddleware,
@@ -487,57 +675,13 @@ export const createMediaRouter = (
           clients.owner,
           config.media.roots
         );
-        const videoCodec = String(
-          authorized.part.Stream?.find(
-            stream => Number(stream.streamType ?? stream.streamTypeId) === 1
-          )?.codec ||
-          authorized.mediaVersion.videoCodec ||
-          ''
-        );
-        if (!videoCodec) {
-          throw new Error('Compatible MP4 requires a media part with a video stream');
-        }
-        const strategy = chooseCompatibleStrategy(
-          authorized.mediaVersion,
-          authorized.part.Stream
-        );
-        buildCompatibleCommand(authorized.sourcePath, 'validation.mp4', strategy, config.burn);
-        const cacheKey = burnCacheKey(
-          authorized.sourceFingerprint,
-          COMPATIBLE_STREAM_ID,
-          strategy,
-          config.burn.encoder,
-          config.burn.qsvDevice
-        );
-        const filename = `${path.parse(authorized.sourcePath).name}.compatible.mp4`;
-        const artifact = db.getArtifactByCacheKey(cacheKey);
-        const job = db.createBurnJob({
-          userId: req.user!.id,
+        const job = createCompatiblePreparation(
+          req.user!.id,
           ratingKey,
           partKey,
-          subtitleStreamId: COMPATIBLE_STREAM_ID,
-          sourcePath: authorized.sourcePath,
-          sourceFingerprint: authorized.sourceFingerprint,
-          cacheKey,
-          error: undefined,
-          filename,
-          size: artifact?.size,
-          artifactId: artifact?.id,
-          mediaDurationMs: authorized.part.duration || authorized.metadata.duration,
-          subtitleJson: JSON.stringify({ strategy }),
-        });
-        if (artifact && fs.existsSync(artifact.filePath)) {
-          db.updateBurnJob(job.id, {
-            status: 'ready',
-            progress: 100,
-            artifactId: artifact.id,
-            filename: artifact.filename,
-            size: artifact.size,
-          });
-        } else {
-          burnManager.enqueue(job);
-        }
-        return res.status(202).json({ job: publicJob(db.getBurnJob(job.id)!) });
+          authorized
+        );
+        return res.status(202).json({ job: publicJob(job) });
       } catch (error) {
         return handleRouteError(res, error, 'Failed to create compatible MP4 job');
       }
@@ -726,7 +870,23 @@ export const createMediaRouter = (
 
   router.get('/:ratingKey/episodes', authMiddleware, async (req: AuthRequest, res) => {
     try {
-      const episodes = await credentials(req).user.getEpisodes(req.params.ratingKey);
+      const clients = credentials(req);
+      const episodes = await clients.user.getEpisodes(req.params.ratingKey);
+      const pending = episodes.filter(needsEmbeddedSubtitleHydration);
+      if (pending.length > 0) {
+        const ownerEpisodes = await clients.owner.getEpisodes(req.params.ratingKey);
+        const ownerByRatingKey = new Map(
+          ownerEpisodes.map(episode => [episode.ratingKey, episode])
+        );
+        await Promise.all(
+          pending.map(episode => {
+            const ownerEpisode = ownerByRatingKey.get(episode.ratingKey);
+            return ownerEpisode
+              ? hydrateMissingEmbeddedSubtitles(episode, ownerEpisode)
+              : Promise.resolve(episode);
+          })
+        );
+      }
       return res.json({ episodes: sanitizeMediaList(episodes) });
     } catch (error) {
       return handleRouteError(res, error, 'Failed to get episodes');
@@ -748,7 +908,12 @@ export const createMediaRouter = (
   router.get('/:ratingKey', authMiddleware, async (req: AuthRequest, res) => {
     if (!validRatingKey(req.params.ratingKey)) return res.status(400).json({ error: 'Invalid ratingKey' });
     try {
-      const metadata = await credentials(req).user.getMediaMetadata(req.params.ratingKey);
+      const clients = credentials(req);
+      const metadata = await clients.user.getMediaMetadata(req.params.ratingKey);
+      if (needsEmbeddedSubtitleHydration(metadata)) {
+        const ownerMetadata = await clients.owner.getMediaMetadata(req.params.ratingKey);
+        await hydrateMissingEmbeddedSubtitles(metadata, ownerMetadata);
+      }
       return res.json({ metadata: sanitizeMedia(metadata) });
     } catch (error) {
       return handleRouteError(res, error, 'Failed to get media metadata');

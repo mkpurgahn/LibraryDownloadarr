@@ -8,6 +8,7 @@ import {
   Settings,
   BurnJob,
   BatchDownloadResult,
+  BatchCompatibleResult,
   BatchDownloadTarget,
   DownloadTicket,
 } from '../types';
@@ -195,6 +196,13 @@ class ApiClient {
       { partKey }
     );
     return response.data.job;
+  }
+
+  async createCompatibleJobs(items: BatchDownloadTarget[]): Promise<BatchCompatibleResult> {
+    const response = await this.client.post<BatchCompatibleResult>('/media/compatible-jobs', {
+      items: items.map(({ ratingKey, partKey }) => ({ ratingKey, partKey })),
+    });
+    return response.data;
   }
 
   async getBurnJob(jobId: string): Promise<BurnJob> {

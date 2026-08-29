@@ -11,7 +11,7 @@ interface WritableFileStream {
   abort(reason?: unknown): Promise<void>;
 }
 
-interface WritableFileHandle {
+export interface ParallelFileHandle {
   name: string;
   getFile(): Promise<File>;
   createWritable(options?: {
@@ -20,7 +20,7 @@ interface WritableFileHandle {
   }): Promise<WritableFileStream>;
 }
 
-type SaveFilePicker = (options: { suggestedName: string }) => Promise<WritableFileHandle>;
+type SaveFilePicker = (options: { suggestedName: string }) => Promise<ParallelFileHandle>;
 
 interface FilePickerWindow extends Window {
   showSaveFilePicker?: SaveFilePicker;
@@ -39,6 +39,8 @@ export interface ParallelCheckpoint {
   partKey: string;
   filename: string;
   title: string;
+  mode?: 'original' | 'burned' | 'compatible';
+  jobId?: string;
   etag: string;
   totalBytes: number;
   segments: ParallelSegment[];
@@ -53,6 +55,9 @@ interface ParallelDownloadOptions {
   partKey: string;
   filename: string;
   title: string;
+  mode?: 'original' | 'burned' | 'compatible';
+  jobId?: string;
+  handle?: ParallelFileHandle;
   signal: AbortSignal;
   createTicket: () => Promise<DownloadTicket>;
   resolveUrl: (url: string) => Promise<string>;
@@ -107,6 +112,16 @@ export const loadParallelCheckpoints = (userId: string): ParallelCheckpoint[] =>
 export const supportsParallelDownloads = (): boolean =>
   window.isSecureContext &&
   typeof (window as FilePickerWindow).showSaveFilePicker === 'function';
+
+export const pickParallelDownloadFile = async (
+  suggestedName: string
+): Promise<ParallelFileHandle> => {
+  const picker = (window as FilePickerWindow).showSaveFilePicker;
+  if (!picker || !window.isSecureContext) {
+    throw new Error('Accelerated downloads require a desktop Chromium browser.');
+  }
+  return picker({ suggestedName });
+};
 
 const createSegments = (totalBytes: number): ParallelSegment[] => {
   const segmentCount = Math.max(
@@ -173,6 +188,8 @@ const isValidCheckpoint = (
     checkpoint &&
       checkpoint.ratingKey === options.ratingKey &&
       checkpoint.partKey === options.partKey &&
+      (checkpoint.mode || 'original') === (options.mode || 'original') &&
+      checkpoint.jobId === options.jobId &&
       checkpoint.filename === file.name &&
       checkpoint.etag === metadata.etag &&
       checkpoint.totalBytes === metadata.totalBytes &&
@@ -193,13 +210,8 @@ const isValidCheckpoint = (
 export const runParallelDownload = async (
   options: ParallelDownloadOptions
 ): Promise<{ filename: string; totalBytes: number }> => {
-  const picker = (window as FilePickerWindow).showSaveFilePicker;
-  if (!picker || !window.isSecureContext) {
-    throw new Error('Parallel downloads require desktop Chrome, Edge, or another Chromium browser.');
-  }
-
   // The picker must be opened before any network await so the browser preserves user activation.
-  const handle = await picker({ suggestedName: options.filename });
+  const handle = options.handle || await pickParallelDownloadFile(options.filename);
   const ticket = await options.createTicket();
   const resolvedUrl = await options.resolveUrl(ticket.url);
   const metadata = await getTicketMetadata(resolvedUrl);
@@ -229,6 +241,8 @@ export const runParallelDownload = async (
     partKey: options.partKey,
     filename: handle.name,
     title: options.title,
+    mode: options.mode,
+    jobId: options.jobId,
     etag: metadata.etag,
     totalBytes: metadata.totalBytes,
     segments,
@@ -395,6 +409,8 @@ export const runParallelDownload = async (
         partKey: options.partKey,
         filename: handle.name,
         title: options.title,
+        mode: options.mode,
+        jobId: options.jobId,
         etag: metadata.etag,
         totalBytes: metadata.totalBytes,
         segments,

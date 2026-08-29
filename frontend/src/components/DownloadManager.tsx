@@ -45,7 +45,7 @@ export const DownloadManager: React.FC = () => {
       {downloads.map((download) => {
         const isPreparing = download.status === 'queued' || download.status === 'preparing';
         const isParallelActive =
-          download.mode === 'parallel' &&
+          (download.transfer === 'parallel' || download.mode === 'parallel') &&
           (download.status === 'downloading' || download.status === 'pausing');
         const preparationLabel =
           download.status === 'queued'
@@ -108,7 +108,7 @@ export const DownloadManager: React.FC = () => {
                   />
                 </div>
                 <p className="mt-2 text-xs leading-5 text-gray-400">
-                  You can close this page and return later. The original media is never changed.
+                  You can close this page and return later. The MP4 downloads automatically when ready.
                 </p>
               </div>
             )}
@@ -116,23 +116,22 @@ export const DownloadManager: React.FC = () => {
             {download.status === 'ready' && (
               <div className="mt-3">
                 <p className="text-xs leading-5 text-emerald-300">
-                  {download.mode === 'compatible'
-                    ? 'Your compatible MP4 is ready.'
-                    : 'Your subtitled MP4 is ready.'}{' '}
-                  The browser can pause and resume this file.
+                  Your MP4 is ready. {download.error ? 'Automatic download needs your help.' : 'Starting download...'}
                 </p>
                 {download.error && (
-                  <p className="mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-200">
-                    {download.error}
-                  </p>
+                  <>
+                    <p className="mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-200">
+                      {download.error}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void downloadPrepared(download.id)}
+                      className="btn-primary mt-3 min-h-11 w-full"
+                    >
+                      Retry download
+                    </button>
+                  </>
                 )}
-                <button
-                  type="button"
-                  onClick={() => void downloadPrepared(download.id)}
-                  className="btn-primary mt-3 min-h-11 w-full"
-                >
-                  Download prepared file
-                </button>
               </div>
             )}
 
@@ -150,7 +149,7 @@ export const DownloadManager: React.FC = () => {
               </p>
             )}
 
-            {download.mode === 'parallel' &&
+            {(download.transfer === 'parallel' || download.mode === 'parallel') &&
               ['downloading', 'pausing', 'paused'].includes(download.status) && (
                 <div className="mt-3">
                   <div className="mb-1.5 flex items-center justify-between gap-3 text-xs">
@@ -210,7 +209,8 @@ export const DownloadManager: React.FC = () => {
                     ? 'Preparation was cancelled.'
                     : download.error || 'The download could not be prepared. Try again.'}
                 </div>
-                {download.mode === 'parallel' && download.status === 'failed' && (
+                {(download.transfer === 'parallel' || download.mode === 'parallel') &&
+                  download.status === 'failed' && (
                   <button
                     type="button"
                     onClick={() => void resumeParallelDownload(download.id)}
@@ -218,7 +218,7 @@ export const DownloadManager: React.FC = () => {
                   >
                     Retry accelerated download
                   </button>
-                )}
+                  )}
               </div>
             )}
           </section>

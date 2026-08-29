@@ -23,7 +23,8 @@ function isSubtitle(stream: MediaStream): boolean {
 }
 
 function subtitleLabel(stream: MediaStream): string {
-  const language = stream.displayTitle || stream.title || stream.language || stream.languageCode || 'Unknown language';
+  const language =
+    stream.displayTitle || stream.title || stream.language || stream.languageCode || 'Unknown language';
   const normalizedLanguage = language.toLowerCase();
   const details = [
     stream.forced && !normalizedLanguage.includes('forced') ? 'Forced' : null,
@@ -58,16 +59,13 @@ export const DownloadChoice: React.FC<DownloadChoiceProps> = ({
     startParallelDownload,
     parallelSupported,
   } = useDownloads();
-  const [format, setFormat] = useState('original');
-  const [accelerated, setAccelerated] = useState(false);
+  const [subtitleId, setSubtitleId] = useState('');
   const subtitles = useMemo(() => (part.Stream || []).filter(isSubtitle), [part.Stream]);
-  const selectedSubtitle = format.startsWith('subtitle:')
-    ? subtitles.find((stream) => `subtitle:${stream.id}` === format)
-    : undefined;
+  const selectedSubtitle = subtitles.find(stream => stream.id === subtitleId);
   const active = downloads.find(
-    (download) =>
+    download =>
       download.partKey === part.key &&
-      ['requesting', 'queued', 'preparing', 'downloading', 'pausing'].includes(download.status)
+      ['requesting', 'queued', 'preparing', 'ready', 'downloading', 'pausing', 'paused'].includes(download.status)
   );
   const filename =
     part.filename ||
@@ -76,12 +74,14 @@ export const DownloadChoice: React.FC<DownloadChoiceProps> = ({
   const videoCodec = mediaPart.videoCodec?.toUpperCase();
   const audioCodec = mediaPart.audioCodec?.toUpperCase();
   const container = (part.container || mediaPart.container || '').toUpperCase();
+  const isVideo = Boolean(videoCodec);
+  const isMp4 = container === 'MP4';
   const compatibleDescription =
     videoCodec === 'H264' && audioCodec === 'AAC'
-      ? 'The server will quickly repackage the existing video and audio as MP4 without changing quality.'
+      ? 'This video only needs quick MP4 packaging, with no quality change.'
       : videoCodec === 'H264'
-        ? 'The server will keep the original video and convert only the audio for wider playback support.'
-        : 'The server will create an H.264/AAC MP4 for playback in browsers and built-in device players.';
+        ? 'The original video is kept while its audio is converted for wider playback.'
+        : 'The server creates an H.264/AAC MP4 for browsers and built-in device players.';
 
   const act = async () => {
     if (selectedSubtitle) {
@@ -95,16 +95,25 @@ export const DownloadChoice: React.FC<DownloadChoiceProps> = ({
       );
       return;
     }
-    if (format === 'compatible') {
+    if (isVideo && !isMp4) {
       await startCompatibleJob(ratingKey, part.key, filename, title);
       return;
     }
-    if (accelerated && parallelSupported) {
+    if (isVideo && parallelSupported) {
       await startParallelDownload(ratingKey, part.key, filename, title);
       return;
     }
     await startOriginalDownload(ratingKey, part.key, filename, title);
   };
+
+  const activeLabel =
+    active?.status === 'preparing' || active?.status === 'downloading'
+      ? `${active.status === 'downloading' ? 'Downloading' : 'Preparing'} ${Math.round(active.progress)}%`
+      : active?.status === 'queued'
+        ? 'Queued for MP4'
+        : active?.status === 'paused'
+          ? 'Paused in downloads'
+        : 'Starting...';
 
   return (
     <div className="min-w-0 w-full">
@@ -118,52 +127,26 @@ export const DownloadChoice: React.FC<DownloadChoiceProps> = ({
             <span className="media-fact tabular-nums">{formatFileSize(part.size)}</span>
           </div>
 
-          <label className="mt-3 block min-w-0">
-            <span className="mb-1.5 flex items-center gap-2 text-xs font-medium text-gray-300">
-              <CaptionIcon />
-              Download format
-            </span>
-            <select
-              className="input min-h-11 max-w-full text-base md:text-sm"
-              value={format}
-              onChange={(event) => {
-                setFormat(event.target.value);
-                if (event.target.value !== 'original') setAccelerated(false);
-              }}
-              disabled={Boolean(active)}
-            >
-              <option value="original">Original file - no conversion</option>
-              {videoCodec && (
-                <option value="compatible">Compatible MP4 - prepare on server</option>
-              )}
-              {subtitles.map((stream) => (
-                <option
-                  key={stream.id}
-                  value={`subtitle:${stream.id}`}
-                  disabled={stream.burnSupported === false}
-                >
-                  Burn subtitles: {subtitleLabel(stream)}
-                  {stream.burnSupported === false ? ' - unavailable' : ''}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          {parallelSupported && format === 'original' && (
-            <label className="mt-2 flex cursor-pointer items-start gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2.5 transition-colors hover:border-primary-400/40">
-              <input
-                type="checkbox"
-                checked={accelerated}
-                onChange={(event) => setAccelerated(event.target.checked)}
-                disabled={Boolean(active)}
-                className="mt-0.5 h-4 w-4 rounded border-white/20 bg-dark-200 text-primary-500 focus:ring-primary-500"
-              />
-              <span className="min-w-0">
-                <span className="block text-xs font-medium text-gray-200">Accelerated download</span>
-                <span className="mt-0.5 block text-xs leading-4 text-gray-400">
-                  Uses up to four connections and saves directly to a file you choose.
-                </span>
+          {isVideo && subtitles.length > 0 && (
+            <label className="mt-3 block min-w-0">
+              <span className="mb-1.5 flex items-center gap-2 text-xs font-medium text-gray-300">
+                <CaptionIcon />
+                Subtitles (optional)
               </span>
+              <select
+                className="input min-h-11 max-w-full text-base md:text-sm"
+                value={subtitleId}
+                onChange={event => setSubtitleId(event.target.value)}
+                disabled={Boolean(active)}
+              >
+                <option value="">No burned-in subtitles</option>
+                {subtitles.map(stream => (
+                  <option key={stream.id} value={stream.id} disabled={stream.burnSupported === false}>
+                    {subtitleLabel(stream)}
+                    {stream.burnSupported === false ? ' - unavailable' : ''}
+                  </option>
+                ))}
+              </select>
             </label>
           )}
         </div>
@@ -176,45 +159,22 @@ export const DownloadChoice: React.FC<DownloadChoiceProps> = ({
             compact ? 'sm:w-auto' : 'mt-3 md:w-auto'
           }`}
         >
-          {selectedSubtitle ? <CaptionIcon /> : <DownloadIcon className="h-4 w-4" />}
-          {active
-            ? active.status === 'preparing' || active.status === 'downloading'
-              ? `${active.mode === 'parallel' ? 'Downloading' : 'Preparing'} ${Math.round(active.progress)}%`
-              : 'Starting...'
-            : selectedSubtitle
-              ? 'Prepare subtitled MP4'
-              : format === 'compatible'
-                ? 'Prepare compatible MP4'
-                : accelerated
-                  ? 'Choose file and accelerate'
-                  : 'Download original'}
+          <DownloadIcon className="h-4 w-4" />
+          {active ? activeLabel : isVideo ? 'Download MP4' : 'Download file'}
         </button>
       </div>
 
       {!compact && (
         <p className="mt-2 max-w-2xl text-xs leading-5 text-gray-400">
           {selectedSubtitle
-            ? 'Creates a compatible H.264/AAC MP4 first. You can leave this page while the server prepares it.'
-            : format === 'compatible'
-              ? `${compatibleDescription} Compatible copies are made only when requested and expire from the server cache.`
-              : accelerated
-                ? 'Keep this page open while downloading. Pause before closing it. Resuming requires choosing the same partial file and enough free space to preserve it safely.'
-                : container === 'MKV'
-                  ? (
-                    <>
-                      Downloads the untouched MKV. For broad playback support, install{' '}
-                      <a
-                        href="https://www.videolan.org/vlc/"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="font-medium text-primary-300 underline decoration-primary-400/40 underline-offset-2 hover:text-primary-200"
-                      >
-                        VLC
-                      </a>{' '}
-                      or choose Compatible MP4.
-                    </>
-                  )
-                  : 'Downloads the untouched original. Your browser handles pause and resume.'}
+            ? 'The server burns your selected subtitles into the MP4, then starts the download automatically.'
+            : isVideo && !isMp4
+              ? `${compatibleDescription} The download starts automatically when it is ready.`
+              : isVideo && parallelSupported
+                ? 'Saves the MP4 directly to a location you choose using up to four download connections.'
+                : isVideo
+                  ? 'Downloads the ready-to-play MP4 immediately.'
+                  : 'Downloads the original audio file immediately.'}
         </p>
       )}
     </div>

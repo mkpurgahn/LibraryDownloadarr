@@ -18,6 +18,7 @@ import {
 } from '../services/burnService';
 import { ensurePlexMembership } from '../services/membershipService';
 import { sanitizeMedia } from '../services/mediaSanitizer';
+import { probeEmbeddedSubtitles } from '../services/subtitleProbe';
 import { redactForLog } from '../utils/logger';
 import {
   PlexMedia,
@@ -134,6 +135,11 @@ class MockClient extends PlexServerClient {
   override async getMediaMetadata(requestedRatingKey: string): Promise<PlexMedia> {
     if (this.denied || requestedRatingKey !== this.value.ratingKey) throw new Error('not accessible');
     return structuredClone(this.value);
+  }
+
+  override async getEpisodes(_seasonRatingKey: string): Promise<PlexMedia[]> {
+    if (this.denied) throw new Error('not accessible');
+    return [structuredClone(this.value)];
   }
 }
 
@@ -552,10 +558,51 @@ test('compatible MP4 jobs are authorized, cached, and queued without a subtitle'
   assert.equal(body.job.mode, 'compatible');
   assert.equal(body.job.strategy, 'remux');
   assert.equal(body.job.subtitleStreamId, COMPATIBLE_STREAM_ID);
-  assert.equal(body.job.filename, 'movie.compatible.mp4');
+  assert.equal(body.job.filename, 'movie.mp4');
   const job = db.getBurnJob(body.job.id);
   assert.equal(job?.subtitleJson, JSON.stringify({ strategy: 'remux' }));
   assert.equal(job?.status, 'queued');
+});
+
+test('batch compatible MP4 jobs deduplicate selections and report per-item errors', async () => {
+  const response = await request('/api/media/compatible-jobs', {
+    method: 'POST',
+    body: JSON.stringify({
+      items: [
+        { ratingKey, partKey },
+        { ratingKey, partKey },
+        { ratingKey: 'missing', partKey },
+      ],
+    }),
+  });
+  assert.equal(response.status, 202);
+  const body = await response.json() as {
+    jobs: Array<{ ratingKey: string; partKey: string; filename: string }>;
+    errors: Array<{ ratingKey: string; partKey: string; error: string }>;
+  };
+  assert.equal(body.jobs.length, 1);
+  assert.deepEqual(
+    body.jobs.map(job => ({
+      ratingKey: job.ratingKey,
+      partKey: job.partKey,
+      filename: job.filename,
+    })),
+    [{ ratingKey, partKey, filename: 'movie.mp4' }]
+  );
+  assert.equal(body.errors.length, 1);
+  assert.equal(body.errors[0].ratingKey, 'missing');
+  assert.match(body.errors[0].error, /could not be prepared as MP4/i);
+
+  const oversized = await request('/api/media/compatible-jobs', {
+    method: 'POST',
+    body: JSON.stringify({
+      items: Array.from({ length: 101 }, (_, index) => ({
+        ratingKey: String(index),
+        partKey,
+      })),
+    }),
+  });
+  assert.equal(oversized.status, 400);
 });
 
 test('compatible MP4 converts unknown audio and rejects audio-only media', async () => {
@@ -688,6 +735,128 @@ test('public media sanitizer removes paths and annotates subtitle support', () =
   ]);
   assert.equal(streams.every(stream => !('file' in stream)), true);
   assert.equal(part.subtitles!.every(track => !('file' in track)), true);
+});
+
+test('ffprobe fallback exposes and authorizes embedded subtitles omitted by Plex', async () => {
+  const originalFfmpegPath = config.burn.ffmpegPath;
+  const originalMetadata = service.value;
+  const fakeBin = path.join(testRoot, 'fake-ffmpeg');
+  const fakeProbe = path.join(fakeBin, 'ffprobe');
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(
+    fakeProbe,
+    `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  streams: [
+    {
+      index: 3,
+      codec_name: 'subrip',
+      tags: { language: 'eng' },
+      disposition: { forced: 0, hearing_impaired: 0 }
+    },
+    {
+      index: 4,
+      codec_name: 'subrip',
+      tags: { language: 'eng', title: 'SDH' },
+      disposition: { forced: 0, hearing_impaired: 1 }
+    }
+  ]
+}));
+`
+  );
+  await fs.chmod(fakeProbe, 0o755);
+  config.burn.ffmpegPath = path.join(fakeBin, 'ffmpeg');
+
+  const withoutPlexSubtitles = metadata();
+  withoutPlexSubtitles.Media![0].Part[0].Stream =
+    withoutPlexSubtitles.Media![0].Part[0].Stream!
+      .filter(stream => Number(stream.streamType) !== 3);
+  withoutPlexSubtitles.Media![0].Part[0].subtitles = [];
+  service.value = withoutPlexSubtitles;
+
+  try {
+    const tracks = await probeEmbeddedSubtitles(mediaFile, `probe-${randomUUID()}`);
+    assert.deepEqual(
+      tracks.map(track => ({
+        id: track.id,
+        index: track.index,
+        subtitleIndex: track.subtitleIndex,
+        language: track.language,
+        title: track.title,
+        hearingImpaired: track.hearingImpaired,
+      })),
+      [
+        {
+          id: 'probe-3',
+          index: 3,
+          subtitleIndex: 0,
+          language: 'English',
+          title: 'English',
+          hearingImpaired: false,
+        },
+        {
+          id: 'probe-4',
+          index: 4,
+          subtitleIndex: 1,
+          language: 'English',
+          title: 'English - SDH',
+          hearingImpaired: true,
+        },
+      ]
+    );
+
+    const detail = await request(`/api/media/${ratingKey}`);
+    assert.equal(detail.status, 200);
+    const detailBody = await detail.json() as { metadata: PlexMedia };
+    const subtitleStreams = detailBody.metadata.Media![0].Part[0].Stream!
+      .filter(stream => Number(stream.streamType) === 3);
+    assert.deepEqual(
+      subtitleStreams.map(stream => ({
+        id: stream.id,
+        displayTitle: stream.displayTitle,
+        hearingImpaired: stream.hearingImpaired,
+        burnSupported: stream.burnSupported,
+      })),
+      [
+        {
+          id: 'probe-3',
+          displayTitle: 'English',
+          hearingImpaired: false,
+          burnSupported: true,
+        },
+        {
+          id: 'probe-4',
+          displayTitle: 'English - SDH',
+          hearingImpaired: true,
+          burnSupported: true,
+        },
+      ]
+    );
+
+    const episodeList = await request('/api/media/season-2/episodes');
+    assert.equal(episodeList.status, 200);
+    const episodeBody = await episodeList.json() as { episodes: PlexMedia[] };
+    assert.deepEqual(
+      episodeBody.episodes[0].Media![0].Part[0].Stream!
+        .filter(stream => Number(stream.streamType) === 3)
+        .map(stream => stream.id),
+      ['probe-3', 'probe-4']
+    );
+
+    const burn = await request(`/api/media/${ratingKey}/burn-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ partKey, subtitleStreamId: 'probe-4' }),
+    });
+    assert.equal(burn.status, 202);
+    const burnBody = await burn.json() as { job: { id: string } };
+    const savedSubtitle = JSON.parse(db.getBurnJob(burnBody.job.id)!.subtitleJson) as PlexSubtitleTrack;
+    assert.equal(savedSubtitle.index, 4);
+    assert.equal(savedSubtitle.subtitleIndex, 1);
+    assert.equal(savedSubtitle.hearingImpaired, true);
+  } finally {
+    config.burn.ffmpegPath = originalFfmpegPath;
+    service.value = originalMetadata;
+  }
 });
 
 test('Plex resource URLs cannot escape the configured server origin', () => {

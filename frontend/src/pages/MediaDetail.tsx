@@ -60,6 +60,9 @@ function downloadTargets(item: MediaItem): BatchDownloadTarget[] {
       partKey: part.key,
       filename: `${item.title}${partSuffix}.${container}`,
       title: item.parentTitle ? `${item.parentTitle} - ${item.title}${partSuffix}` : `${item.title}${partSuffix}`,
+      container,
+      videoCodec: mediaPart.videoCodec,
+      audioCodec: mediaPart.audioCodec,
     };
   });
 }
@@ -200,7 +203,7 @@ function SeasonEpisodeList({
             className="btn-secondary inline-flex min-h-11 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <DownloadIcon className="h-4 w-4" />
-            Download selected
+            Download selected MP4s
           </button>
           <button
             type="button"
@@ -209,14 +212,14 @@ function SeasonEpisodeList({
             className="btn-primary inline-flex min-h-11 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <DownloadIcon className="h-4 w-4" />
-            {isStarting ? 'Starting downloads...' : `Download season (${downloadableIds.length})`}
+            {isStarting ? 'Starting downloads...' : `Download season as MP4 (${downloadableIds.length})`}
           </button>
         </div>
       </div>
 
       <div className="border-t border-white/5 px-4 py-3 text-xs leading-5 text-gray-400 md:px-5">
-        Each episode downloads as one or more separate resumable original files. Your browser may ask permission for
-        multiple downloads.
+        Ready MP4s start immediately. Other episodes join the conversion queue and download automatically when ready.
+        Your browser may ask permission for multiple downloads.
         {batchState.status === 'done' && (
           <span className="ml-1 text-gray-300">
             Started {batchState.started}; {batchState.failed} unavailable.
@@ -238,7 +241,7 @@ function SeasonEpisodeList({
 
 export const MediaDetail: React.FC = () => {
   const { ratingKey } = useParams<{ ratingKey: string }>();
-  const { startOriginalDownloads } = useDownloads();
+  const { startPreferredDownloads } = useDownloads();
   const { isMobileMenuOpen, toggleMobileMenu, closeMobileMenu } = useMobileMenu();
   const [media, setMedia] = useState<MediaItem | null>(null);
   const [seasons, setSeasons] = useState<MediaItem[]>([]);
@@ -318,7 +321,7 @@ export const MediaDetail: React.FC = () => {
       ...current,
       [seasonRatingKey]: { status: 'starting', started: 0, failed: 0 },
     }));
-    const result = await startOriginalDownloads(targets);
+    const result = await startPreferredDownloads(targets);
     setBatchBySeason((current) => ({
       ...current,
       [seasonRatingKey]: { status: 'done', ...result },
@@ -436,7 +439,7 @@ export const MediaDetail: React.FC = () => {
                 <div className="mb-4">
                   <h2 className="text-2xl font-semibold text-white">Download</h2>
                   <p className="mt-1 max-w-2xl text-sm leading-6 text-gray-400">
-                    Original files start immediately. Subtitle burn-in is optional and creates a separate compatible copy.
+                    Videos download as ready-to-play MP4s. Conversion and subtitle preparation happen automatically.
                   </p>
                 </div>
 
