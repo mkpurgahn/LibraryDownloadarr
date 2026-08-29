@@ -45,6 +45,10 @@ interface DownloadContextType {
 
 const STORAGE_KEY = 'librarydownloadarr:burn-jobs';
 const ACTIVE_STATUSES = new Set<DownloadStatus>(['queued', 'preparing']);
+const ORIGIN_PROBE_TTL_MS = 30_000;
+const ORIGIN_PROBE_TIMEOUT_MS = 2_500;
+const originReachability = new Map<string, { expiresAt: number; reachable: boolean }>();
+const originProbes = new Map<string, Promise<boolean>>();
 
 const DownloadContext = createContext<DownloadContextType | undefined>(undefined);
 
@@ -71,6 +75,81 @@ function triggerBrowserDownload(url: string, filename: string): void {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+function sameOriginTicketUrl(url: string): string {
+  const parsed = new URL(url, window.location.origin);
+  return `${parsed.pathname}${parsed.search}`;
+}
+
+async function canReachDownloadOrigin(url: string): Promise<boolean> {
+  const parsed = new URL(url, window.location.origin);
+  if (parsed.origin === window.location.origin) return true;
+
+  const cached = originReachability.get(parsed.origin);
+  if (cached && cached.expiresAt > Date.now()) return cached.reachable;
+
+  const pending = originProbes.get(parsed.origin);
+  if (pending) return pending;
+
+  const probe = (async () => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), ORIGIN_PROBE_TIMEOUT_MS);
+    try {
+      const response = await fetch(new URL('/api/health', parsed.origin), {
+        method: 'HEAD',
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'error',
+        signal: controller.signal,
+      });
+      return response.ok;
+    } catch {
+      return false;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  })();
+
+  originProbes.set(parsed.origin, probe);
+  try {
+    const reachable = await probe;
+    originReachability.set(parsed.origin, {
+      expiresAt: Date.now() + ORIGIN_PROBE_TTL_MS,
+      reachable,
+    });
+    return reachable;
+  } finally {
+    originProbes.delete(parsed.origin);
+  }
+}
+
+async function resolveTicketUrls(urls: string[]): Promise<string[]> {
+  if (urls.length === 0) return [];
+  if (await canReachDownloadOrigin(urls[0])) return urls;
+
+  const fallbackUrls = urls.map(sameOriginTicketUrl);
+  let response: Response;
+  try {
+    response = await fetch(fallbackUrls[0], {
+      method: 'HEAD',
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+  } catch {
+    throw new Error('The download connection is unavailable. Check your network and try again.');
+  }
+  if (response.ok) return fallbackUrls;
+  if (response.status === 403) {
+    throw new Error('Your Plex access to this file is no longer active.');
+  }
+  if (response.status === 404) {
+    throw new Error('The download ticket expired. Start the download again.');
+  }
+  if (response.status === 409) {
+    throw new Error('This file changed after the ticket was created. Start the download again.');
+  }
+  throw new Error('The download service is temporarily unavailable. Try again shortly.');
 }
 
 function storedDownloads(userId: string): Download[] {
@@ -203,7 +282,8 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
 
     try {
       const ticket = await api.createDownloadTicket(ratingKey, partKey);
-      triggerBrowserDownload(ticket.url, ticket.filename || filename);
+      const [resolvedUrl] = await resolveTicketUrls([ticket.url]);
+      triggerBrowserDownload(resolvedUrl, ticket.filename || filename);
       setDownloads((current) =>
         current.map((download) =>
           download.id === id
@@ -262,24 +342,43 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
       }
     }
 
-    const ticketKeys = new Set(tickets.map((ticket) => `${ticket.ratingKey}:${ticket.partKey}`));
+    let startedTickets = tickets;
+    try {
+      const resolvedUrls = await resolveTicketUrls(tickets.map((ticket) => ticket.url));
+      tickets.forEach((ticket, index) => {
+        const target = uniqueTargets.find(
+          (item) => item.ratingKey === ticket.ratingKey && item.partKey === ticket.partKey
+        );
+        triggerBrowserDownload(
+          resolvedUrls[index],
+          ticket.filename || target?.filename || 'download'
+        );
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      failures.push(
+        ...tickets.map((ticket) => ({
+          ratingKey: ticket.ratingKey,
+          partKey: ticket.partKey,
+          error: message,
+        }))
+      );
+      startedTickets = [];
+    }
+
+    const ticketKeys = new Set(
+      startedTickets.map((ticket) => `${ticket.ratingKey}:${ticket.partKey}`)
+    );
     const errorByKey = new Map(
       failures.map((failure) => [`${failure.ratingKey}:${failure.partKey}`, failure.error])
     );
-
-    for (const ticket of tickets) {
-      const target = uniqueTargets.find(
-        (item) => item.ratingKey === ticket.ratingKey && item.partKey === ticket.partKey
-      );
-      triggerBrowserDownload(ticket.url, ticket.filename || target?.filename || 'download');
-    }
 
     setDownloads((current) =>
       current.map((download) => {
         const key = `${download.ratingKey}:${download.partKey}`;
         if (!ids.includes(download.id)) return download;
         if (ticketKeys.has(key)) {
-          const ticket = tickets.find(
+          const ticket = startedTickets.find(
             (item) => item.ratingKey === download.ratingKey && item.partKey === download.partKey
           );
           return {
@@ -301,7 +400,7 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
         current.filter((download) => !ids.includes(download.id) || download.status !== 'started')
       );
     }, 8000);
-    return { started: tickets.length, failed: failures.length };
+    return { started: startedTickets.length, failed: failures.length };
   };
 
   const startBurnJob: DownloadContextType['startBurnJob'] = async (
@@ -352,7 +451,8 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
     if (!download?.jobId || download.status !== 'ready') return;
     try {
       const ticket = await api.createBurnJobTicket(download.jobId);
-      triggerBrowserDownload(ticket.url, ticket.filename || download.filename);
+      const [resolvedUrl] = await resolveTicketUrls([ticket.url]);
+      triggerBrowserDownload(resolvedUrl, ticket.filename || download.filename);
       setDownloads((current) =>
         current.map((item) => (item.id === id ? { ...item, error: undefined } : item))
       );
