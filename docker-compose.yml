@@ -34,6 +34,7 @@ services:
       - BURN_GLOBAL_CONCURRENCY=1
       - BURN_PER_USER_CONCURRENCY=1
       - BURN_ARTIFACT_TTL_HOURS=168
+      - BURN_CACHE_MAX_GB=${BURN_CACHE_MAX_GB:-100}
       # Timezone configuration (set to your local timezone)
       - TZ=America/New_York
     volumes:

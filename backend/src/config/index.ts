@@ -71,6 +71,7 @@ export const config = {
     globalConcurrency: Math.max(1, intFromEnv('BURN_GLOBAL_CONCURRENCY', 1)),
     perUserConcurrency: Math.max(1, intFromEnv('BURN_PER_USER_CONCURRENCY', 1)),
     artifactTtlMs: intFromEnv('BURN_ARTIFACT_TTL_HOURS', 168) * 60 * 60 * 1000,
+    maxCacheBytes: intFromEnv('BURN_CACHE_MAX_GB', 100) * 1024 * 1024 * 1024,
   },
   logging: {
     level: process.env.LOG_LEVEL || 'info',
@@ -78,6 +79,13 @@ export const config = {
   cors: {
     origin: process.env.CORS_ORIGIN || '*',
     credentials: true,
+    exposedHeaders: [
+      'Accept-Ranges',
+      'Content-Length',
+      'Content-Range',
+      'Content-Disposition',
+      'ETag',
+    ],
   },
   rateLimit: {
     windowMs: 15 * 60 * 1000, // 15 minutes

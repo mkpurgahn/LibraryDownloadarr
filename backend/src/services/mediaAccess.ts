@@ -7,6 +7,7 @@ import { PlexMedia, PlexPart, PlexServerClient, PlexSubtitleTrack } from './plex
 
 export interface AuthorizedPart {
   metadata: PlexMedia;
+  mediaVersion: NonNullable<PlexMedia['Media']>[number];
   part: PlexPart;
   subtitle?: PlexSubtitleTrack;
   sourcePath: string;
@@ -15,6 +16,12 @@ export interface AuthorizedPart {
 
 const findPart = (metadata: PlexMedia, partKey: string): PlexPart | undefined =>
   metadata.Media?.flatMap(media => media.Part || []).find(part => part.key === partKey);
+
+const findMediaVersion = (
+  metadata: PlexMedia,
+  partKey: string
+): NonNullable<PlexMedia['Media']>[number] | undefined =>
+  metadata.Media?.find(media => (media.Part || []).some(part => part.key === partKey));
 
 const findSubtitle = (part: PlexPart, streamId: string): PlexSubtitleTrack | undefined =>
   part.subtitles?.find(track => track.id === streamId);
@@ -84,7 +91,8 @@ export const resolveAuthorizedPart = async (
   }
 
   const ownerMetadata = await ownerClient.getMediaMetadata(ratingKey);
-  const ownerPart = findPart(ownerMetadata, partKey);
+  const ownerMediaVersion = findMediaVersion(ownerMetadata, partKey);
+  const ownerPart = (ownerMediaVersion?.Part || []).find(part => part.key === partKey);
   if (!ownerPart?.file) {
     throw new Error('The configured Plex owner cannot resolve the selected local file');
   }
@@ -97,6 +105,7 @@ export const resolveAuthorizedPart = async (
   const sourcePath = await canonicalizeMediaPath(ownerPart.file, mediaRoots);
   return {
     metadata: userMetadata,
+    mediaVersion: ownerMediaVersion!,
     part: ownerPart,
     subtitle: ownerSubtitle,
     sourcePath,

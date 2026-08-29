@@ -10,7 +10,12 @@ import { config } from '../config';
 import { createApp } from '../index';
 import { DatabaseService } from '../models/database';
 import { createMediaRouter } from '../routes/media';
-import { buildBurnCommand, burnCacheKey } from '../services/burnService';
+import {
+  buildBurnCommand,
+  buildCompatibleCommand,
+  burnCacheKey,
+  COMPATIBLE_STREAM_ID,
+} from '../services/burnService';
 import { ensurePlexMembership } from '../services/membershipService';
 import { sanitizeMedia } from '../services/mediaSanitizer';
 import { redactForLog } from '../utils/logger';
@@ -55,6 +60,8 @@ const metadata = (file = mediaFile): PlexMedia => ({
   duration: 120000,
   Media: [{
     id: 1,
+    videoCodec: 'h264',
+    audioCodec: 'aac',
     Part: [{
       id: 123,
       key: partKey,
@@ -69,6 +76,12 @@ const metadata = (file = mediaFile): PlexMedia => ({
           streamType: 1,
           codec: 'h264',
           file: '/private/video-path',
+        },
+        {
+          id: 12,
+          index: 1,
+          streamType: 2,
+          codec: 'aac',
         },
         {
           id: 77,
@@ -521,6 +534,113 @@ test('derivative ticket creation enforces job ownership', async () => {
   }
 });
 
+test('compatible MP4 jobs are authorized, cached, and queued without a subtitle', async () => {
+  const response = await request(`/api/media/${ratingKey}/compatible-jobs`, {
+    method: 'POST',
+    body: JSON.stringify({ partKey }),
+  });
+  assert.equal(response.status, 202);
+  const body = await response.json() as {
+    job: {
+      id: string;
+      mode: string;
+      strategy: string;
+      subtitleStreamId: string;
+      filename: string;
+    };
+  };
+  assert.equal(body.job.mode, 'compatible');
+  assert.equal(body.job.strategy, 'remux');
+  assert.equal(body.job.subtitleStreamId, COMPATIBLE_STREAM_ID);
+  assert.equal(body.job.filename, 'movie.compatible.mp4');
+  const job = db.getBurnJob(body.job.id);
+  assert.equal(job?.subtitleJson, JSON.stringify({ strategy: 'remux' }));
+  assert.equal(job?.status, 'queued');
+});
+
+test('compatible MP4 converts unknown audio and rejects audio-only media', async () => {
+  const original = service.value;
+  try {
+    const incompatibleAudio = metadata();
+    incompatibleAudio.Media![0].audioCodec = undefined;
+    incompatibleAudio.Media![0].Part[0].Stream = incompatibleAudio.Media![0].Part[0].Stream!
+      .filter(stream => Number(stream.streamType) !== 2);
+    service.value = incompatibleAudio;
+    const converted = await request(`/api/media/${ratingKey}/compatible-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ partKey }),
+    });
+    assert.equal(converted.status, 202);
+    const convertedBody = await converted.json() as {
+      job: { id: string; strategy: string };
+    };
+    assert.equal(convertedBody.job.strategy, 'audio');
+    assert.equal(
+      db.getBurnJob(convertedBody.job.id)?.subtitleJson,
+      JSON.stringify({ strategy: 'audio' })
+    );
+
+    const audioOnly = metadata();
+    audioOnly.type = 'track';
+    audioOnly.Media![0].videoCodec = undefined;
+    audioOnly.Media![0].Part[0].Stream = audioOnly.Media![0].Part[0].Stream!
+      .filter(stream => Number(stream.streamType) !== 1);
+    service.value = audioOnly;
+    const rejected = await request(`/api/media/${ratingKey}/compatible-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ partKey }),
+    });
+    assert.equal(rejected.status, 422);
+    assert.match(
+      (await rejected.json() as { error: string }).error,
+      /requires a media part with a video stream/i
+    );
+  } finally {
+    service.value = original;
+  }
+});
+
+test('cache eviction excludes artifacts with active download tickets and refreshes regenerated age', async () => {
+  const protectedArtifact = db.createArtifact({
+    cacheKey: 'protected-artifact',
+    filePath: path.join(cacheRoot, 'protected.mp4'),
+    filename: 'protected.mp4',
+    size: 10,
+    expiresAt: Date.now() + 60_000,
+  });
+  db.createDownloadTicket({
+    userId: db.getSessionByToken(adminOneToken)!.userId,
+    ratingKey,
+    partKey,
+    filePath: protectedArtifact.filePath,
+    sourceFingerprint: 'protected-fingerprint',
+    artifactId: protectedArtifact.id,
+    filename: protectedArtifact.filename,
+    expiresAt: Date.now() + 60_000,
+  });
+  const evictableArtifact = db.createArtifact({
+    cacheKey: 'evictable-artifact',
+    filePath: path.join(cacheRoot, 'evictable.mp4'),
+    filename: 'evictable.mp4',
+    size: 10,
+    expiresAt: Date.now() + 60_000,
+  });
+  const firstCreatedAt = evictableArtifact.createdAt;
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const regenerated = db.createArtifact({
+    cacheKey: 'evictable-artifact',
+    filePath: evictableArtifact.filePath,
+    filename: evictableArtifact.filename,
+    size: 12,
+    expiresAt: Date.now() + 120_000,
+  });
+  assert(regenerated.createdAt > firstCreatedAt);
+
+  const candidates = db.listEvictableArtifactsOldestFirst(Date.now() + 1);
+  assert.equal(candidates.some(artifact => artifact.id === protectedArtifact.id), false);
+  assert.equal(candidates.some(artifact => artifact.id === regenerated.id), true);
+});
+
 test('season and album ZIP download routes return 410 guidance', async () => {
   for (const url of [
     '/api/media/season/season-1/download',
@@ -550,6 +670,7 @@ test('public media sanitizer removes paths and annotates subtitle support', () =
   const sanitized = sanitizeMedia(metadata());
   const part = sanitized.Media![0].Part[0];
   assert.equal('file' in part, false);
+  assert.equal(part.filename, 'movie.mkv');
   assert.equal(JSON.stringify(sanitized).includes('/private/'), false);
   assert.equal(JSON.stringify(sanitized).includes(mediaRoot), false);
 
@@ -740,4 +861,40 @@ test('FFmpeg command selects exact text and bitmap subtitle streams', () => {
   assert.deepEqual(vaapi.args.slice(vaapi.args.indexOf('-c:v'), vaapi.args.indexOf('-c:v') + 4), [
     '-c:v', 'h264_vaapi', '-qp', '23',
   ]);
+
+  const compatible = buildCompatibleCommand(mediaFile, 'compatible.mp4', 'transcode', {
+    ffmpegPath: 'ffmpeg',
+    encoder: 'h264_vaapi',
+    qsvDevice: '/dev/dri/renderD128',
+  });
+  assert.equal(compatible.kind, 'compatible');
+  assert(compatible.args.includes('format=nv12,hwupload'));
+  assert.equal(compatible.args.some(argument => argument.includes('subtitles=') || argument.includes('overlay')), false);
+  assert.deepEqual(
+    compatible.args.slice(compatible.args.indexOf('-map'), compatible.args.indexOf('-map') + 4),
+    ['-map', '0:v:0', '-map', '0:a:0?']
+  );
+
+  const remux = buildCompatibleCommand(mediaFile, 'remux.mp4', 'remux', {
+    ffmpegPath: 'ffmpeg',
+    encoder: 'h264_vaapi',
+    qsvDevice: '/dev/dri/renderD128',
+  });
+  assert(remux.args.includes('copy'));
+  assert.equal(remux.args.includes('-vaapi_device'), false);
+  assert.equal(remux.args.includes('-vf'), false);
+
+  const audio = buildCompatibleCommand(mediaFile, 'audio.mp4', 'audio', {
+    ffmpegPath: 'ffmpeg',
+    encoder: 'h264_vaapi',
+    qsvDevice: '/dev/dri/renderD128',
+  });
+  assert.deepEqual(
+    audio.args.slice(audio.args.indexOf('-c:v'), audio.args.indexOf('-c:v') + 4),
+    ['-c:v', 'copy', '-c:a', 'aac']
+  );
+  assert.deepEqual(
+    audio.args.slice(audio.args.indexOf('-ac'), audio.args.indexOf('-ac') + 4),
+    ['-ac', '2', '-b:a', '256k']
+  );
 });

@@ -80,6 +80,7 @@ export interface Part {
   key: string;
   duration: number;
   file?: string;
+  filename?: string;
   size: number;
   container: string;
   Stream?: MediaStream[];
@@ -119,6 +120,8 @@ export interface BurnJob {
   ratingKey: string;
   partKey: string;
   subtitleStreamId: number | string;
+  mode: 'subtitle' | 'compatible';
+  strategy?: 'remux' | 'audio' | 'transcode';
   status: BurnJobStatus;
   progress: number;
   filename?: string;

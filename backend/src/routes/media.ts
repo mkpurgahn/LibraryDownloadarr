@@ -10,7 +10,14 @@ import { pipeline } from 'stream/promises';
 import { config } from '../config';
 import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
 import { BurnJob, DatabaseService } from '../models/database';
-import { buildBurnCommand, BurnManager, burnCacheKey, classifySubtitle } from '../services/burnService';
+import {
+  buildBurnCommand,
+  buildCompatibleCommand,
+  BurnManager,
+  burnCacheKey,
+  classifySubtitle,
+  COMPATIBLE_STREAM_ID,
+} from '../services/burnService';
 import { streamLocalFile } from '../services/downloadService';
 import { ensurePlexMembership, MembershipError } from '../services/membershipService';
 import {
@@ -43,7 +50,38 @@ const downloadTicketUrl = (token: string): string => {
     : pathname;
 };
 
+const compatibleJobDetails = (job: BurnJob): { mode: 'compatible' | 'subtitle'; strategy?: string } => {
+  if (job.subtitleStreamId !== COMPATIBLE_STREAM_ID) return { mode: 'subtitle' };
+  try {
+    const strategy = (JSON.parse(job.subtitleJson) as { strategy?: string }).strategy;
+    return { mode: 'compatible', strategy };
+  } catch {
+    return { mode: 'compatible' };
+  }
+};
+
+const chooseCompatibleStrategy = (
+  mediaVersion: { videoCodec?: string; audioCodec?: string },
+  streams: any[] = []
+): 'remux' | 'audio' | 'transcode' => {
+  const videoCodec = String(
+    streams.find(stream => Number(stream.streamType ?? stream.streamTypeId) === 1)?.codec ||
+    mediaVersion.videoCodec ||
+    ''
+  ).toLowerCase();
+  const audioCodec = String(
+    streams.find(stream => Number(stream.streamType ?? stream.streamTypeId) === 2)?.codec ||
+    mediaVersion.audioCodec ||
+    ''
+  ).toLowerCase();
+  const videoCompatible = ['h264', 'avc', 'avc1'].includes(videoCodec);
+  const audioCompatible = ['aac', 'mp4a'].includes(audioCodec);
+  if (!videoCompatible) return 'transcode';
+  return audioCompatible ? 'remux' : 'audio';
+};
+
 const publicJob = (job: BurnJob): object => ({
+  ...compatibleJobDetails(job),
   id: job.id,
   ratingKey: job.ratingKey,
   partKey: job.partKey,
@@ -198,7 +236,7 @@ export const createMediaRouter = (
     if (/does not belong|not accessible|cannot resolve|outside MEDIA_ROOTS|not configured/.test(detail)) {
       return res.status(403).json({ error: detail });
     }
-    if (/Unsupported subtitle|no local file|External subtitle/.test(detail)) {
+    if (/Unsupported subtitle|no local file|External subtitle|requires a media part with a video stream/.test(detail)) {
       return res.status(422).json({ error: detail });
     }
     if (/changed since the ticket|ticket must be renewed/.test(detail)) {
@@ -425,6 +463,83 @@ export const createMediaRouter = (
         });
       } catch (error) {
         return handleRouteError(res, error, 'Failed to create download ticket');
+      }
+    }
+  );
+
+  router.post(
+    '/:ratingKey/compatible-jobs',
+    creationLimiter,
+    authMiddleware,
+    async (req: AuthRequest, res) => {
+      const { ratingKey } = req.params;
+      const { partKey } = req.body;
+      if (!validRatingKey(ratingKey) || !validPartKey(partKey)) {
+        return res.status(400).json({ error: 'Valid ratingKey and partKey are required' });
+      }
+      try {
+        await forceMembership(req);
+        const clients = credentials(req);
+        const authorized = await resolveAuthorizedPart(
+          ratingKey,
+          partKey,
+          clients.user,
+          clients.owner,
+          config.media.roots
+        );
+        const videoCodec = String(
+          authorized.part.Stream?.find(
+            stream => Number(stream.streamType ?? stream.streamTypeId) === 1
+          )?.codec ||
+          authorized.mediaVersion.videoCodec ||
+          ''
+        );
+        if (!videoCodec) {
+          throw new Error('Compatible MP4 requires a media part with a video stream');
+        }
+        const strategy = chooseCompatibleStrategy(
+          authorized.mediaVersion,
+          authorized.part.Stream
+        );
+        buildCompatibleCommand(authorized.sourcePath, 'validation.mp4', strategy, config.burn);
+        const cacheKey = burnCacheKey(
+          authorized.sourceFingerprint,
+          COMPATIBLE_STREAM_ID,
+          strategy,
+          config.burn.encoder,
+          config.burn.qsvDevice
+        );
+        const filename = `${path.parse(authorized.sourcePath).name}.compatible.mp4`;
+        const artifact = db.getArtifactByCacheKey(cacheKey);
+        const job = db.createBurnJob({
+          userId: req.user!.id,
+          ratingKey,
+          partKey,
+          subtitleStreamId: COMPATIBLE_STREAM_ID,
+          sourcePath: authorized.sourcePath,
+          sourceFingerprint: authorized.sourceFingerprint,
+          cacheKey,
+          error: undefined,
+          filename,
+          size: artifact?.size,
+          artifactId: artifact?.id,
+          mediaDurationMs: authorized.part.duration || authorized.metadata.duration,
+          subtitleJson: JSON.stringify({ strategy }),
+        });
+        if (artifact && fs.existsSync(artifact.filePath)) {
+          db.updateBurnJob(job.id, {
+            status: 'ready',
+            progress: 100,
+            artifactId: artifact.id,
+            filename: artifact.filename,
+            size: artifact.size,
+          });
+        } else {
+          burnManager.enqueue(job);
+        }
+        return res.status(202).json({ job: publicJob(db.getBurnJob(job.id)!) });
+      } catch (error) {
+        return handleRouteError(res, error, 'Failed to create compatible MP4 job');
       }
     }
   );

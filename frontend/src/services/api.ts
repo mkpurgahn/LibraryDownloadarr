@@ -189,6 +189,14 @@ class ApiClient {
     return response.data.job;
   }
 
+  async createCompatibleJob(ratingKey: string, partKey: string): Promise<BurnJob> {
+    const response = await this.client.post<{ job: BurnJob }>(
+      `/media/${ratingKey}/compatible-jobs`,
+      { partKey }
+    );
+    return response.data.job;
+  }
+
   async getBurnJob(jobId: string): Promise<BurnJob> {
     const response = await this.client.get<{ job: BurnJob }>(`/media/burn-jobs/${jobId}`);
     return response.data.job;

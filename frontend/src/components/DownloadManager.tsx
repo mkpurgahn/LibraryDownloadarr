@@ -9,8 +9,31 @@ function CloseIcon() {
   );
 }
 
+function PauseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4 fill-current">
+      <rect x="6" y="5" width="4" height="14" rx="1" />
+      <rect x="14" y="5" width="4" height="14" rx="1" />
+    </svg>
+  );
+}
+
+function formatBytes(bytes = 0): string {
+  if (!bytes) return '0 MB';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** index).toFixed(index > 2 ? 1 : 0)} ${units[index]}`;
+}
+
 export const DownloadManager: React.FC = () => {
-  const { downloads, downloadPrepared, cancelBurnJob, removeDownload } = useDownloads();
+  const {
+    downloads,
+    downloadPrepared,
+    cancelBurnJob,
+    removeDownload,
+    pauseParallelDownload,
+    resumeParallelDownload,
+  } = useDownloads();
 
   if (downloads.length === 0) return null;
 
@@ -21,6 +44,19 @@ export const DownloadManager: React.FC = () => {
     >
       {downloads.map((download) => {
         const isPreparing = download.status === 'queued' || download.status === 'preparing';
+        const isParallelActive =
+          download.mode === 'parallel' &&
+          (download.status === 'downloading' || download.status === 'pausing');
+        const preparationLabel =
+          download.status === 'queued'
+            ? 'Waiting for the media worker'
+            : download.mode === 'compatible'
+              ? download.strategy === 'remux'
+                ? 'Packaging as MP4'
+                : download.strategy === 'audio'
+                  ? 'Converting audio for MP4'
+                  : 'Creating compatible MP4'
+              : 'Burning in subtitles';
         return (
           <section
             key={download.id}
@@ -38,12 +74,22 @@ export const DownloadManager: React.FC = () => {
               <button
                 type="button"
                 onClick={() =>
-                  isPreparing ? void cancelBurnJob(download.id) : removeDownload(download.id)
+                  isPreparing
+                    ? void cancelBurnJob(download.id)
+                    : isParallelActive
+                      ? pauseParallelDownload(download.id)
+                      : removeDownload(download.id)
                 }
                 className="grid h-9 w-9 flex-none place-items-center rounded-lg text-gray-400 transition-colors hover:bg-white/5 hover:text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-                aria-label={isPreparing ? 'Cancel preparation' : 'Dismiss download'}
+                aria-label={
+                  isPreparing
+                    ? 'Cancel preparation'
+                    : isParallelActive
+                      ? 'Pause download'
+                      : 'Dismiss download'
+                }
               >
-                <CloseIcon />
+                {isParallelActive ? <PauseIcon /> : <CloseIcon />}
               </button>
             </div>
 
@@ -51,7 +97,7 @@ export const DownloadManager: React.FC = () => {
               <div className="mt-3">
                 <div className="mb-1.5 flex items-center justify-between text-xs">
                   <span className="text-gray-300">
-                    {download.status === 'queued' ? 'Waiting for the encoder' : 'Burning in subtitles'}
+                    {preparationLabel}
                   </span>
                   <span className="tabular-nums text-primary-300">{Math.round(download.progress)}%</span>
                 </div>
@@ -70,7 +116,10 @@ export const DownloadManager: React.FC = () => {
             {download.status === 'ready' && (
               <div className="mt-3">
                 <p className="text-xs leading-5 text-emerald-300">
-                  Your subtitled MP4 is ready. The browser can pause and resume this file.
+                  {download.mode === 'compatible'
+                    ? 'Your compatible MP4 is ready.'
+                    : 'Your subtitled MP4 is ready.'}{' '}
+                  The browser can pause and resume this file.
                 </p>
                 {download.error && (
                   <p className="mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-200">
@@ -88,7 +137,11 @@ export const DownloadManager: React.FC = () => {
             )}
 
             {download.status === 'requesting' && (
-              <p className="mt-3 text-xs text-gray-300">Securing your download...</p>
+              <p className="mt-3 text-xs text-gray-300">
+                {download.mode === 'compatible' || download.mode === 'burned'
+                  ? 'Starting media preparation...'
+                  : 'Securing your download...'}
+              </p>
             )}
 
             {download.status === 'started' && (
@@ -97,11 +150,75 @@ export const DownloadManager: React.FC = () => {
               </p>
             )}
 
+            {download.mode === 'parallel' &&
+              ['downloading', 'pausing', 'paused'].includes(download.status) && (
+                <div className="mt-3">
+                  <div className="mb-1.5 flex items-center justify-between gap-3 text-xs">
+                    <span className="text-gray-300">
+                      {download.status === 'paused'
+                        ? 'Paused'
+                        : download.status === 'pausing'
+                          ? 'Saving progress...'
+                          : `${formatBytes(download.downloadedBytes)} of ${formatBytes(download.size)}`}
+                    </span>
+                    <span className="tabular-nums text-primary-300">
+                      {Math.round(download.progress)}%
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-dark-200">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-primary-500 to-secondary-500 transition-[width] duration-300"
+                      style={{ width: `${download.progress}%` }}
+                    />
+                  </div>
+                  {download.status === 'paused' && (
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void resumeParallelDownload(download.id)}
+                        className="btn-primary min-h-11"
+                      >
+                        Resume
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeDownload(download.id)}
+                        className="btn-secondary min-h-11"
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  )}
+                  <p className="mt-2 text-xs leading-5 text-gray-400">
+                    {download.status === 'paused'
+                      ? 'Choose the same partial file when prompted to continue safely.'
+                      : 'Keep this page open. Pause before closing it to save a resumable checkpoint.'}
+                  </p>
+                </div>
+              )}
+
+            {download.status === 'complete' && (
+              <p className="mt-3 text-xs leading-5 text-emerald-300">
+                Saved to the file you selected.
+              </p>
+            )}
+
             {(download.status === 'failed' || download.status === 'cancelled') && (
-              <div className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-200">
-                {download.status === 'cancelled'
-                  ? 'Preparation was cancelled.'
-                  : download.error || 'The download could not be prepared. Try again.'}
+              <div className="mt-3">
+                <div className="rounded-lg bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-200">
+                  {download.status === 'cancelled'
+                    ? 'Preparation was cancelled.'
+                    : download.error || 'The download could not be prepared. Try again.'}
+                </div>
+                {download.mode === 'parallel' && download.status === 'failed' && (
+                  <button
+                    type="button"
+                    onClick={() => void resumeParallelDownload(download.id)}
+                    className="btn-primary mt-3 min-h-11 w-full"
+                  >
+                    Retry accelerated download
+                  </button>
+                )}
               </div>
             )}
           </section>

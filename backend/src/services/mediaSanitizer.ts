@@ -1,3 +1,4 @@
+import path from 'path';
 import { PlexMedia, PlexPart, PlexSubtitleTrack } from './plexService';
 import { isSubtitleBurnSupported } from './subtitleSupport';
 
@@ -41,6 +42,7 @@ const sanitizePart = (part: PlexPart): PlexPart => {
   const { file: _file, ...safe } = part;
   return {
     ...safe,
+    filename: part.file ? path.basename(part.file) : undefined,
     Stream: part.Stream?.map(sanitizeStream),
     subtitles: part.subtitles?.map(sanitizeSubtitle),
   };

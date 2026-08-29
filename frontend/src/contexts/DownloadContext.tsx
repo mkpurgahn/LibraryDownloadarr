@@ -1,8 +1,30 @@
-import React, { createContext, useContext, useEffect, useMemo, useState, ReactNode } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  ReactNode,
+} from 'react';
 import { api } from '../services/api';
+import {
+  getParallelDownloadedBytes,
+  loadParallelCheckpoints,
+  removeParallelCheckpoint,
+  runParallelDownload,
+  supportsParallelDownloads,
+} from '../services/parallelDownload';
 import { BatchDownloadTarget, BatchDownloadTicket, BurnJob, BurnJobStatus } from '../types';
 
-export type DownloadStatus = BurnJobStatus | 'requesting' | 'started';
+export type DownloadStatus =
+  | BurnJobStatus
+  | 'requesting'
+  | 'started'
+  | 'downloading'
+  | 'pausing'
+  | 'paused'
+  | 'complete';
 
 export interface Download {
   id: string;
@@ -12,10 +34,12 @@ export interface Download {
   title: string;
   progress: number;
   status: DownloadStatus;
-  mode: 'original' | 'burned';
+  mode: 'original' | 'burned' | 'compatible' | 'parallel';
   subtitleLabel?: string;
+  strategy?: BurnJob['strategy'];
   jobId?: string;
   size?: number;
+  downloadedBytes?: number;
   error?: string;
 }
 
@@ -38,6 +62,21 @@ interface DownloadContextType {
     subtitleStreamId: number | string,
     subtitleLabel: string
   ) => Promise<void>;
+  startCompatibleJob: (
+    ratingKey: string,
+    partKey: string,
+    filename: string,
+    title: string
+  ) => Promise<void>;
+  startParallelDownload: (
+    ratingKey: string,
+    partKey: string,
+    filename: string,
+    title: string
+  ) => Promise<void>;
+  resumeParallelDownload: (id: string) => Promise<void>;
+  pauseParallelDownload: (id: string) => void;
+  parallelSupported: boolean;
   downloadPrepared: (id: string) => Promise<void>;
   cancelBurnJob: (id: string) => Promise<void>;
   removeDownload: (id: string) => void;
@@ -156,7 +195,22 @@ function storedDownloads(userId: string): Download[] {
   try {
     localStorage.removeItem(STORAGE_KEY);
     const parsed = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:${userId}`) || '[]') as Download[];
-    return parsed.filter((download) => download.mode === 'burned' && download.jobId);
+    const jobs = parsed.filter((download) => download.jobId);
+    const parallel = loadParallelCheckpoints(userId).map((checkpoint) => ({
+      id: checkpoint.id,
+      ratingKey: checkpoint.ratingKey,
+      partKey: checkpoint.partKey,
+      filename: checkpoint.filename,
+      title: checkpoint.title,
+      progress: checkpoint.totalBytes
+        ? (getParallelDownloadedBytes(checkpoint.segments) / checkpoint.totalBytes) * 100
+        : 0,
+      status: 'paused' as const,
+      mode: 'parallel' as const,
+      size: checkpoint.totalBytes,
+      downloadedBytes: getParallelDownloadedBytes(checkpoint.segments),
+    }));
+    return [...jobs, ...parallel.filter((item) => !jobs.some((job) => job.id === item.id))];
   } catch {
     localStorage.removeItem(`${STORAGE_KEY}:${userId}`);
     return [];
@@ -188,6 +242,8 @@ function mergeJob(download: Download, job: BurnJob): Download {
     filename: job.filename || download.filename,
     progress: Number.isFinite(job.progress) ? Math.max(0, Math.min(100, job.progress)) : download.progress,
     status: job.status,
+    mode: job.mode === 'compatible' ? 'compatible' : 'burned',
+    strategy: job.strategy,
     size: job.size,
     error: job.error,
   };
@@ -204,6 +260,7 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
   userId,
 }) => {
   const [downloads, setDownloads] = useState<Download[]>(() => storedDownloads(userId));
+  const parallelControllersRef = useRef<Map<string, AbortController>>(new Map());
 
   const activeJobKey = useMemo(
     () =>
@@ -218,9 +275,33 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
   useEffect(() => {
     localStorage.setItem(
       `${STORAGE_KEY}:${userId}`,
-      JSON.stringify(downloads.filter((download) => download.mode === 'burned' && download.jobId))
+      JSON.stringify(downloads.filter((download) => download.jobId))
     );
   }, [downloads, userId]);
+
+  useEffect(
+    () => () => {
+      parallelControllersRef.current.forEach((controller) => controller.abort());
+      parallelControllersRef.current.clear();
+    },
+    []
+  );
+
+  const hasActiveParallelDownload = downloads.some(
+    (download) =>
+      download.mode === 'parallel' &&
+      (download.status === 'downloading' || download.status === 'pausing')
+  );
+
+  useEffect(() => {
+    if (!hasActiveParallelDownload) return;
+    const warnBeforeClose = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeClose);
+    return () => window.removeEventListener('beforeunload', warnBeforeClose);
+  }, [hasActiveParallelDownload]);
 
   useEffect(() => {
     const jobIds = activeJobKey.split(',').filter(Boolean);
@@ -446,6 +527,203 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
     }
   };
 
+  const startCompatibleJob: DownloadContextType['startCompatibleJob'] = async (
+    ratingKey,
+    partKey,
+    filename,
+    title
+  ) => {
+    const pendingId = `compatible-${ratingKey}-${partKey}`;
+    setDownloads((current) => [
+      ...current.filter((download) => download.id !== pendingId),
+      {
+        id: pendingId,
+        ratingKey,
+        partKey,
+        filename: filename.replace(/\.[^.]+$/, '') + ' - compatible.mp4',
+        title,
+        progress: 0,
+        status: 'requesting',
+        mode: 'compatible',
+      },
+    ]);
+
+    try {
+      const job = await api.createCompatibleJob(ratingKey, partKey);
+      setDownloads((current) => {
+        const pending = current.find((download) => download.id === pendingId);
+        if (!pending) return current;
+        return [
+          ...current.filter((download) => download.id !== pendingId && download.id !== job.id),
+          mergeJob(pending, job),
+        ];
+      });
+    } catch (error) {
+      setDownloads((current) =>
+        current.map((download) =>
+          download.id === pendingId
+            ? { ...download, status: 'failed', error: errorMessage(error) }
+            : download
+        )
+      );
+    }
+  };
+
+  const runParallel = async (
+    ratingKey: string,
+    partKey: string,
+    filename: string,
+    title: string
+  ): Promise<void> => {
+    const id = `parallel-${ratingKey}-${partKey}`;
+    if (parallelControllersRef.current.has(id)) return;
+    if (parallelControllersRef.current.size > 0) {
+      setDownloads((current) => [
+        ...current.filter((download) => download.id !== id),
+        {
+          id,
+          ratingKey,
+          partKey,
+          filename,
+          title,
+          progress: 0,
+          status: 'failed',
+          mode: 'parallel',
+          error: 'Pause the active accelerated download before starting another one.',
+        },
+      ]);
+      return;
+    }
+    const checkpoint = loadParallelCheckpoints(userId).find((item) => item.id === id);
+    const controller = new AbortController();
+    parallelControllersRef.current.set(id, controller);
+    setDownloads((current) => [
+      ...current.filter((download) => download.id !== id),
+      {
+        id,
+        ratingKey,
+        partKey,
+        filename: checkpoint?.filename || filename,
+        title,
+        progress: checkpoint?.totalBytes
+          ? (getParallelDownloadedBytes(checkpoint.segments) / checkpoint.totalBytes) * 100
+          : 0,
+        status: 'downloading',
+        mode: 'parallel',
+        size: checkpoint?.totalBytes,
+        downloadedBytes: checkpoint
+          ? getParallelDownloadedBytes(checkpoint.segments)
+          : 0,
+      },
+    ]);
+
+    try {
+      const result = await runParallelDownload({
+        id,
+        userId,
+        ratingKey,
+        partKey,
+        filename: checkpoint?.filename || filename,
+        title,
+        signal: controller.signal,
+        createTicket: () => api.createDownloadTicket(ratingKey, partKey),
+        resolveUrl: async (url) => (await resolveTicketUrls([url]))[0],
+        onProgress: (downloadedBytes, totalBytes) => {
+          setDownloads((current) =>
+            current.map((download) =>
+              download.id === id
+                ? {
+                    ...download,
+                    downloadedBytes,
+                    size: totalBytes,
+                    progress: totalBytes ? (downloadedBytes / totalBytes) * 100 : 0,
+                    status: 'downloading',
+                  }
+                : download
+            )
+          );
+        },
+      });
+      setDownloads((current) =>
+        current.map((download) =>
+          download.id === id
+            ? {
+                ...download,
+                filename: result.filename,
+                downloadedBytes: result.totalBytes,
+                size: result.totalBytes,
+                progress: 100,
+                status: 'complete',
+                error: undefined,
+              }
+            : download
+        )
+      );
+    } catch (error) {
+      const wasAborted = error instanceof DOMException && error.name === 'AbortError';
+      const saved = loadParallelCheckpoints(userId).find((item) => item.id === id);
+      if (wasAborted && !saved) {
+        setDownloads((current) => current.filter((download) => download.id !== id));
+      } else {
+        const currentBytes = saved
+          ? getParallelDownloadedBytes(saved.segments)
+          : checkpoint
+            ? getParallelDownloadedBytes(checkpoint.segments)
+            : 0;
+        const totalBytes = saved?.totalBytes || checkpoint?.totalBytes || 0;
+        const pausedSafely = Boolean(saved) && (controller.signal.aborted || wasAborted);
+        setDownloads((current) =>
+          current.map((download) =>
+            download.id === id
+              ? {
+                  ...download,
+                  filename: saved?.filename || download.filename,
+                  downloadedBytes: currentBytes,
+                  size: totalBytes,
+                  progress: totalBytes ? (currentBytes / totalBytes) * 100 : 0,
+                  status: pausedSafely ? 'paused' : 'failed',
+                  error: pausedSafely ? undefined : errorMessage(error),
+                }
+              : download
+          )
+        );
+      }
+    } finally {
+      parallelControllersRef.current.delete(id);
+    }
+  };
+
+  const startParallelDownload: DownloadContextType['startParallelDownload'] = async (
+    ratingKey,
+    partKey,
+    filename,
+    title
+  ) => {
+    await runParallel(ratingKey, partKey, filename, title);
+  };
+
+  const resumeParallelDownload: DownloadContextType['resumeParallelDownload'] = async (id) => {
+    const download = downloads.find((item) => item.id === id && item.mode === 'parallel');
+    if (!download) return;
+    await runParallel(
+      download.ratingKey,
+      download.partKey,
+      download.filename,
+      download.title
+    );
+  };
+
+  const pauseParallelDownload: DownloadContextType['pauseParallelDownload'] = (id) => {
+    const controller = parallelControllersRef.current.get(id);
+    if (!controller) return;
+    setDownloads((current) =>
+      current.map((download) =>
+        download.id === id ? { ...download, status: 'pausing' } : download
+      )
+    );
+    controller.abort();
+  };
+
   const downloadPrepared: DownloadContextType['downloadPrepared'] = async (id) => {
     const download = downloads.find((item) => item.id === id);
     if (!download?.jobId || download.status !== 'ready') return;
@@ -486,6 +764,11 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
   };
 
   const removeDownload = (id: string) => {
+    const download = downloads.find((item) => item.id === id);
+    if (download?.mode === 'parallel') {
+      if (parallelControllersRef.current.has(id)) return;
+      removeParallelCheckpoint(userId, id);
+    }
     setDownloads((current) => current.filter((download) => download.id !== id));
   };
 
@@ -496,6 +779,11 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
         startOriginalDownload,
         startOriginalDownloads,
         startBurnJob,
+        startCompatibleJob,
+        startParallelDownload,
+        resumeParallelDownload,
+        pauseParallelDownload,
+        parallelSupported: supportsParallelDownloads(),
         downloadPrepared,
         cancelBurnJob,
         removeDownload,

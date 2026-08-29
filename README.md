@@ -192,6 +192,7 @@ Customize your deployment with environment variables:
 | `BURN_GLOBAL_CONCURRENCY` | Maximum simultaneous burns | `1` | `2` |
 | `BURN_PER_USER_CONCURRENCY` | Maximum simultaneous burns per user | `1` | `1` |
 | `BURN_ARTIFACT_TTL_HOURS` | Completed derivative retention | `168` | `72` |
+| `BURN_CACHE_MAX_GB` | Maximum completed derivative cache size; oldest files are evicted first | `100` | `250` |
 | `TZ` | Timezone for logs and dates | `America/New_York` | `Europe/London`, `Asia/Tokyo` |
 
 `TOKEN_ENCRYPTION_KEY` is a required migration secret. On first startup after
@@ -256,9 +257,19 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        send_timeout 3600s;
     }
 }
 ```
+
+Apply the same buffering and timeout settings to a separate direct-download
+host. That host can be restricted to `/api/health` and
+`/api/media/downloads/<ticket>`; the browser accelerator does not require any
+other public route.
 
 #### Traefik Example (docker-compose.yml)
 
@@ -328,6 +339,15 @@ user's token proves access, canonicalized with `realpath`, and restricted to
 `MEDIA_ROOTS`.
 
 Selecting no subtitle always returns the untouched original immediately.
+Desktop Chromium browsers can optionally split one original file across up to
+four long Range requests and write the chunks directly to a user-selected
+file. Pausing commits a non-secret checkpoint; resuming requires selecting the
+same partial file. Browsers without the File System Access API keep the native
+resumable download path.
+
+Compatible MP4 preparation is also opt-in. H.264/AAC sources are repackaged
+without re-encoding, H.264 sources with other audio keep the video and convert
+audio to stereo AAC, and other video codecs are transcoded to H.264/AAC.
 Selecting an authorized subtitle creates an asynchronous burn job. Text
 subtitles use libass; supported bitmap subtitles use FFmpeg overlay. Outputs
 default to H.264 + AAC MP4 and are atomically published into `BURN_CACHE_DIR`.
@@ -347,6 +367,7 @@ header. The byte route accepts only its scoped ticket.
 | Method | Endpoint | Result |
 |--------|----------|--------|
 | `POST` | `/api/media/:ratingKey/download-ticket` with `{ partKey }` | `{ url, expiresAt, filename }` |
+| `POST` | `/api/media/:ratingKey/compatible-jobs` with `{ partKey }` | `202 { job }` |
 | `POST` | `/api/media/:ratingKey/burn-jobs` with `{ partKey, subtitleStreamId }` | `202 { job }` |
 | `GET` | `/api/media/burn-jobs/:jobId` | `{ job }` |
 | `DELETE` | `/api/media/burn-jobs/:jobId` | cancellation result |
@@ -366,7 +387,7 @@ and embedded/external classification.
 - **Database**: SQLite database stores users, sessions, settings, and download history
 - **Logs**: Application logs written to `logs/` directory
 - **Read-only Media Access**: Original media is mounted read-only and is never deleted or modified
-- **Derivative Cache**: Optional subtitle-burned MP4 files are stored only in the configured writable cache and cleaned up by TTL
+- **Derivative Cache**: Optional compatible and subtitle-burned MP4 files are stored only in the configured writable cache, cleaned up by TTL, and bounded by `BURN_CACHE_MAX_GB`
 
 ### System Requirements
 

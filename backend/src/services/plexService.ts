@@ -37,6 +37,7 @@ export interface PlexPart {
   key: string;
   duration?: number;
   file?: string;
+  filename?: string;
   size?: number;
   container?: string;
   Stream?: any[];
@@ -75,6 +76,7 @@ export interface PlexMedia {
     height?: number;
     aspectRatio?: number;
     videoCodec?: string;
+    audioCodec?: string;
     videoResolution?: string;
     container?: string;
     videoFrameRate?: string;

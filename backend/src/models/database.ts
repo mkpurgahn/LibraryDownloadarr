@@ -497,7 +497,7 @@ export class DatabaseService {
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(cache_key) DO UPDATE SET
         file_path = excluded.file_path, filename = excluded.filename, size = excluded.size,
-        expires_at = excluded.expires_at
+        created_at = excluded.created_at, expires_at = excluded.expires_at
     `).run(
       artifact.id, artifact.cacheKey, artifact.filePath, artifact.filename,
       artifact.size, artifact.createdAt, artifact.expiresAt
@@ -522,8 +522,41 @@ export class DatabaseService {
       .map(row => this.mapArtifact(row));
   }
 
+  listArtifactsOldestFirst(): BurnArtifact[] {
+    return (this.db.prepare(
+      'SELECT * FROM burn_artifacts ORDER BY created_at ASC'
+    ).all() as unknown[]).map(row => this.mapArtifact(row));
+  }
+
+  listEvictableArtifactsOldestFirst(
+    createdBefore: number,
+    now = Date.now()
+  ): BurnArtifact[] {
+    return (this.db.prepare(
+      `SELECT artifact.*
+       FROM burn_artifacts artifact
+       WHERE artifact.created_at <= ?
+         AND NOT EXISTS (
+           SELECT 1
+           FROM download_tickets ticket
+           WHERE ticket.artifact_id = artifact.id AND ticket.expires_at > ?
+         )
+       ORDER BY artifact.created_at ASC`
+    ).all(createdBefore, now) as unknown[]).map(row => this.mapArtifact(row));
+  }
+
   deleteArtifact(id: string): void {
-    this.db.prepare('DELETE FROM burn_artifacts WHERE id = ?').run(id);
+    const remove = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE burn_jobs
+        SET artifact_id = NULL, status = 'failed',
+            error = 'Prepared file expired or was removed from the cache.',
+            updated_at = ?
+        WHERE artifact_id = ?
+      `).run(Date.now(), id);
+      this.db.prepare('DELETE FROM burn_artifacts WHERE id = ?').run(id);
+    });
+    remove();
   }
 
   logDownload(userId: string, mediaTitle: string, mediaKey: string, fileSize?: number): void {

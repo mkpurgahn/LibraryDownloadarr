@@ -17,6 +17,7 @@ export interface BurnOptions {
   qsvDevice: string;
   cacheDir: string;
   artifactTtlMs: number;
+  maxCacheBytes: number;
   globalConcurrency: number;
   perUserConcurrency: number;
 }
@@ -24,8 +25,12 @@ export interface BurnOptions {
 export interface BurnCommand {
   executable: string;
   args: string[];
-  kind: 'text' | 'bitmap';
+  kind: 'text' | 'bitmap' | 'compatible';
+  strategy?: CompatibleStrategy;
 }
+
+export const COMPATIBLE_STREAM_ID = '__compatible__';
+export type CompatibleStrategy = 'remux' | 'audio' | 'transcode';
 
 const escapeFilterPath = (value: string): string =>
   value.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "'\\''").replace(/,/g, '\\,');
@@ -98,6 +103,42 @@ export const buildBurnCommand = (
     outputPath
   );
   return { executable: options.ffmpegPath, args, kind };
+};
+
+export const buildCompatibleCommand = (
+  sourcePath: string,
+  outputPath: string,
+  strategy: CompatibleStrategy,
+  options: Pick<BurnOptions, 'ffmpegPath' | 'encoder' | 'qsvDevice'>
+): BurnCommand => {
+  const usesQsv = options.encoder === 'h264_qsv';
+  const usesVaapi = options.encoder === 'h264_vaapi';
+  const args = ['-hide_banner', '-y'];
+  if (strategy === 'transcode' && usesQsv) args.push('-qsv_device', options.qsvDevice);
+  if (strategy === 'transcode' && usesVaapi) args.push('-vaapi_device', options.qsvDevice);
+  args.push('-i', sourcePath);
+  if (strategy === 'transcode' && usesVaapi) {
+    args.push('-vf', 'format=nv12,hwupload');
+  } else if (strategy === 'transcode' && usesQsv) {
+    args.push('-vf', 'format=nv12');
+  }
+  args.push(
+    '-map', '0:v:0',
+    '-map', '0:a:0?',
+    '-sn',
+    '-c:v', strategy === 'transcode' ? options.encoder : 'copy',
+    ...(strategy === 'transcode'
+      ? (usesVaapi ? ['-qp', '23'] : ['-pix_fmt', usesQsv ? 'nv12' : 'yuv420p'])
+      : []),
+    '-c:a', strategy === 'remux' ? 'copy' : 'aac',
+    ...(strategy === 'remux' ? [] : ['-ac', '2', '-b:a', '256k']),
+    '-movflags', '+faststart',
+    '-progress', 'pipe:2',
+    '-nostats',
+    '-f', 'mp4',
+    outputPath
+  );
+  return { executable: options.ffmpegPath, args, kind: 'compatible', strategy };
 };
 
 export const burnCacheKey = (
@@ -189,22 +230,36 @@ export class BurnManager {
       if (await fingerprintFile(sourcePath) !== job.sourceFingerprint) {
         throw new Error('Source media changed after the burn job was created');
       }
-      const subtitle = JSON.parse(job.subtitleJson) as PlexSubtitleTrack;
-      if (subtitle.external && subtitle.file) {
-        subtitle.file = await canonicalizeMediaPath(
-          subtitle.file,
-          [...config.media.roots, this.options.cacheDir]
-        );
-        if (
-          !job.subtitleFingerprint ||
-          await fingerprintContents(subtitle.file) !== job.subtitleFingerprint
-        ) {
-          throw new Error('External subtitle changed after the burn job was created');
+      const compatible = job.subtitleStreamId === COMPATIBLE_STREAM_ID;
+      let command: BurnCommand;
+      if (compatible) {
+        const compatibleInput = JSON.parse(job.subtitleJson) as { strategy?: CompatibleStrategy };
+        const strategy = compatibleInput.strategy;
+        if (!strategy || !['remux', 'audio', 'transcode'].includes(strategy)) {
+          throw new Error('Compatible MP4 job has no valid preparation strategy');
         }
+        command = buildCompatibleCommand(sourcePath, workPath, strategy, this.options);
+      } else {
+        const subtitle = JSON.parse(job.subtitleJson) as PlexSubtitleTrack;
+        if (subtitle.external && subtitle.file) {
+          subtitle.file = await canonicalizeMediaPath(
+            subtitle.file,
+            [...config.media.roots, this.options.cacheDir]
+          );
+          if (
+            !job.subtitleFingerprint ||
+            await fingerprintContents(subtitle.file) !== job.subtitleFingerprint
+          ) {
+            throw new Error('External subtitle changed after the burn job was created');
+          }
+        }
+        command = buildBurnCommand(sourcePath, workPath, subtitle, this.options);
       }
-      const command = buildBurnCommand(sourcePath, workPath, subtitle, this.options);
-      logger.info('Starting subtitle burn', {
-        jobId: job.id, encoder: this.options.encoder, subtitleCodec: subtitle.codec,
+      logger.info('Starting media preparation', {
+        jobId: job.id,
+        mode: compatible ? 'compatible' : 'subtitle',
+        strategy: command.strategy,
+        encoder: this.options.encoder,
       });
       await this.execute(job, command);
       if (this.db.getBurnJob(job.id)?.status === 'cancelled') {
@@ -224,6 +279,7 @@ export class BurnManager {
         status: 'ready', progress: 100, error: undefined,
         artifactId: artifactRecord.id, filename: artifactRecord.filename, size: stat.size,
       });
+      await this.enforceCacheLimit();
     } catch (error) {
       await fsPromises.rm(workPath, { force: true }).catch(() => undefined);
       if (this.db.getBurnJob(job.id)?.status !== 'cancelled') {
@@ -232,7 +288,7 @@ export class BurnManager {
           error: error instanceof Error ? error.message : 'FFmpeg failed',
         });
       }
-      logger.error('Subtitle burn failed', { jobId: job.id, error });
+      logger.error('Media preparation failed', { jobId: job.id, error });
     }
   }
 
@@ -275,6 +331,7 @@ export class BurnManager {
       }
       this.db.deleteArtifact(artifact.id);
     }
+    await this.enforceCacheLimit();
     const entries = await fsPromises.readdir(cacheRoot, { withFileTypes: true }).catch(() => []);
     const cutoff = Date.now() - this.options.artifactTtlMs;
     for (const entry of entries) {
@@ -284,6 +341,25 @@ export class BurnManager {
       if (stat && stat.mtimeMs <= cutoff) {
         await fsPromises.rm(candidate, { force: true }).catch(() => undefined);
       }
+    }
+  }
+
+  private async enforceCacheLimit(): Promise<void> {
+    if (this.options.maxCacheBytes <= 0) return;
+    const artifacts = this.db.listArtifactsOldestFirst();
+    const evictionGraceMs = 60 * 60 * 1000;
+    const evictable = this.db.listEvictableArtifactsOldestFirst(
+      Date.now() - evictionGraceMs
+    );
+    let totalBytes = artifacts.reduce((sum, artifact) => sum + artifact.size, 0);
+    let remaining = artifacts.length;
+    for (const artifact of evictable) {
+      if (totalBytes <= this.options.maxCacheBytes || remaining <= 1) break;
+      const resolved = path.resolve(artifact.filePath);
+      await fsPromises.rm(resolved, { force: true }).catch(() => undefined);
+      this.db.deleteArtifact(artifact.id);
+      totalBytes -= artifact.size;
+      remaining -= 1;
     }
   }
 }
