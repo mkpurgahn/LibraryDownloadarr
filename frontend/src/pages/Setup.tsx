@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../services/api';
+import { LockIcon } from '../components/Icons';
 import { useAuthStore } from '../stores/authStore';
 
 export const Setup: React.FC = () => {
@@ -33,7 +34,7 @@ export const Setup: React.FC = () => {
     <div className="min-h-screen flex items-center justify-center bg-dark p-4">
       <div className="max-w-xl w-full">
         <div className="text-center mb-6 md:mb-8">
-          <h1 className="text-3xl md:text-4xl font-bold bg-gradient-to-r from-primary-500 to-secondary-500 bg-clip-text text-transparent mb-2">
+          <h1 className="mb-2 text-3xl font-bold text-white md:text-4xl">
             LibraryDownloadarr
           </h1>
           <p className="text-base md:text-lg text-gray-300 font-medium">Welcome! Let's get started</p>
@@ -42,7 +43,7 @@ export const Setup: React.FC = () => {
         {/* Info Callout */}
         <div className="card p-4 md:p-6 mb-6 border-2 border-primary-500/20 bg-primary-500/5">
           <div className="flex items-start space-x-3">
-            <div className="text-2xl md:text-3xl mt-0.5">🔐</div>
+            <LockIcon className="mt-0.5 h-7 w-7 flex-none text-primary-300" />
             <div>
               <h2 className="text-lg md:text-xl font-bold text-primary-400 mb-2">One-Time Setup: Create Admin Account</h2>
               <p className="text-sm md:text-base text-gray-300 mb-2">

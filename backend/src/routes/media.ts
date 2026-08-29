@@ -291,6 +291,95 @@ export const createMediaRouter = (
   );
 
   router.post(
+    '/download-tickets',
+    creationLimiter,
+    authMiddleware,
+    async (req: AuthRequest, res) => {
+      const items = req.body?.items;
+      if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
+        return res.status(400).json({ error: 'Select between 1 and 100 media files.' });
+      }
+      if (
+        items.some(
+          (item) =>
+            !item ||
+            typeof item !== 'object' ||
+            !validRatingKey(String(item.ratingKey || '')) ||
+            !validPartKey(item.partKey)
+        )
+      ) {
+        return res.status(400).json({ error: 'Every selected file requires a valid ratingKey and partKey.' });
+      }
+
+      try {
+        await forceMembership(req);
+        const clients = credentials(req);
+        const uniqueItems = Array.from(
+          new Map(
+            items.map((item) => [
+              `${item.ratingKey}:${item.partKey}`,
+              { ratingKey: String(item.ratingKey), partKey: String(item.partKey) },
+            ])
+          ).values()
+        );
+        const tickets: object[] = [];
+        const errors: object[] = [];
+
+        for (const item of uniqueItems) {
+          try {
+            const authorized = await resolveAuthorizedPart(
+              item.ratingKey,
+              item.partKey,
+              clients.user,
+              clients.owner,
+              config.media.roots
+            );
+            const filename = path.basename(authorized.sourcePath);
+            const expiresAt = Date.now() + config.media.ticketTtlMs;
+            const ticket = db.createDownloadTicket({
+              userId: req.user!.id,
+              ratingKey: item.ratingKey,
+              partKey: item.partKey,
+              filePath: authorized.sourcePath,
+              sourceFingerprint: authorized.sourceFingerprint,
+              filename,
+              expiresAt,
+            });
+            db.logDownload(
+              req.user!.id,
+              formattedMediaTitle(authorized.metadata),
+              item.ratingKey,
+              authorized.part.size
+            );
+            tickets.push({
+              ratingKey: item.ratingKey,
+              partKey: item.partKey,
+              url: `/api/media/downloads/${ticket.token}`,
+              expiresAt: new Date(expiresAt).toISOString(),
+              filename,
+            });
+          } catch (error) {
+            logger.warn('Selected media file could not be ticketed', {
+              ratingKey: item.ratingKey,
+              partKey: item.partKey,
+              error,
+            });
+            errors.push({
+              ratingKey: item.ratingKey,
+              partKey: item.partKey,
+              error: 'This file is no longer available to download.',
+            });
+          }
+        }
+
+        return res.json({ tickets, errors });
+      } catch (error) {
+        return handleRouteError(res, error, 'Failed to create selected download tickets');
+      }
+    }
+  );
+
+  router.post(
     '/:ratingKey/download-ticket',
     creationLimiter,
     authMiddleware,

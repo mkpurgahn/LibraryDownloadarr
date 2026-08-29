@@ -7,6 +7,7 @@ import { api } from '../services/api';
 import { MediaItem } from '../types';
 import { useAuthStore } from '../stores/authStore';
 import { useMobileMenu } from '../hooks/useMobileMenu';
+import { FilmIcon, HistoryIcon, SettingsIcon } from '../components/Icons';
 
 export const Dashboard: React.FC = () => {
   const [recentlyAdded, setRecentlyAdded] = useState<MediaItem[]>([]);
@@ -61,7 +62,7 @@ export const Dashboard: React.FC = () => {
             {user?.isAdmin && (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 md:gap-6 mb-6 md:mb-8">
                 <div className="card p-4 md:p-6">
-                  <div className="text-3xl md:text-4xl mb-3 md:mb-4">🎬</div>
+                  <FilmIcon className="mb-4 h-8 w-8 text-primary-300" />
                   <h3 className="text-lg md:text-xl font-semibold mb-2">Browse Libraries</h3>
                   <p className="text-gray-400 text-xs md:text-sm">
                     Access all your Plex libraries with full metadata and artwork
@@ -69,7 +70,7 @@ export const Dashboard: React.FC = () => {
                 </div>
 
                 <div className="card p-4 md:p-6 cursor-pointer hover:border-primary-500 transition-colors" onClick={() => navigate('/admin/download-history')}>
-                  <div className="text-3xl md:text-4xl mb-3 md:mb-4">📊</div>
+                  <HistoryIcon className="mb-4 h-8 w-8 text-primary-300" />
                   <h3 className="text-lg md:text-xl font-semibold mb-2">Downloads</h3>
                   {stats ? (
                     <div className="text-xs md:text-sm space-y-1">
@@ -83,7 +84,7 @@ export const Dashboard: React.FC = () => {
                 </div>
 
                 <div className="card p-4 md:p-6 cursor-pointer hover:border-primary-500 transition-colors sm:col-span-2 md:col-span-1" onClick={() => navigate('/settings')}>
-                  <div className="text-3xl md:text-4xl mb-3 md:mb-4">⚙️</div>
+                  <SettingsIcon className="mb-4 h-8 w-8 text-primary-300" />
                   <h3 className="text-lg md:text-xl font-semibold mb-2">Settings</h3>
                   <p className="text-gray-400 text-xs md:text-sm">
                     Configure your Plex server connection

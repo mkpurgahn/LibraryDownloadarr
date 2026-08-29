@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useDownloads } from '../contexts/DownloadContext';
 import { MediaPart, MediaStream, Part } from '../types';
+import { DownloadIcon } from './Icons';
 
 interface DownloadChoiceProps {
   ratingKey: string;
@@ -31,14 +32,6 @@ function subtitleLabel(stream: MediaStream): string {
     stream.embedded === false || stream.key ? 'External' : 'Embedded',
   ].filter(Boolean);
   return details.length ? `${language} - ${details.join(' - ')}` : language;
-}
-
-function DownloadIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4 fill-none stroke-current stroke-2">
-      <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
 }
 
 function CaptionIcon() {
@@ -87,61 +80,69 @@ export const DownloadChoice: React.FC<DownloadChoiceProps> = ({
   };
 
   return (
-    <div className={`min-w-0 ${compact ? 'w-full md:max-w-md' : 'w-full'}`}>
-      <div className="flex flex-wrap gap-2 text-xs text-gray-300">
-        {mediaPart.videoResolution && <span className="media-fact">{mediaPart.videoResolution}</span>}
-        {videoCodec && <span className="media-fact">{videoCodec}</span>}
-        {audioCodec && <span className="media-fact">{audioCodec}</span>}
-        {container && <span className="media-fact">{container}</span>}
-        <span className="media-fact tabular-nums">{formatFileSize(part.size)}</span>
+    <div className="min-w-0 w-full">
+      <div className={compact ? 'grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end' : ''}>
+        <div className="min-w-0">
+          <div className="flex flex-wrap gap-2 text-xs text-gray-300">
+            {mediaPart.videoResolution && <span className="media-fact">{mediaPart.videoResolution}</span>}
+            {videoCodec && <span className="media-fact">{videoCodec}</span>}
+            {audioCodec && <span className="media-fact">{audioCodec}</span>}
+            {container && <span className="media-fact">{container}</span>}
+            <span className="media-fact tabular-nums">{formatFileSize(part.size)}</span>
+          </div>
+
+          {subtitles.length > 0 && (
+            <label className="mt-3 block min-w-0">
+              <span className="mb-1.5 flex items-center gap-2 text-xs font-medium text-gray-300">
+                <CaptionIcon />
+                Subtitle option
+              </span>
+              <select
+                className="input min-h-11 max-w-full text-base md:text-sm"
+                value={subtitleId}
+                onChange={(event) => setSubtitleId(event.target.value)}
+                disabled={Boolean(active)}
+              >
+                <option value="">Original file - no subtitle burn-in</option>
+                {subtitles.map((stream) => (
+                  <option key={stream.id} value={String(stream.id)} disabled={stream.burnSupported === false}>
+                    {subtitleLabel(stream)}
+                    {stream.burnSupported === false ? ' - unavailable' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={act}
+          disabled={Boolean(active) || selectedSubtitle?.burnSupported === false}
+          className={`btn-primary inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+            compact ? 'sm:w-auto' : 'mt-3 md:w-auto'
+          }`}
+        >
+          {selectedSubtitle ? <CaptionIcon /> : <DownloadIcon className="h-4 w-4" />}
+          {active
+            ? active.status === 'preparing'
+              ? `Preparing ${Math.round(active.progress)}%`
+              : 'Starting...'
+            : selectedSubtitle
+              ? 'Prepare MP4'
+              : 'Download original'}
+        </button>
       </div>
 
-      {subtitles.length > 0 && (
-        <label className="mt-3 block">
-          <span className="mb-1.5 flex items-center gap-2 text-xs font-medium text-gray-300">
-            <CaptionIcon />
-            Burn in subtitles
-          </span>
-          <select
-            className="input min-h-11 text-base md:text-sm"
-            value={subtitleId}
-            onChange={(event) => setSubtitleId(event.target.value)}
-            disabled={Boolean(active)}
-          >
-            <option value="">No subtitles - original file</option>
-            {subtitles.map((stream) => (
-              <option key={stream.id} value={String(stream.id)} disabled={stream.burnSupported === false}>
-                {subtitleLabel(stream)}
-                {stream.burnSupported === false ? ' - unavailable' : ''}
-              </option>
-            ))}
-          </select>
-        </label>
+      {!compact && (
+        <p className="mt-2 max-w-2xl text-xs leading-5 text-gray-400">
+          {selectedSubtitle
+            ? 'Creates a compatible H.264/AAC MP4 first. You can leave this page while the server prepares it.'
+            : container === 'MKV'
+              ? 'Downloads the untouched MKV. Your browser handles pause and resume; VLC or Infuse offers the widest device support.'
+              : 'Downloads the untouched original. Your browser handles pause and resume.'}
+        </p>
       )}
-
-      <p className="mt-2 text-xs leading-5 text-gray-400">
-        {selectedSubtitle
-          ? 'Creates a compatible H.264/AAC MP4 first. You can leave this page while the server prepares it.'
-          : container === 'MKV'
-            ? 'Downloads the untouched MKV. Your browser handles pause and resume; VLC or Infuse offers the widest device support.'
-            : 'Downloads the untouched original. Your browser handles pause and resume.'}
-      </p>
-
-      <button
-        type="button"
-        onClick={act}
-        disabled={Boolean(active) || selectedSubtitle?.burnSupported === false}
-        className="btn-primary mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50 md:w-auto"
-      >
-        {selectedSubtitle ? <CaptionIcon /> : <DownloadIcon />}
-        {active
-          ? active.status === 'preparing'
-            ? `Preparing ${Math.round(active.progress)}%`
-            : 'Starting...'
-          : selectedSubtitle
-            ? 'Prepare subtitled MP4'
-            : 'Download original'}
-      </button>
     </div>
   );
 };

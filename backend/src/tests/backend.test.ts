@@ -336,6 +336,42 @@ test('original tickets are scoped and expire', async () => {
   assert.equal(expiredResponse.status, 404);
 });
 
+test('batch ticket creation supports multiple resumable originals in one request', async () => {
+  const response = await request('/api/media/download-tickets', {
+    method: 'POST',
+    body: JSON.stringify({
+      items: [
+        { ratingKey, partKey },
+        { ratingKey, partKey },
+      ],
+    }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json() as {
+    tickets: Array<{ ratingKey: string; partKey: string; url: string }>;
+    errors: unknown[];
+  };
+  assert.equal(body.tickets.length, 1);
+  assert.equal(body.errors.length, 0);
+  assert.equal(body.tickets[0].ratingKey, ratingKey);
+  assert.equal(body.tickets[0].partKey, partKey);
+  const range = await fetch(`${baseUrl}${body.tickets[0].url}`, {
+    headers: { range: 'bytes=0-3' },
+  });
+  assert.equal(range.status, 206);
+  assert.equal(await range.text(), '0123');
+});
+
+test('batch ticket creation rejects more than 100 files', async () => {
+  const response = await request('/api/media/download-tickets', {
+    method: 'POST',
+    body: JSON.stringify({
+      items: Array.from({ length: 101 }, () => ({ ratingKey, partKey })),
+    }),
+  });
+  assert.equal(response.status, 400);
+});
+
 test('download endpoint supports HEAD, full, open, bounded, and suffix ranges', async () => {
   const created = await request(`/api/media/${ratingKey}/download-ticket`, {
     method: 'POST',

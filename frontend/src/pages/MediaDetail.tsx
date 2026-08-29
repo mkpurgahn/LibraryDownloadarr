@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { DownloadChoice } from '../components/DownloadChoice';
 import { Header } from '../components/Header';
+import { DownloadIcon } from '../components/Icons';
 import { Sidebar } from '../components/Sidebar';
+import { useDownloads } from '../contexts/DownloadContext';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 import { api } from '../services/api';
-import { MediaItem } from '../types';
+import { BatchDownloadTarget, MediaItem } from '../types';
 
 function formatDuration(ms: number): string {
   const minutes = Math.floor(ms / 60_000);
@@ -46,6 +48,22 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
+function downloadTargets(item: MediaItem): BatchDownloadTarget[] {
+  const mediaPart = item.Media?.find((entry) => entry.Part?.length);
+  if (!mediaPart) return [];
+  const parts = mediaPart.Part.filter((part) => part.key);
+  return parts.map((part, index) => {
+    const container = part.container || mediaPart.container || 'mkv';
+    const partSuffix = parts.length > 1 ? ` - Part ${index + 1}` : '';
+    return {
+      ratingKey: item.ratingKey,
+      partKey: part.key,
+      filename: `${item.title}${partSuffix}.${container}`,
+      title: item.parentTitle ? `${item.parentTitle} - ${item.title}${partSuffix}` : `${item.title}${partSuffix}`,
+    };
+  });
+}
+
 function ItemDownloads({ item, compact = false }: { item: MediaItem; compact?: boolean }) {
   if (!item.Media?.length) {
     return <p className="text-sm text-gray-400">No downloadable file is available.</p>;
@@ -69,24 +87,48 @@ function ItemDownloads({ item, compact = false }: { item: MediaItem; compact?: b
   );
 }
 
-function EpisodeRow({ episode }: { episode: MediaItem }) {
+function EpisodeRow({
+  episode,
+  selected,
+  onSelectedChange,
+}: {
+  episode: MediaItem;
+  selected: boolean;
+  onSelectedChange: (selected: boolean) => void;
+}) {
   const thumbnail = episode.thumb ? api.getThumbnailUrl(episode.ratingKey, episode.thumb) : null;
+  const downloadable = downloadTargets(episode).length > 0;
   return (
-    <article className="grid gap-4 border-t border-white/5 px-4 py-5 first:border-t-0 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,28rem)] lg:items-start">
-      <div className="flex min-w-0 gap-3">
-        {thumbnail && (
-          <img
-            src={thumbnail}
-            alt=""
-            className="h-16 w-24 flex-none rounded-lg object-cover sm:h-20 sm:w-32"
-            loading="lazy"
+    <article className="min-w-0 border-t border-white/5 px-4 py-5 first:border-t-0 md:px-5">
+      <div className="flex min-w-0 items-start gap-3">
+        <label className="mt-1 flex h-11 w-8 flex-none cursor-pointer items-start justify-center">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={(event) => onSelectedChange(event.target.checked)}
+            disabled={!downloadable}
+            className="mt-0.5 h-5 w-5 rounded border-white/20 bg-dark-200 accent-primary-500 disabled:cursor-not-allowed disabled:opacity-40"
           />
+          <span className="sr-only">Select {episode.title}</span>
+        </label>
+        {thumbnail && (
+          <Link to={`/media/${episode.ratingKey}`} className="flex-none">
+            <img
+              src={thumbnail}
+              alt=""
+              className="h-16 w-24 rounded-lg object-cover sm:h-20 sm:w-32"
+              loading="lazy"
+            />
+          </Link>
         )}
         <div className="min-w-0">
-          <div className="font-medium text-white">
+          <Link
+            to={`/media/${episode.ratingKey}`}
+            className="font-medium text-white underline-offset-4 hover:text-primary-300 hover:underline"
+          >
             {episode.index ? `Episode ${episode.index}: ` : ''}
             {episode.title}
-          </div>
+          </Link>
           <div className="mt-1 text-sm text-gray-400">
             {episode.duration ? formatDuration(episode.duration) : 'Episode'}
           </div>
@@ -95,19 +137,116 @@ function EpisodeRow({ episode }: { episode: MediaItem }) {
           )}
         </div>
       </div>
-      <ItemDownloads item={episode} compact />
+      <div className="mt-4 min-w-0 border-t border-white/5 pt-4">
+        <ItemDownloads item={episode} compact />
+      </div>
     </article>
+  );
+}
+
+interface BatchState {
+  status: 'idle' | 'starting' | 'done';
+  started: number;
+  failed: number;
+}
+
+function SeasonEpisodeList({
+  episodes,
+  selectedIds,
+  batchState,
+  onToggleEpisode,
+  onToggleAll,
+  onDownloadSelected,
+  onDownloadSeason,
+}: {
+  episodes: MediaItem[];
+  selectedIds: string[];
+  batchState: BatchState;
+  onToggleEpisode: (ratingKey: string, selected: boolean) => void;
+  onToggleAll: (ratingKeys: string[], selected: boolean) => void;
+  onDownloadSelected: () => void;
+  onDownloadSeason: () => void;
+}) {
+  const downloadableEpisodes = episodes.filter((episode) => downloadTargets(episode).length > 0);
+  const downloadableIds = downloadableEpisodes.map((episode) => episode.ratingKey);
+  const selectedCount = downloadableIds.filter((id) => selectedIds.includes(id)).length;
+  const allSelected = downloadableIds.length > 0 && selectedCount === downloadableIds.length;
+  const isStarting = batchState.status === 'starting';
+
+  return (
+    <div>
+      <div className="flex flex-col gap-3 border-t border-white/10 bg-black/10 px-4 py-4 md:flex-row md:items-center md:justify-between md:px-5">
+        <div className="flex min-w-0 items-center gap-3">
+          <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 text-sm font-medium text-gray-200">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={(event) => onToggleAll(downloadableIds, event.target.checked)}
+              disabled={downloadableIds.length === 0 || isStarting}
+              className="h-5 w-5 rounded border-white/20 bg-dark-200 accent-primary-500 disabled:cursor-not-allowed disabled:opacity-40"
+            />
+            Select all
+          </label>
+          <span className="text-sm tabular-nums text-gray-400">
+            {selectedCount} of {downloadableIds.length} selected
+          </span>
+        </div>
+
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            onClick={onDownloadSelected}
+            disabled={selectedCount === 0 || isStarting}
+            className="btn-secondary inline-flex min-h-11 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <DownloadIcon className="h-4 w-4" />
+            Download selected
+          </button>
+          <button
+            type="button"
+            onClick={onDownloadSeason}
+            disabled={downloadableIds.length === 0 || isStarting}
+            className="btn-primary inline-flex min-h-11 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <DownloadIcon className="h-4 w-4" />
+            {isStarting ? 'Starting downloads...' : `Download season (${downloadableIds.length})`}
+          </button>
+        </div>
+      </div>
+
+      <div className="border-t border-white/5 px-4 py-3 text-xs leading-5 text-gray-400 md:px-5">
+        Each episode downloads as one or more separate resumable original files. Your browser may ask permission for
+        multiple downloads.
+        {batchState.status === 'done' && (
+          <span className="ml-1 text-gray-300">
+            Started {batchState.started}; {batchState.failed} unavailable.
+          </span>
+        )}
+      </div>
+
+      {episodes.map((episode) => (
+        <EpisodeRow
+          key={episode.ratingKey}
+          episode={episode}
+          selected={selectedIds.includes(episode.ratingKey)}
+          onSelectedChange={(selected) => onToggleEpisode(episode.ratingKey, selected)}
+        />
+      ))}
+    </div>
   );
 }
 
 export const MediaDetail: React.FC = () => {
   const { ratingKey } = useParams<{ ratingKey: string }>();
+  const { startOriginalDownloads } = useDownloads();
   const { isMobileMenuOpen, toggleMobileMenu, closeMobileMenu } = useMobileMenu();
   const [media, setMedia] = useState<MediaItem | null>(null);
   const [seasons, setSeasons] = useState<MediaItem[]>([]);
   const [episodesBySeason, setEpisodesBySeason] = useState<Record<string, MediaItem[]>>({});
   const [expandedSeasons, setExpandedSeasons] = useState<Record<string, boolean>>({});
   const [tracks, setTracks] = useState<MediaItem[]>([]);
+  const [selectedBySeason, setSelectedBySeason] = useState<Record<string, string[]>>({});
+  const [batchBySeason, setBatchBySeason] = useState<Record<string, BatchState>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -136,15 +275,56 @@ export const MediaDetail: React.FC = () => {
     void loadMediaDetails();
   }, [ratingKey]);
 
+  const loadSeasonEpisodes = async (seasonRatingKey: string): Promise<MediaItem[]> => {
+    if (episodesBySeason[seasonRatingKey]) return episodesBySeason[seasonRatingKey];
+    const episodes = await api.getEpisodes(seasonRatingKey);
+    setEpisodesBySeason((current) => ({ ...current, [seasonRatingKey]: episodes }));
+    return episodes;
+  };
+
   const toggleSeason = async (seasonRatingKey: string) => {
     const willOpen = !expandedSeasons[seasonRatingKey];
     setExpandedSeasons((current) => ({ ...current, [seasonRatingKey]: willOpen }));
     if (!willOpen || episodesBySeason[seasonRatingKey]) return;
     try {
-      const episodes = await api.getEpisodes(seasonRatingKey);
-      setEpisodesBySeason((current) => ({ ...current, [seasonRatingKey]: episodes }));
+      await loadSeasonEpisodes(seasonRatingKey);
     } catch (requestError: any) {
       setError(requestError.response?.data?.error || 'Episodes could not be loaded.');
+    }
+  };
+
+  const toggleEpisodeSelection = (seasonRatingKey: string, episodeRatingKey: string, selected: boolean) => {
+    setSelectedBySeason((current) => {
+      const existing = current[seasonRatingKey] || [];
+      const next = selected
+        ? Array.from(new Set([...existing, episodeRatingKey]))
+        : existing.filter((id) => id !== episodeRatingKey);
+      return { ...current, [seasonRatingKey]: next };
+    });
+  };
+
+  const toggleAllEpisodes = (seasonRatingKey: string, episodeRatingKeys: string[], selected: boolean) => {
+    setSelectedBySeason((current) => ({
+      ...current,
+      [seasonRatingKey]: selected ? episodeRatingKeys : [],
+    }));
+  };
+
+  const downloadEpisodes = async (seasonRatingKey: string, episodes: MediaItem[]) => {
+    const targets = episodes
+      .flatMap(downloadTargets);
+    if (targets.length === 0) return;
+    setBatchBySeason((current) => ({
+      ...current,
+      [seasonRatingKey]: { status: 'starting', started: 0, failed: 0 },
+    }));
+    const result = await startOriginalDownloads(targets);
+    setBatchBySeason((current) => ({
+      ...current,
+      [seasonRatingKey]: { status: 'done', ...result },
+    }));
+    if (result.started > 0) {
+      setSelectedBySeason((current) => ({ ...current, [seasonRatingKey]: [] }));
     }
   };
 
@@ -182,6 +362,19 @@ export const MediaDetail: React.FC = () => {
 
   const posterUrl = media.thumb ? api.getThumbnailUrl(media.ratingKey, media.thumb) : null;
   const backdropUrl = media.art ? api.getThumbnailUrl(media.ratingKey, media.art) : null;
+  const parentLinks: Array<{ label: string; ratingKey?: string }> = [];
+  if (media.grandparentTitle) {
+    parentLinks.push({
+      label: media.grandparentTitle,
+      ratingKey: media.grandparentRatingKey,
+    });
+  }
+  if (media.parentTitle) {
+    parentLinks.push({
+      label: media.parentTitle,
+      ratingKey: media.parentRatingKey,
+    });
+  }
 
   return shell(
     <main className="min-w-0 flex-1 overflow-y-auto">
@@ -207,6 +400,25 @@ export const MediaDetail: React.FC = () => {
             </div>
 
             <div className="min-w-0 flex-1">
+              {parentLinks.length > 0 && (
+                <nav aria-label="Media hierarchy" className="mb-3 flex flex-wrap items-center gap-2 text-sm text-gray-400">
+                  {parentLinks.map((entry, index) => (
+                    <React.Fragment key={`${entry.label}-${index}`}>
+                      {index > 0 && <span aria-hidden="true">/</span>}
+                      {entry.ratingKey ? (
+                        <Link
+                          to={`/media/${entry.ratingKey}`}
+                          className="underline-offset-4 hover:text-white hover:underline"
+                        >
+                          {entry.label}
+                        </Link>
+                      ) : (
+                        <span>{entry.label}</span>
+                      )}
+                    </React.Fragment>
+                  ))}
+                </nav>
+              )}
               <h1 className="max-w-4xl text-balance text-3xl font-bold tracking-[-0.025em] text-white md:text-5xl">
                 {media.title}
               </h1>
@@ -250,7 +462,7 @@ export const MediaDetail: React.FC = () => {
                             )}
                             <span className="min-w-0 flex-1">
                               <span className="block font-medium text-white">{season.title}</span>
-                              <span className="mt-1 line-clamp-1 block text-sm text-gray-400">
+                              <span className="season-summary mt-1 hidden text-sm leading-5 text-gray-400 sm:block">
                                 {season.summary || 'Open to choose episodes and subtitles.'}
                               </span>
                             </span>
@@ -261,9 +473,33 @@ export const MediaDetail: React.FC = () => {
                           {open && (
                             <div>
                               {episodesBySeason[season.ratingKey] ? (
-                                episodesBySeason[season.ratingKey].map((episode) => (
-                                  <EpisodeRow key={episode.ratingKey} episode={episode} />
-                                ))
+                                <SeasonEpisodeList
+                                  episodes={episodesBySeason[season.ratingKey]}
+                                  selectedIds={selectedBySeason[season.ratingKey] || []}
+                                  batchState={batchBySeason[season.ratingKey] || {
+                                    status: 'idle',
+                                    started: 0,
+                                    failed: 0,
+                                  }}
+                                  onToggleEpisode={(episodeRatingKey, selected) =>
+                                    toggleEpisodeSelection(season.ratingKey, episodeRatingKey, selected)
+                                  }
+                                  onToggleAll={(episodeRatingKeys, selected) =>
+                                    toggleAllEpisodes(season.ratingKey, episodeRatingKeys, selected)
+                                  }
+                                  onDownloadSelected={() => {
+                                    const selected = new Set(selectedBySeason[season.ratingKey] || []);
+                                    void downloadEpisodes(
+                                      season.ratingKey,
+                                      episodesBySeason[season.ratingKey].filter((episode) =>
+                                        selected.has(episode.ratingKey)
+                                      )
+                                    );
+                                  }}
+                                  onDownloadSeason={() =>
+                                    void downloadEpisodes(season.ratingKey, episodesBySeason[season.ratingKey])
+                                  }
+                                />
                               ) : (
                                 <div className="border-t border-white/5 px-4 py-6 text-sm text-gray-400">
                                   Loading episodes...
@@ -280,9 +516,33 @@ export const MediaDetail: React.FC = () => {
 
                 {media.type === 'season' && (
                   <section className="overflow-hidden rounded-xl bg-dark-100 ring-1 ring-white/10">
-                    {(episodesBySeason[ratingKey || ''] || []).map((episode) => (
-                      <EpisodeRow key={episode.ratingKey} episode={episode} />
-                    ))}
+                    <SeasonEpisodeList
+                      episodes={episodesBySeason[ratingKey || ''] || []}
+                      selectedIds={selectedBySeason[ratingKey || ''] || []}
+                      batchState={batchBySeason[ratingKey || ''] || {
+                        status: 'idle',
+                        started: 0,
+                        failed: 0,
+                      }}
+                      onToggleEpisode={(episodeRatingKey, selected) =>
+                        toggleEpisodeSelection(ratingKey || '', episodeRatingKey, selected)
+                      }
+                      onToggleAll={(episodeRatingKeys, selected) =>
+                        toggleAllEpisodes(ratingKey || '', episodeRatingKeys, selected)
+                      }
+                      onDownloadSelected={() => {
+                        const selected = new Set(selectedBySeason[ratingKey || ''] || []);
+                        void downloadEpisodes(
+                          ratingKey || '',
+                          (episodesBySeason[ratingKey || ''] || []).filter((episode) =>
+                            selected.has(episode.ratingKey)
+                          )
+                        );
+                      }}
+                      onDownloadSeason={() =>
+                        void downloadEpisodes(ratingKey || '', episodesBySeason[ratingKey || ''] || [])
+                      }
+                    />
                   </section>
                 )}
 

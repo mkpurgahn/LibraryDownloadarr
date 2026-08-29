@@ -62,6 +62,7 @@ export interface PlexMedia {
   librarySectionID?: string;
   librarySectionTitle?: string;
   grandparentTitle?: string;
+  grandparentRatingKey?: string;
   parentTitle?: string;
   index?: number;
   parentIndex?: number;

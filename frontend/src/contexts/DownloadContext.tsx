@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useState, ReactNode } from 'react';
 import { api } from '../services/api';
-import { BurnJob, BurnJobStatus } from '../types';
+import { BatchDownloadTarget, BatchDownloadTicket, BurnJob, BurnJobStatus } from '../types';
 
 export type DownloadStatus = BurnJobStatus | 'requesting' | 'started';
 
@@ -27,6 +27,9 @@ interface DownloadContextType {
     filename: string,
     title: string
   ) => Promise<void>;
+  startOriginalDownloads: (
+    targets: BatchDownloadTarget[]
+  ) => Promise<{ started: number; failed: number }>;
   startBurnJob: (
     ratingKey: string,
     partKey: string,
@@ -220,6 +223,87 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
     }
   };
 
+  const startOriginalDownloads: DownloadContextType['startOriginalDownloads'] = async (targets) => {
+    const uniqueTargets = Array.from(
+      new Map(targets.map((target) => [`${target.ratingKey}:${target.partKey}`, target])).values()
+    );
+    const ids = uniqueTargets.map((target) => `original-${target.ratingKey}-${target.partKey}`);
+    setDownloads((current) => [
+      ...current.filter((download) => !ids.includes(download.id)),
+      ...uniqueTargets.map((target) => ({
+        id: `original-${target.ratingKey}-${target.partKey}`,
+        ratingKey: target.ratingKey,
+        partKey: target.partKey,
+        filename: target.filename,
+        title: target.title,
+        progress: 0,
+        status: 'requesting' as const,
+        mode: 'original' as const,
+      })),
+    ]);
+
+    const tickets: BatchDownloadTicket[] = [];
+    const failures: Array<{ ratingKey: string; partKey: string; error: string }> = [];
+    for (let index = 0; index < uniqueTargets.length; index += 100) {
+      const chunk = uniqueTargets.slice(index, index + 100);
+      try {
+        const result = await api.createDownloadTickets(chunk);
+        tickets.push(...result.tickets);
+        failures.push(...result.errors);
+      } catch (error) {
+        const message = errorMessage(error);
+        failures.push(
+          ...chunk.map((target) => ({
+            ratingKey: target.ratingKey,
+            partKey: target.partKey,
+            error: message,
+          }))
+        );
+      }
+    }
+
+    const ticketKeys = new Set(tickets.map((ticket) => `${ticket.ratingKey}:${ticket.partKey}`));
+    const errorByKey = new Map(
+      failures.map((failure) => [`${failure.ratingKey}:${failure.partKey}`, failure.error])
+    );
+
+    for (const ticket of tickets) {
+      const target = uniqueTargets.find(
+        (item) => item.ratingKey === ticket.ratingKey && item.partKey === ticket.partKey
+      );
+      triggerBrowserDownload(ticket.url, ticket.filename || target?.filename || 'download');
+    }
+
+    setDownloads((current) =>
+      current.map((download) => {
+        const key = `${download.ratingKey}:${download.partKey}`;
+        if (!ids.includes(download.id)) return download;
+        if (ticketKeys.has(key)) {
+          const ticket = tickets.find(
+            (item) => item.ratingKey === download.ratingKey && item.partKey === download.partKey
+          );
+          return {
+            ...download,
+            filename: ticket?.filename || download.filename,
+            progress: 100,
+            status: 'started',
+          };
+        }
+        return {
+          ...download,
+          status: 'failed',
+          error: errorByKey.get(key) || 'The download could not be started.',
+        };
+      })
+    );
+    window.setTimeout(() => {
+      setDownloads((current) =>
+        current.filter((download) => !ids.includes(download.id) || download.status !== 'started')
+      );
+    }, 8000);
+    return { started: tickets.length, failed: failures.length };
+  };
+
   const startBurnJob: DownloadContextType['startBurnJob'] = async (
     ratingKey,
     partKey,
@@ -310,6 +394,7 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
       value={{
         downloads,
         startOriginalDownload,
+        startOriginalDownloads,
         startBurnJob,
         downloadPrepared,
         cancelBurnJob,

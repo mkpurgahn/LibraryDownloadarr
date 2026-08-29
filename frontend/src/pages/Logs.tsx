@@ -5,6 +5,7 @@ import { Sidebar } from '../components/Sidebar';
 import { api } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 import { useMobileMenu } from '../hooks/useMobileMenu';
+import { RefreshIcon } from '../components/Icons';
 
 interface LogEntry {
   timestamp: string;
@@ -100,9 +101,10 @@ export const Logs: React.FC = () => {
               <h1 className="text-2xl md:text-3xl font-bold">Application Logs</h1>
               <button
                 onClick={() => loadLogs()}
-                className="btn-primary text-sm md:text-base"
+                className="btn-primary inline-flex items-center gap-2 text-sm md:text-base"
               >
-                🔄 Refresh
+                <RefreshIcon className="h-4 w-4" />
+                Refresh
               </button>
             </div>
 

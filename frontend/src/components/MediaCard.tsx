@@ -1,6 +1,7 @@
 import React from 'react';
 import { MediaItem } from '../types';
 import { api } from '../services/api';
+import { FilmIcon, TvIcon } from './Icons';
 
 interface MediaCardProps {
   media: MediaItem;
@@ -64,7 +65,11 @@ export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick }) => {
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-gray-600">
-            <span className="text-4xl">{media.type === 'movie' ? '🎬' : '📺'}</span>
+            {media.type === 'movie' ? (
+              <FilmIcon className="h-10 w-10" />
+            ) : (
+              <TvIcon className="h-10 w-10" />
+            )}
           </div>
         )}
 

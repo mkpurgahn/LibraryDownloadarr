@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
+import { PlayIcon } from '../components/Icons';
 import { api } from '../services/api';
 
 export const Login: React.FC = () => {
@@ -133,7 +134,7 @@ export const Login: React.FC = () => {
     <div className="min-h-screen flex items-center justify-center bg-dark p-4">
       <div className="max-w-md w-full">
         <div className="text-center mb-6 md:mb-8">
-          <h1 className="text-3xl md:text-4xl font-bold bg-gradient-to-r from-primary-500 to-secondary-500 bg-clip-text text-transparent mb-2">
+          <h1 className="mb-2 text-3xl font-bold text-white md:text-4xl">
             LibraryDownloadarr
           </h1>
           <p className="text-sm md:text-base text-gray-400">Your media library, ready to download</p>
@@ -151,7 +152,7 @@ export const Login: React.FC = () => {
             disabled={isPlexLoading}
             className="btn-primary w-full flex items-center justify-center space-x-3 text-base md:text-lg py-4 font-semibold shadow-lg hover:shadow-xl transition-shadow"
           >
-            <span className="text-2xl md:text-3xl">🎬</span>
+            <PlayIcon className="h-6 w-6" />
             <span>{isPlexLoading ? 'Waiting for Plex...' : 'Sign in with Plex'}</span>
           </button>
 

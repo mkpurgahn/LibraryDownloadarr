@@ -7,6 +7,8 @@ import {
   PlexPin,
   Settings,
   BurnJob,
+  BatchDownloadResult,
+  BatchDownloadTarget,
   DownloadTicket,
 } from '../types';
 
@@ -164,6 +166,13 @@ class ApiClient {
   async createDownloadTicket(ratingKey: string, partKey: string): Promise<DownloadTicket> {
     const response = await this.client.post<DownloadTicket>(`/media/${ratingKey}/download-ticket`, {
       partKey,
+    });
+    return response.data;
+  }
+
+  async createDownloadTickets(items: BatchDownloadTarget[]): Promise<BatchDownloadResult> {
+    const response = await this.client.post<BatchDownloadResult>('/media/download-tickets', {
+      items: items.map(({ ratingKey, partKey }) => ({ ratingKey, partKey })),
     });
     return response.data;
   }

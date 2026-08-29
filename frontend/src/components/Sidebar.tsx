@@ -3,6 +3,16 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import { Library } from '../types';
 import { useAuthStore } from '../stores/authStore';
+import {
+  DocumentIcon,
+  FilmIcon,
+  FolderIcon,
+  HistoryIcon,
+  HomeIcon,
+  MusicIcon,
+  SettingsIcon,
+  TvIcon,
+} from './Icons';
 
 interface SidebarProps {
   isOpen: boolean;
@@ -66,38 +76,42 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
         <nav className="space-y-2">
           <button
             onClick={() => handleNavigate('/')}
-            className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
+            className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-4 py-2 text-left transition-colors ${
               isActive('/') ? 'bg-dark-200 text-primary-400' : 'hover:bg-dark-200'
             }`}
           >
-            🏠 Home
+            <HomeIcon className="h-5 w-5 flex-none" />
+            <span>Home</span>
           </button>
 
           {user?.isAdmin && (
             <>
               <button
                 onClick={() => handleNavigate('/admin/download-history')}
-                className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
+                className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-4 py-2 text-left transition-colors ${
                   isActive('/admin/download-history') ? 'bg-dark-200 text-primary-400' : 'hover:bg-dark-200'
                 }`}
               >
-                📊 Download History
+                <HistoryIcon className="h-5 w-5 flex-none" />
+                <span>Download History</span>
               </button>
               <button
                 onClick={() => handleNavigate('/admin/logs')}
-                className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
+                className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-4 py-2 text-left transition-colors ${
                   isActive('/admin/logs') ? 'bg-dark-200 text-primary-400' : 'hover:bg-dark-200'
                 }`}
               >
-                📋 Logs
+                <DocumentIcon className="h-5 w-5 flex-none" />
+                <span>Logs</span>
               </button>
               <button
                 onClick={() => handleNavigate('/settings')}
-                className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
+                className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-4 py-2 text-left transition-colors ${
                   isActive('/settings') ? 'bg-dark-200 text-primary-400' : 'hover:bg-dark-200'
                 }`}
               >
-                ⚙️ Settings
+                <SettingsIcon className="h-5 w-5 flex-none" />
+                <span>Settings</span>
               </button>
             </>
           )}
@@ -119,16 +133,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
                       : 'hover:bg-dark-200'
                   }`}
                 >
-                  <div className="flex items-center space-x-2">
-                    <span>
-                      {library.type === 'movie'
-                        ? '🎬'
-                        : library.type === 'show'
-                        ? '📺'
-                        : library.type === 'artist'
-                        ? '🎵'
-                        : '📁'}
-                    </span>
+                  <div className="flex items-center gap-3">
+                    {library.type === 'movie' ? (
+                      <FilmIcon className="h-5 w-5 flex-none" />
+                    ) : library.type === 'show' ? (
+                      <TvIcon className="h-5 w-5 flex-none" />
+                    ) : library.type === 'artist' ? (
+                      <MusicIcon className="h-5 w-5 flex-none" />
+                    ) : (
+                      <FolderIcon className="h-5 w-5 flex-none" />
+                    )}
                     <span className="truncate">{library.title}</span>
                   </div>
                 </button>

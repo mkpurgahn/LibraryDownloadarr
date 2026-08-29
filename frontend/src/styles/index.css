@@ -36,6 +36,13 @@
   .media-fact {
     @apply rounded-md bg-white/5 px-2 py-1 font-medium ring-1 ring-white/10;
   }
+
+  .season-summary {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
 }
 
 /* Scrollbar styles */

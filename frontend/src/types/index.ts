@@ -34,7 +34,9 @@ export interface MediaItem {
   contentRating?: string;
   // Episode/Season/Track context fields
   grandparentTitle?: string; // Show name for episodes, Artist for tracks
+  grandparentRatingKey?: string;
   parentTitle?: string; // Season name for episodes, Album for tracks
+  parentRatingKey?: string;
   index?: number; // Episode number or Track number
   parentIndex?: number; // Season number
   Media?: MediaPart[];
@@ -87,6 +89,27 @@ export interface DownloadTicket {
   url: string;
   expiresAt: string;
   filename: string;
+}
+
+export interface BatchDownloadTarget {
+  ratingKey: string;
+  partKey: string;
+  filename: string;
+  title: string;
+}
+
+export interface BatchDownloadTicket extends DownloadTicket {
+  ratingKey: string;
+  partKey: string;
+}
+
+export interface BatchDownloadResult {
+  tickets: BatchDownloadTicket[];
+  errors: Array<{
+    ratingKey: string;
+    partKey: string;
+    error: string;
+  }>;
 }
 
 export type BurnJobStatus = 'queued' | 'preparing' | 'ready' | 'failed' | 'cancelled';
