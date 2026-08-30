@@ -573,12 +573,15 @@ test('database restart removes configured legacy admin accounts and sessions', (
     isAdmin: true,
   });
   const legacySession = initial.createSession(legacy.id).token;
+  initial.logDownload(legacy.id, 'Legacy Download', 'legacy-key', 1234);
   initial.setSetting('plex_machine_id', 'configured-machine');
   initial.close();
 
   const reopened = new DatabaseService(databasePath, secret);
   assert.equal(reopened.hasAdminUser(), false);
   assert.equal(reopened.getSessionByToken(legacySession), undefined);
+  const history = reopened.getAllDownloadHistory() as Array<{ username: string }>;
+  assert.equal(history[0].username, 'legacy');
   reopened.close();
 });
 

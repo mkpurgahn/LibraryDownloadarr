@@ -139,6 +139,7 @@ export class DatabaseService {
       CREATE TABLE IF NOT EXISTS download_logs (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
+        username TEXT,
         media_title TEXT NOT NULL,
         media_key TEXT NOT NULL,
         file_size INTEGER,
@@ -199,6 +200,9 @@ export class DatabaseService {
     }
     if (!this.columnExists('plex_users', 'server_url')) {
       this.db.exec('ALTER TABLE plex_users ADD COLUMN server_url TEXT');
+    }
+    if (!this.columnExists('download_logs', 'username')) {
+      this.db.exec('ALTER TABLE download_logs ADD COLUMN username TEXT');
     }
     if (!this.columnExists('download_tickets', 'source_fingerprint')) {
       this.db.exec("ALTER TABLE download_tickets ADD COLUMN source_fingerprint TEXT NOT NULL DEFAULT ''");
@@ -390,6 +394,35 @@ export class DatabaseService {
 
   removeLocalAdminAccounts(): void {
     const remove = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE download_logs
+        SET username = COALESCE(
+          username,
+          (SELECT au.username FROM admin_users au WHERE au.id = download_logs.user_id)
+        )
+        WHERE user_id IN (SELECT id FROM admin_users)
+      `).run();
+      const ownerPlexId = this.getSetting('plex_owner_id');
+      const owner = ownerPlexId
+        ? this.db.prepare(
+          'SELECT id, username FROM plex_users WHERE plex_id = ?'
+        ).get(ownerPlexId) as { id: string; username: string } | undefined
+        : undefined;
+      if (owner) {
+        this.db.prepare(`
+          UPDATE download_logs
+          SET user_id = ?, username = ?
+          WHERE user_id IN (SELECT id FROM admin_users)
+        `).run(owner.id, owner.username);
+        this.db.prepare(`
+          UPDATE burn_jobs
+          SET user_id = ?
+          WHERE user_id IN (SELECT id FROM admin_users)
+        `).run(owner.id);
+      }
+      this.db.prepare(
+        'DELETE FROM download_tickets WHERE user_id IN (SELECT id FROM admin_users)'
+      ).run();
       this.db.prepare(
         'DELETE FROM sessions WHERE user_id IN (SELECT id FROM admin_users)'
       ).run();
@@ -625,10 +658,25 @@ export class DatabaseService {
   }
 
   logDownload(userId: string, mediaTitle: string, mediaKey: string, fileSize?: number): void {
+    const user = this.db.prepare(`
+      SELECT username FROM admin_users WHERE id = ?
+      UNION ALL
+      SELECT username FROM plex_users WHERE id = ?
+      LIMIT 1
+    `).get(userId, userId) as { username?: string } | undefined;
     this.db.prepare(`
-      INSERT INTO download_logs (id, user_id, media_title, media_key, file_size, downloaded_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(randomToken(18), userId, mediaTitle, mediaKey, fileSize || null, Date.now());
+      INSERT INTO download_logs (
+        id, user_id, username, media_title, media_key, file_size, downloaded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomToken(18),
+      userId,
+      user?.username || null,
+      mediaTitle,
+      mediaKey,
+      fileSize || null,
+      Date.now()
+    );
   }
 
   getDownloadHistory(userId: string, limit = 50): unknown[] {
@@ -639,7 +687,14 @@ export class DatabaseService {
 
   getAllDownloadHistory(limit = 100): unknown[] {
     return this.db.prepare(`
-      SELECT dl.*, COALESCE(au.username, pu.username) as username
+      SELECT
+        dl.id,
+        dl.user_id,
+        dl.media_title,
+        dl.media_key,
+        dl.file_size,
+        dl.downloaded_at,
+        COALESCE(pu.username, au.username, dl.username) AS username
       FROM download_logs dl
       LEFT JOIN admin_users au ON dl.user_id = au.id
       LEFT JOIN plex_users pu ON dl.user_id = pu.id
