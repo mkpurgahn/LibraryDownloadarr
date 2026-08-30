@@ -219,9 +219,10 @@ docker compose --profile direct-origin up -d
 
 1. **Navigate to your LibraryDownloadarr instance** (e.g., `http://localhost:5069`)
 
-2. **Create Admin Account** (First-time only):
-   - Choose a username and secure password
-   - This account has full administrative access
+2. **Create Bootstrap Credentials** (First-time only):
+   - Choose a temporary username and secure password
+   - These credentials work only while connecting the first Plex server
+   - Re-enter them on the setup page if the bootstrap session expires
 
 3. **Configure Plex Connection** (Settings page):
    - **Plex Server URL**: Your Plex server address (e.g., `http://192.168.1.100:32400`)
@@ -230,8 +231,8 @@ docker compose --profile direct-origin up -d
    - Server details (Machine ID and Name) are fetched automatically
 
 4. **Start Using**:
-   - Admin can log in with username/password
-   - Users sign in with their Plex accounts via OAuth
+   - Everyone signs in through Plex OAuth
+   - The Plex account that owns the configured server receives administrator access
 
 ### Reverse Proxy Setup (Production)
 
@@ -295,18 +296,19 @@ services:
 
 ### Authentication Flow
 
-LibraryDownloadarr uses a dual authentication system:
+LibraryDownloadarr uses Plex authentication after a one-time local bootstrap:
 
-1. **Admin Authentication**:
-   - One-time setup creates a local admin account
-   - Admin can configure Plex connection settings
-   - Access to admin features (settings, logs, all download history)
+1. **Initial Bootstrap**:
+   - Temporary local credentials configure the first Plex connection
+   - Setup can be resumed with those credentials until Plex is configured
+   - The local account and its sessions are removed after Plex owner identity is verified
 
-2. **Plex OAuth Authentication** (Recommended for users):
+2. **Plex OAuth Authentication**:
    - Users click "Sign in with Plex"
    - Redirected to Plex.tv for authorization
    - LibraryDownloadarr verifies user has access to your configured Plex server
    - User's Plex permissions are automatically enforced
+   - Only the exact Plex server owner can access settings, logs, and global download history
 
 ### Security Model
 
@@ -323,8 +325,9 @@ LibraryDownloadarr uses a dual authentication system:
 Membership is checked against the configured exact Plex machine identifier.
 There is no fallback to another server in the user's Plex account. Membership
 is revalidated on a bounded TTL and whenever a download ticket or subtitle burn
-job is created. The local admin password remains available for setup and
-recovery.
+job is created. There is no ongoing local administrator login. Administrator status is derived
+from the stable Plex account ID associated with the configured server owner's
+token, not from a username supplied by the browser.
 
 ### Download Process
 
@@ -567,7 +570,7 @@ npm run dev
 
 **Production Deployment Checklist:**
 - ✅ Use HTTPS via reverse proxy (nginx, Traefik, Caddy)
-- ✅ Set strong admin password during initial setup
+- ✅ Protect the Plex owner account with a strong password and multi-factor authentication
 - ✅ Configure proper Plex server URL (not public if on local network)
 - ✅ Keep Plex token secure (never commit to version control)
 - ✅ Regularly update to latest Docker image

@@ -98,6 +98,7 @@ export class DatabaseService {
     this.db.pragma('foreign_keys = ON');
     this.initializeTables();
     this.migrateSecretsAndSessions();
+    this.retireLocalAdminAccounts();
     logger.info(`Database initialized at ${dbPath}`);
   }
 
@@ -273,6 +274,13 @@ export class DatabaseService {
     `);
   }
 
+  private retireLocalAdminAccounts(): void {
+    if (!this.getSetting('plex_machine_id')) {
+      return;
+    }
+    this.removeLocalAdminAccounts();
+  }
+
   createAdminUser(user: Omit<AdminUser, 'id' | 'createdAt'>): AdminUser {
     const id = randomToken(18);
     const createdAt = Date.now();
@@ -307,30 +315,87 @@ export class DatabaseService {
   }
 
   createOrUpdatePlexUser(
-    plexUser: Omit<User, 'id' | 'createdAt' | 'isAdmin'> & { plexToken: string; plexAccountToken: string }
+    plexUser: Omit<User, 'id' | 'createdAt' | 'isAdmin'> & {
+      plexToken: string;
+      plexAccountToken: string;
+      isAdmin?: boolean;
+    }
   ): User {
     const existing = this.getPlexUserByPlexId(plexUser.plexId!);
     const now = Date.now();
     const serverToken = encryptSecret(plexUser.plexToken, this.secret);
     const accountToken = encryptSecret(plexUser.plexAccountToken, this.secret);
-    if (existing) {
-      this.db.prepare(`
-        UPDATE plex_users
-        SET username = ?, email = ?, plex_token = ?, plex_account_token = ?,
-            server_url = NULL, membership_validated_at = ?, last_login = ?
-        WHERE plex_id = ?
-      `).run(plexUser.username, plexUser.email, serverToken, accountToken, now, now, plexUser.plexId);
-      return { ...existing, ...plexUser, membershipValidatedAt: now, lastLogin: now };
-    }
+    const isAdmin = plexUser.isAdmin === true;
+    const save = this.db.transaction(() => {
+      if (isAdmin) {
+        this.db.prepare('UPDATE plex_users SET is_admin = 0 WHERE plex_id <> ?')
+          .run(plexUser.plexId);
+      }
+      if (existing) {
+        this.db.prepare(`
+          UPDATE plex_users
+          SET username = ?, email = ?, plex_token = ?, plex_account_token = ?,
+              server_url = NULL, is_admin = ?, membership_validated_at = ?, last_login = ?
+          WHERE plex_id = ?
+        `).run(
+          plexUser.username,
+          plexUser.email,
+          serverToken,
+          accountToken,
+          isAdmin ? 1 : 0,
+          now,
+          now,
+          plexUser.plexId
+        );
+        return;
+      }
 
-    const id = randomToken(18);
-    this.db.prepare(`
-      INSERT INTO plex_users (
-        id, username, email, plex_token, plex_account_token, plex_id, server_url,
-        membership_validated_at, created_at, last_login
-      ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
-    `).run(id, plexUser.username, plexUser.email, serverToken, accountToken, plexUser.plexId, now, now, now);
-    return { id, ...plexUser, isAdmin: false, createdAt: now, membershipValidatedAt: now, lastLogin: now };
+      this.db.prepare(`
+        INSERT INTO plex_users (
+          id, username, email, plex_token, plex_account_token, plex_id, server_url,
+          is_admin, membership_validated_at, created_at, last_login
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+      `).run(
+        randomToken(18),
+        plexUser.username,
+        plexUser.email,
+        serverToken,
+        accountToken,
+        plexUser.plexId,
+        isAdmin ? 1 : 0,
+        now,
+        now,
+        now
+      );
+    });
+    save();
+    return this.getPlexUserByPlexId(plexUser.plexId!)!;
+  }
+
+  setExclusivePlexAdminByPlexId(plexId: string): void {
+    this.db.prepare(
+      'UPDATE plex_users SET is_admin = CASE WHEN plex_id = ? THEN 1 ELSE 0 END'
+    ).run(plexId);
+  }
+
+  clearPlexOwner(): void {
+    const clear = this.db.transaction(() => {
+      this.db.prepare(
+        "DELETE FROM settings WHERE key IN ('plex_owner_id', 'plex_owner_username', 'plex_owner_validated_at')"
+      ).run();
+      this.db.prepare('UPDATE plex_users SET is_admin = 0').run();
+    });
+    clear();
+  }
+
+  removeLocalAdminAccounts(): void {
+    const remove = this.db.transaction(() => {
+      this.db.prepare(
+        'DELETE FROM sessions WHERE user_id IN (SELECT id FROM admin_users)'
+      ).run();
+      this.db.prepare('DELETE FROM admin_users').run();
+    });
+    remove();
   }
 
   updatePlexMembership(userId: string, serverToken: string, validatedAt = Date.now()): void {

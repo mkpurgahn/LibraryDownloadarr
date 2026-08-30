@@ -9,7 +9,7 @@ import readline from 'readline';
 export const createLogsRouter = (db: DatabaseService) => {
   const router = Router();
   const authMiddleware = createAuthMiddleware(db);
-  const adminMiddleware = createAdminMiddleware();
+  const adminMiddleware = createAdminMiddleware(db);
 
   interface LogEntry {
     timestamp: string;

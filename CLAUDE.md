@@ -556,19 +556,14 @@ const year = media.year ? `(${media.year})` : '';
 
 ### Authentication Endpoints
 
-**POST /api/auth/login**
-- Body: `{ username, password }`
-- Returns: `{ user, token }`
-- Local admin login
-
 **POST /api/auth/plex/pin**
 - Generates Plex OAuth PIN
 - Returns: `{ id, code, url }`
 
-**POST /api/auth/plex/callback**
+**POST /api/auth/plex/authenticate**
 - Body: `{ pinId }`
 - Exchanges PIN for Plex user token
-- Returns: `{ user, token }`
+- Returns: `{ user, token }`; `user.isAdmin` is true only for the configured Plex owner
 
 **POST /api/auth/logout**
 - Destroys session
@@ -600,13 +595,13 @@ const year = media.year ? `(${media.year})` : '';
 ### Admin Endpoints
 
 **GET /api/settings**
-- Requires admin
-- Returns: Settings object (Plex URL, token status, machine ID, server name)
+- Requires the configured Plex owner
+- Returns: Settings object (Plex URL, token status, machine ID, server name, owner username)
 
 **PUT /api/settings**
-- Requires admin
+- Requires the configured Plex owner, or the first-run bootstrap session before Plex is configured
 - Body: `{ plexUrl, plexToken }`
-- Auto-fetches machine ID and server name
+- Auto-fetches machine ID, server name, and stable Plex owner identity
 - Returns: Updated settings
 
 **GET /api/downloads/history**
@@ -614,7 +609,7 @@ const year = media.year ? `(${media.year})` : '';
 - Returns: Array of DownloadRecord objects
 
 **GET /api/logs**
-- Requires admin
+- Requires the configured Plex owner
 - Query params: `level`, `startDate`, `endDate`
 - Returns: Array of log entries
 
@@ -634,22 +629,24 @@ const year = media.year ? `(${media.year})` : '';
 
 ## Authentication Flow
 
-### Local Admin Login
-1. User enters username/password
-2. Frontend calls POST `/api/auth/login`
-3. Backend verifies credentials against database
-4. Session created, user object returned
-5. Frontend stores auth state in Zustand
+### First-Run Bootstrap
+1. An unconfigured installation creates temporary local bootstrap credentials
+2. The setup page can resume that bootstrap session if it expires
+3. The bootstrap session configures and verifies the Plex server and owner token
+4. The stable Plex owner account ID is stored
+5. Local administrator records and sessions are deleted
+6. All subsequent access uses Plex OAuth
 
 ### Plex OAuth Login
 1. User clicks "Sign in with Plex"
 2. Frontend calls POST `/api/auth/plex/pin` to generate PIN
 3. Blank window opens immediately (sync)
 4. After PIN received, navigate window to Plex auth URL
-5. Frontend polls POST `/api/auth/plex/callback` every 2 seconds
+5. Frontend polls POST `/api/auth/plex/authenticate` every 2 seconds
 6. Backend exchanges PIN for Plex auth token
 7. Backend validates user has access to configured Plex server
-8. Backend creates/updates user in database
+8. Backend creates/updates the Plex user and grants admin status only when the
+   stable Plex account ID matches the configured server owner
 9. Session created, user object returned
 10. Frontend stores auth state in Zustand
 11. Polling stops, user redirected to home
@@ -664,18 +661,16 @@ const year = media.year ? `(${media.year})` : '';
 
 ## Database Schema Overview
 
-### users Table
+### Authentication Tables
 ```sql
-CREATE TABLE users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT UNIQUE NOT NULL,
-  password_hash TEXT,           -- Only for local admin
-  plex_user_id TEXT,            -- Plex user ID
-  plex_username TEXT,           -- Plex username
-  plex_email TEXT,              -- Plex email
-  is_admin BOOLEAN DEFAULT 0,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)
+CREATE TABLE admin_users (...); -- Temporary first-run bootstrap only
+CREATE TABLE plex_users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  plex_id TEXT UNIQUE,
+  is_admin INTEGER DEFAULT 0,
+  ...
+);
 ```
 
 ### settings Table
@@ -688,6 +683,9 @@ CREATE TABLE settings (
 **Keys:**
 - `plex_url` - Plex server URL
 - `plex_token` - Plex auth token
+- `plex_owner_id` - Stable Plex account ID allowed to use admin routes
+- `plex_owner_username` - Display name for the configured Plex owner
+- `plex_owner_validated_at` - Last successful exact-server ownership check
 - `plex_machine_id` - Plex server machine identifier
 - `plex_server_name` - Friendly server name
 

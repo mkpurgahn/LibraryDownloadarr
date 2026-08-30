@@ -852,9 +852,8 @@ export const createMediaRouter = (
     const session = db.getSessionByToken(sessionToken);
     if (!session) return res.status(401).json({ error: 'Invalid session' });
     try {
-      const admin = db.getAdminUserById(session.userId);
-      const user = admin ? undefined : await ensurePlexMembership(db, session.userId, false, service);
-      const token = user?.plexToken || (admin ? db.getSetting('plex_token') : undefined);
+      const user = await ensurePlexMembership(db, session.userId, false, service);
+      const token = user?.plexToken;
       const serverUrl = db.getSetting('plex_url');
       if (!token || !serverUrl) return res.status(403).json({ error: 'Plex access unavailable' });
       if (!validRatingKey(req.params.ratingKey)) {

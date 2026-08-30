@@ -45,25 +45,25 @@ export const Setup: React.FC = () => {
           <div className="flex items-start space-x-3">
             <LockIcon className="mt-0.5 h-7 w-7 flex-none text-primary-300" />
             <div>
-              <h2 className="text-lg md:text-xl font-bold text-primary-400 mb-2">One-Time Setup: Create Admin Account</h2>
+              <h2 className="text-lg md:text-xl font-bold text-primary-400 mb-2">One-Time Server Setup</h2>
               <p className="text-sm md:text-base text-gray-300 mb-2">
-                This is a <strong>one-time setup</strong> to create your administrator account. You'll only need to do this once.
+                Create or re-enter temporary local credentials to connect your Plex server.
               </p>
               <ul className="text-xs md:text-sm text-gray-400 space-y-1 list-disc list-inside">
-                <li>This admin account will have full access to settings and logs</li>
-                <li>After setup, you'll configure your Plex server connection</li>
-                <li>Regular users will sign in using their Plex accounts</li>
+                <li>The local account works only until Plex is configured</li>
+                <li>The Plex server owner becomes the sole administrator</li>
+                <li>All ongoing sign-ins use Plex</li>
               </ul>
             </div>
           </div>
         </div>
 
         <div className="card p-6 md:p-8">
-          <h3 className="text-xl md:text-2xl font-bold mb-6">Create Your Admin Account</h3>
+          <h3 className="text-xl md:text-2xl font-bold mb-6">Bootstrap Credentials</h3>
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
-              <label className="block text-sm md:text-base font-medium mb-2 text-gray-200">Admin Username</label>
+              <label className="block text-sm md:text-base font-medium mb-2 text-gray-200">Bootstrap Username</label>
               <input
                 type="text"
                 required
@@ -72,21 +72,21 @@ export const Setup: React.FC = () => {
                 value={formData.username}
                 onChange={(e) => setFormData({ ...formData, username: e.target.value })}
               />
-              <p className="text-xs text-gray-500 mt-1">This will be your administrator login</p>
+              <p className="text-xs text-gray-500 mt-1">Used only during initial server configuration</p>
             </div>
 
             <div>
-              <label className="block text-sm md:text-base font-medium mb-2 text-gray-200">Admin Password</label>
+              <label className="block text-sm md:text-base font-medium mb-2 text-gray-200">Bootstrap Password</label>
               <input
                 type="password"
                 required
-                minLength={6}
+                minLength={12}
                 className="input text-sm md:text-base"
                 placeholder="Choose a secure password"
                 value={formData.password}
                 onChange={(e) => setFormData({ ...formData, password: e.target.value })}
               />
-              <p className="text-xs text-gray-500 mt-1">Minimum 6 characters</p>
+              <p className="text-xs text-gray-500 mt-1">Minimum 12 characters</p>
             </div>
 
             {error && (
@@ -96,13 +96,13 @@ export const Setup: React.FC = () => {
             )}
 
             <button type="submit" disabled={isLoading} className="btn-primary w-full text-sm md:text-base py-3 font-semibold">
-              {isLoading ? 'Creating Account...' : 'Create Admin Account & Continue'}
+              {isLoading ? 'Creating Credentials...' : 'Continue to Plex Configuration'}
             </button>
           </form>
 
           <div className="mt-6 pt-6 border-t border-dark-50">
             <p className="text-xs md:text-sm text-gray-400 text-center">
-              <strong>Next step:</strong> After creating your admin account, you'll configure your Plex server connection in the Settings page.
+              <strong>Next step:</strong> Configure Plex, then sign in with the server owner's Plex account for administrator access.
             </p>
           </div>
         </div>

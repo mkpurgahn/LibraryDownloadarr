@@ -63,11 +63,6 @@ class ApiClient {
     return response.data;
   }
 
-  async login(username: string, password: string): Promise<AuthResponse> {
-    const response = await this.client.post<AuthResponse>('/auth/login', { username, password });
-    return response.data;
-  }
-
   async generatePlexPin(): Promise<PlexPin> {
     const response = await this.client.post<PlexPin>('/auth/plex/pin');
     return response.data;
@@ -86,13 +81,6 @@ class ApiClient {
   async logout(): Promise<void> {
     await this.client.post('/auth/logout');
     localStorage.removeItem('token');
-  }
-
-  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
-    await this.client.post('/auth/change-password', {
-      currentPassword,
-      newPassword,
-    });
   }
 
   // Library endpoints

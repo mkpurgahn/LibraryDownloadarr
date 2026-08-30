@@ -2,6 +2,7 @@ import { Router } from 'express';
 import bcrypt from 'bcrypt';
 import { DatabaseService } from '../models/database';
 import {
+  PlexAuthResponse,
   PlexAccountUnauthorizedError,
   PlexServerAccessDeniedError,
   plexService,
@@ -27,17 +28,64 @@ export const createAuthRouter = (db: DatabaseService) => {
     standardHeaders: true,
     legacyHeaders: false,
   });
+  const savePlexOwner = (owner: { id: string; username: string }): void => {
+    db.setSetting('plex_owner_id', owner.id);
+    db.setSetting('plex_owner_username', owner.username);
+    db.setSetting('plex_owner_validated_at', String(Date.now()));
+    db.setExclusivePlexAdminByPlexId(owner.id);
+    db.removeLocalAdminAccounts();
+  };
+  const getConfiguredPlexOwner = async (
+    authenticated: PlexAuthResponse,
+    authenticatedOwnsServer: boolean
+  ): Promise<{ id: string; username: string } | undefined> => {
+    let savedId = db.getSetting('plex_owner_id');
+    if (authenticatedOwnsServer) {
+      const owner = {
+        id: authenticated.user.uuid,
+        username: authenticated.user.username,
+      };
+      savePlexOwner(owner);
+      return owner;
+    }
+    if (savedId === authenticated.user.uuid) {
+      db.clearPlexOwner();
+      savedId = undefined;
+    }
+    if (savedId) {
+      return {
+        id: savedId,
+        username: db.getSetting('plex_owner_username') || 'Plex owner',
+      };
+    }
+    const ownerToken = db.getSetting('plex_token');
+    const machineId = db.getSetting('plex_machine_id');
+    if (!ownerToken || !machineId) {
+      return undefined;
+    }
+    try {
+      const owner = await plexService.getServerOwnerIdentity(ownerToken, machineId);
+      savePlexOwner(owner);
+      return owner;
+    } catch (error) {
+      logger.warn('Legacy Plex owner token could not establish administrator identity', {
+        error,
+        machineId,
+      });
+      return undefined;
+    }
+  };
 
   // Check if initial setup is required
   router.get('/setup/required', (_req, res) => {
-    const hasAdmin = db.hasAdminUser();
-    return res.json({ setupRequired: !hasAdmin });
+    const setupRequired = !db.getSetting('plex_machine_id');
+    return res.json({ setupRequired });
   });
 
-  // Initial admin setup
+  // Initial local bootstrap, retired as soon as a Plex owner is configured.
   router.post('/setup', loginLimiter, async (req, res) => {
     try {
-      if (db.hasAdminUser()) {
+      if (db.getSetting('plex_machine_id')) {
         return res.status(400).json({ error: 'Setup already completed' });
       }
 
@@ -50,76 +98,42 @@ export const createAuthRouter = (db: DatabaseService) => {
         return res.status(400).json({ error: 'Username is invalid or password is shorter than 12 characters' });
       }
 
-      // Hash password
-      const passwordHash = await bcrypt.hash(password, 10);
-
-      // Create admin user (email is optional, use username@localhost as default)
-      const adminUser = db.createAdminUser({
-        username,
-        passwordHash,
-        email: `${username}@localhost`,
-        isAdmin: true,
-      });
+      const existing = db.getAdminUserByUsername(username);
+      let adminUser = existing;
+      if (db.hasAdminUser()) {
+        if (!existing || !await bcrypt.compare(password, existing.passwordHash)) {
+          return res.status(401).json({ error: 'Invalid bootstrap credentials' });
+        }
+        db.updateAdminLastLogin(existing.id);
+      } else {
+        const passwordHash = await bcrypt.hash(password, 10);
+        adminUser = db.createAdminUser({
+          username,
+          passwordHash,
+          email: `${username}@localhost`,
+          isAdmin: true,
+        });
+      }
 
       // Create session
-      const session = db.createSession(adminUser.id);
+      const session = db.createSession(adminUser!.id);
       setSessionCookie(req, res, session.token);
 
-      logger.info(`Initial admin setup completed for user: ${username}`);
+      logger.info(existing ? 'Initial setup resumed' : 'Initial setup started');
 
       return res.json({
-        message: 'Setup completed successfully',
+        message: existing ? 'Setup resumed successfully' : 'Setup started successfully',
         user: {
-          id: adminUser.id,
-          username: adminUser.username,
-          email: adminUser.email,
-          isAdmin: adminUser.isAdmin,
+          id: adminUser!.id,
+          username: adminUser!.username,
+          email: adminUser!.email,
+          isAdmin: adminUser!.isAdmin,
         },
         token: session.token,
       });
     } catch (error) {
       logger.error('Setup error', { error });
       return res.status(500).json({ error: 'Setup failed' });
-    }
-  });
-
-  // Admin login
-  router.post('/login', loginLimiter, async (req, res) => {
-    try {
-      const { username, password } = req.body;
-
-      if (typeof username !== 'string' || typeof password !== 'string' || username.length > 64 || password.length > 256) {
-        return res.status(400).json({ error: 'Username and password are required' });
-      }
-
-      const user = db.getAdminUserByUsername(username);
-      if (!user) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-
-      const isValid = await bcrypt.compare(password, user.passwordHash);
-      if (!isValid) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-
-      db.updateAdminLastLogin(user.id);
-      const session = db.createSession(user.id);
-      setSessionCookie(req, res, session.token);
-
-      logger.info(`User logged in: ${username}`);
-
-      return res.json({
-        user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-          isAdmin: user.isAdmin,
-        },
-        token: session.token,
-      });
-    } catch (error) {
-      logger.error('Login error', { error });
-      return res.status(500).json({ error: 'Login failed' });
     }
   });
 
@@ -176,6 +190,7 @@ export const createAuthRouter = (db: DatabaseService) => {
 
       // Get user's accessible servers and validate they have access to admin's server
       let userToken: string;
+      let authenticatedOwnsServer = false;
       try {
         const membership = await plexService.validateExactServerMembership(
           authResponse.authToken,
@@ -193,6 +208,7 @@ export const createAuthRouter = (db: DatabaseService) => {
 
         // For shared servers, use the server's accessToken; for owned servers, use the user's auth token
         userToken = membership.serverToken;
+        authenticatedOwnsServer = membership.owned;
 
         logger.debug('User validated for admin server', {
           username: authResponse.user.username,
@@ -217,13 +233,17 @@ export const createAuthRouter = (db: DatabaseService) => {
         throw error;
       }
 
-      // Create or update plex user (no serverUrl stored - always use admin's)
+      const owner = await getConfiguredPlexOwner(authResponse, authenticatedOwnsServer);
+      const isAdmin = authResponse.user.uuid === owner?.id;
+
+      // Create or update Plex user. Only the configured server owner is an admin.
       const plexUser = db.createOrUpdatePlexUser({
         username: authResponse.user.username,
         email: authResponse.user.email,
         plexToken: userToken,
         plexAccountToken: authResponse.authToken,
         plexId: authResponse.user.uuid,
+        isAdmin,
       });
 
       // Create session
@@ -274,47 +294,6 @@ export const createAuthRouter = (db: DatabaseService) => {
     } catch (error) {
       logger.error('Logout error', { error });
       return res.status(500).json({ error: 'Logout failed' });
-    }
-  });
-
-  // Change password (admin users only)
-  router.post('/change-password', authMiddleware, async (req: AuthRequest, res) => {
-    try {
-      const { currentPassword, newPassword } = req.body;
-
-      if (!currentPassword || !newPassword) {
-        return res.status(400).json({ error: 'Current password and new password are required' });
-      }
-
-      if (typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 256) {
-        return res.status(400).json({ error: 'New password must be at least 12 characters long' });
-      }
-
-      // Only admin users (those with password_hash) can change passwords
-      // Plex users authenticate via OAuth and don't have passwords
-      const user = db.getAdminUserById(req.user!.id);
-      if (!user) {
-        return res.status(400).json({ error: 'Password change is only available for admin accounts' });
-      }
-
-      // Verify current password
-      const isValid = await bcrypt.compare(currentPassword, user.passwordHash);
-      if (!isValid) {
-        return res.status(400).json({ error: 'Current password is incorrect' });
-      }
-
-      // Hash new password
-      const newPasswordHash = await bcrypt.hash(newPassword, 10);
-
-      // Update password in database
-      db.updateAdminPassword(user.id, newPasswordHash);
-
-      logger.info(`Password changed for admin user: ${user.username}`);
-
-      return res.json({ message: 'Password changed successfully' });
-    } catch (error) {
-      logger.error('Password change error', { error });
-      return res.status(500).json({ error: 'Password change failed' });
     }
   });
 

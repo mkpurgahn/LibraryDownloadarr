@@ -119,10 +119,16 @@ export interface PlexAuthResponse {
   };
 }
 
+export interface PlexAccountIdentity {
+  id: string;
+  username: string;
+}
+
 export interface ExactServerConnection {
   serverUrl: string | null;
   accessToken: string | null;
   matched: boolean;
+  owned: boolean;
 }
 
 export class PlexServerAccessDeniedError extends Error {
@@ -136,6 +142,13 @@ export class PlexAccountUnauthorizedError extends Error {
   constructor() {
     super('Plex account authorization is no longer valid');
     this.name = 'PlexAccountUnauthorizedError';
+  }
+}
+
+export class PlexServerOwnershipRequiredError extends Error {
+  constructor() {
+    super('The configured Plex token must belong to the server owner');
+    this.name = 'PlexServerOwnershipRequiredError';
   }
 }
 
@@ -538,40 +551,73 @@ export class PlexService {
   }
 
   async checkPin(pinId: number): Promise<PlexAuthResponse | null> {
-    try {
-      const response = await axios.get(`https://plex.tv/api/v2/pins/${pinId}`, {
-        headers: {
-          Accept: 'application/json',
-          'X-Plex-Client-Identifier': config.plex.clientIdentifier,
-        },
-      });
-      if (!response.data.authToken) return null;
-      const userInfo = await this.getUserInfo(response.data.authToken).catch(() => ({}));
-      const username =
-        userInfo.friendlyName || userInfo.friendly_name || userInfo.username ||
-        response.data.username || response.data.title || `plexuser_${response.data.id}`;
-      return {
-        authToken: response.data.authToken,
-        user: {
-          id: response.data.id,
-          uuid: String(userInfo.uuid || response.data.uuid || response.data.id),
-          email: userInfo.email || response.data.email || '',
-          username,
-          title: response.data.title || username,
-          thumb: response.data.thumb || '',
-        },
-      };
-    } catch (error) {
-      logger.error('Failed to check Plex PIN', { error });
-      return null;
-    }
+    const response = await axios.get(`https://plex.tv/api/v2/pins/${pinId}`, {
+      headers: {
+        Accept: 'application/json',
+        'X-Plex-Client-Identifier': config.plex.clientIdentifier,
+      },
+      timeout: config.plex.requestTimeoutMs,
+    });
+    if (!response.data.authToken) return null;
+
+    const userInfo = await this.getUserInfo(response.data.authToken);
+    const identity = this.accountIdentity(userInfo);
+    return {
+      authToken: response.data.authToken,
+      user: {
+        id: Number(userInfo.id) || response.data.id,
+        uuid: identity.id,
+        email: userInfo.email || '',
+        username: identity.username,
+        title: userInfo.title || identity.username,
+        thumb: userInfo.thumb || '',
+      },
+    };
   }
 
   async getUserInfo(token: string): Promise<any> {
     const response = await axios.get('https://plex.tv/api/v2/user', {
       headers: { 'X-Plex-Token': token, Accept: 'application/json' },
+      timeout: config.plex.requestTimeoutMs,
     });
     return response.data;
+  }
+
+  async getAccountIdentity(token: string): Promise<PlexAccountIdentity> {
+    const account = await this.getUserInfo(token);
+    return this.accountIdentity(account);
+  }
+
+  async getServerOwnerIdentity(
+    token: string,
+    machineId: string
+  ): Promise<PlexAccountIdentity> {
+    const [identity, servers] = await Promise.all([
+      this.getAccountIdentity(token),
+      this.getUserServers(token),
+    ]);
+    const server = servers.find(item =>
+      String(item.provides || '').split(',').includes('server') &&
+      item.clientIdentifier === machineId
+    );
+    if (!server || !flag(server.owned)) {
+      throw new PlexServerOwnershipRequiredError();
+    }
+    return identity;
+  }
+
+  private accountIdentity(account: any): PlexAccountIdentity {
+    const id = cleanText(account.uuid || account.id, 128);
+    if (!id) {
+      throw new Error('Plex account identity could not be verified');
+    }
+    return {
+      id,
+      username: cleanText(
+        account.friendlyName || account.friendly_name || account.username || account.title,
+        128
+      ) || 'Plex owner',
+    };
   }
 
   async getUserServers(userToken: string): Promise<any[]> {
@@ -591,13 +637,17 @@ export class PlexService {
   }
 
   findBestServerConnection(servers: any[], targetMachineId?: string): ExactServerConnection {
-    if (!targetMachineId) return { serverUrl: null, accessToken: null, matched: false };
+    if (!targetMachineId) {
+      return { serverUrl: null, accessToken: null, matched: false, owned: false };
+    }
     const target = servers.find(server =>
       String(server.provides || '').split(',').includes('server') &&
       server.clientIdentifier === targetMachineId &&
       (server.owned === true || server.owned === 1 || server.owned === '1' || Boolean(server.accessToken))
     );
-    if (!target) return { serverUrl: null, accessToken: null, matched: false };
+    if (!target) {
+      return { serverUrl: null, accessToken: null, matched: false, owned: false };
+    }
 
     const connections = asArray<any>(target.connections || target.Connection);
     const connection =
@@ -608,13 +658,14 @@ export class PlexService {
       serverUrl: connection?.uri || null,
       accessToken: shared ? target.accessToken || null : null,
       matched: true,
+      owned: flag(target.owned),
     };
   }
 
   async validateExactServerMembership(
     accountToken: string,
     machineId: string
-  ): Promise<{ serverToken: string; discoveredUrl: string }> {
+  ): Promise<{ serverToken: string; discoveredUrl: string; owned: boolean }> {
     const servers = await this.getUserServers(accountToken);
     const connection = this.findBestServerConnection(servers, machineId);
     if (!connection.matched) {
@@ -623,6 +674,7 @@ export class PlexService {
     return {
       serverToken: connection.accessToken || accountToken,
       discoveredUrl: connection.serverUrl || '',
+      owned: connection.owned,
     };
   }
 

@@ -5,14 +5,10 @@ import { PlayIcon } from '../components/Icons';
 import { api } from '../services/api';
 
 export const Login: React.FC = () => {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
   const [isPlexLoading, setIsPlexLoading] = useState(false);
-  const [showAdminLogin, setShowAdminLogin] = useState(false);
   const navigate = useNavigate();
-  const { login, setUser, setToken, token, user } = useAuthStore();
+  const { setUser, setToken, token, user } = useAuthStore();
 
   // Redirect to home if already logged in
   useEffect(() => {
@@ -20,21 +16,6 @@ export const Login: React.FC = () => {
       navigate('/', { replace: true });
     }
   }, [token, user, navigate]);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setIsLoading(true);
-
-    try {
-      await login(username, password);
-      navigate('/');
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Login failed');
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const handlePlexLogin = async () => {
     setError('');
@@ -172,72 +153,17 @@ export const Login: React.FC = () => {
             </div>
           )}
 
-          {/* Secondary: Admin Login */}
-          <div className="mt-8 pt-6 border-t border-dark-50">
-            {!showAdminLogin ? (
-              <button
-                onClick={() => setShowAdminLogin(true)}
-                className="text-sm text-gray-400 hover:text-gray-300 transition-colors w-full text-center"
-              >
-                Administrator login
-              </button>
-            ) : (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-gray-300">Administrator Login</h3>
-                  <button
-                    onClick={() => {
-                      setShowAdminLogin(false);
-                      setError('');
-                      setUsername('');
-                      setPassword('');
-                    }}
-                    className="text-xs text-gray-500 hover:text-gray-400"
-                  >
-                    Cancel
-                  </button>
-                </div>
-
-                <form onSubmit={handleSubmit} className="space-y-3">
-                  <div>
-                    <label className="block text-xs md:text-sm font-medium mb-1.5 text-gray-300">Username</label>
-                    <input
-                      type="text"
-                      required
-                      className="input text-sm"
-                      placeholder="Admin username"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs md:text-sm font-medium mb-1.5 text-gray-300">Password</label>
-                    <input
-                      type="password"
-                      required
-                      className="input text-sm"
-                      placeholder="Admin password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                    />
-                  </div>
-
-                  <button type="submit" disabled={isLoading} className="btn-secondary w-full text-sm py-2.5">
-                    {isLoading ? 'Logging in...' : 'Sign In as Admin'}
-                  </button>
-                </form>
-              </div>
-            )}
+          <div className="mt-6 border-t border-dark-50 pt-5 text-center">
+            <p className="text-xs leading-relaxed text-gray-500">
+              The configured Plex server owner receives administrator controls
+              automatically after Plex verifies the account.
+            </p>
           </div>
         </div>
 
-        {/* Helpful note */}
         <div className="mt-6 text-center">
           <p className="text-xs text-gray-500">
-            Most users should sign in with Plex.
-            <br />
-            Administrator access is only needed for system configuration.
+            Access is limited to Plex accounts that share this server.
           </p>
         </div>
       </div>

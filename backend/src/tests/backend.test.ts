@@ -8,7 +8,13 @@ import express from 'express';
 import axios from 'axios';
 import { config } from '../config';
 import { createApp } from '../index';
+import {
+  AuthRequest,
+  createAuthMiddleware,
+  createAdminMiddleware,
+} from '../middleware/auth';
 import { DatabaseService } from '../models/database';
+import { createAuthRouter } from '../routes/auth';
 import { createMediaRouter } from '../routes/media';
 import {
   buildBurnCommand,
@@ -31,6 +37,7 @@ import {
   PlexOnlineSubtitleCandidate,
   PlexServerAccessDeniedError,
   PlexServerClient,
+  PlexServerOwnershipRequiredError,
   PlexService,
   PlexSubtitleAttachError,
   PlexSubtitleTrack,
@@ -261,6 +268,7 @@ class MockClient extends PlexServerClient {
 
 class MockPlexService extends PlexService {
   revoked = false;
+  ownerRevoked = false;
   denyUserMedia = false;
   value = metadata();
   onlineEvents: string[] = [];
@@ -293,9 +301,21 @@ class MockPlexService extends PlexService {
   override async validateExactServerMembership(
     _accountToken: string,
     _machineId: string
-  ): Promise<{ serverToken: string; discoveredUrl: string }> {
+  ): Promise<{ serverToken: string; discoveredUrl: string; owned: boolean }> {
     if (this.revoked) throw new PlexServerAccessDeniedError();
-    return { serverToken: 'server-token', discoveredUrl: 'http://plex.test:32400' };
+    return {
+      serverToken: 'server-token',
+      discoveredUrl: 'http://plex.test:32400',
+      owned: false,
+    };
+  }
+
+  override async getServerOwnerIdentity(
+    _token: string,
+    _machineId: string
+  ): Promise<{ id: string; username: string }> {
+    if (this.ownerRevoked) throw new PlexServerOwnershipRequiredError();
+    return { id: 'plex-admin-one', username: 'admin-one' };
   }
 }
 
@@ -340,23 +360,40 @@ before(async () => {
   db.setSetting('plex_url', 'http://plex.test:32400');
   db.setSetting('plex_token', 'owner-token');
   db.setSetting('plex_machine_id', 'exact-machine');
-  const adminOne = db.createAdminUser({
+  db.setSetting('plex_owner_id', 'plex-admin-one');
+  db.setSetting('plex_owner_username', 'admin-one');
+  db.setSetting('plex_owner_validated_at', String(Date.now()));
+  const adminOne = db.createOrUpdatePlexUser({
     username: 'admin-one',
-    passwordHash: 'unused',
     email: 'one@example.test',
+    plexToken: 'server-token',
+    plexAccountToken: 'account-token-one',
+    plexId: 'plex-admin-one',
     isAdmin: true,
   });
-  const adminTwo = db.createAdminUser({
+  const adminTwo = db.createOrUpdatePlexUser({
     username: 'admin-two',
-    passwordHash: 'unused',
     email: 'two@example.test',
-    isAdmin: true,
+    plexToken: 'server-token',
+    plexAccountToken: 'account-token-two',
+    plexId: 'plex-admin-two',
   });
   adminOneToken = db.createSession(adminOne.id).token;
   adminTwoToken = db.createSession(adminTwo.id).token;
 
   const app = express();
   app.use(express.json());
+  const authMiddleware = createAuthMiddleware(db, service);
+  app.get('/api/test-auth', authMiddleware, (req: AuthRequest, res) => res.json({
+    user: req.user,
+  }));
+  app.get(
+    '/api/test-admin',
+    authMiddleware,
+    createAdminMiddleware(db),
+    (_req, res) => res.json({ ok: true })
+  );
+  app.use('/api/auth', createAuthRouter(db));
   app.use('/api/media', createMediaRouter(db, {
     plex: service,
     onlineSubtitles,
@@ -388,7 +425,12 @@ test('exact server matching fails closed without fallback', () => {
       Connection: { uri: 'http://wrong.test:32400', local: '1' },
     },
   ], 'exact-machine');
-  assert.deepEqual(result, { serverUrl: null, accessToken: null, matched: false });
+  assert.deepEqual(result, {
+    serverUrl: null,
+    accessToken: null,
+    matched: false,
+    owned: false,
+  });
 });
 
 test('exact membership does not depend on optional Plex connection metadata', async () => {
@@ -400,6 +442,144 @@ test('exact membership does not depend on optional Plex connection metadata', as
   }];
   const membership = await isolated.validateExactServerMembership('account-token', 'exact-machine');
   assert.equal(membership.serverToken, 'account-token');
+  assert.equal(membership.owned, true);
+});
+
+test('server owner identity rejects shared Plex access tokens', async () => {
+  const isolated = new PlexService();
+  isolated.getUserInfo = async () => ({
+    uuid: 'account-1',
+    username: 'owner-candidate',
+  });
+  isolated.getUserServers = async () => [{
+    provides: 'server',
+    clientIdentifier: 'exact-machine',
+    owned: '0',
+    accessToken: 'shared-server-token',
+  }];
+  await assert.rejects(
+    () => isolated.getServerOwnerIdentity('shared-account-token', 'exact-machine'),
+    PlexServerOwnershipRequiredError
+  );
+
+  isolated.getUserServers = async () => [{
+    provides: 'server',
+    clientIdentifier: 'exact-machine',
+    owned: '1',
+  }];
+  assert.deepEqual(
+    await isolated.getServerOwnerIdentity('owner-account-token', 'exact-machine'),
+    { id: 'account-1', username: 'owner-candidate' }
+  );
+});
+
+test('only the configured Plex owner receives administrator access', async () => {
+  const owner = await request('/api/test-auth');
+  assert.equal(owner.status, 200);
+  const ownerBody = await owner.json() as { user: { isAdmin: boolean } };
+  assert.equal(ownerBody.user.isAdmin, true);
+
+  const ownerAdmin = await request('/api/test-admin');
+  assert.equal(ownerAdmin.status, 200);
+
+  const sharedUser = await request('/api/test-auth', {}, adminTwoToken);
+  assert.equal(sharedUser.status, 200);
+  const sharedUserBody = await sharedUser.json() as { user: { isAdmin: boolean } };
+  assert.equal(sharedUserBody.user.isAdmin, false);
+
+  const denied = await request('/api/test-admin', {}, adminTwoToken);
+  assert.equal(denied.status, 403);
+  assert.deepEqual(await denied.json(), { error: 'Plex owner access required' });
+});
+
+test('stale owner sessions lose admin access when Plex ownership is revoked', async () => {
+  db.setSetting('plex_owner_validated_at', '0');
+  service.ownerRevoked = true;
+  const denied = await request('/api/test-admin');
+  assert.equal(denied.status, 403);
+  assert.equal(db.getSetting('plex_owner_id'), undefined);
+
+  service.ownerRevoked = false;
+  db.setSetting('plex_owner_id', 'plex-admin-one');
+  db.setSetting('plex_owner_username', 'admin-one');
+  db.setSetting('plex_owner_validated_at', String(Date.now()));
+  db.setExclusivePlexAdminByPlexId('plex-admin-one');
+});
+
+test('configured servers reject local admin sessions and expose no password login', async () => {
+  const localAdmin = db.createAdminUser({
+    username: 'legacy-admin',
+    passwordHash: 'unused',
+    email: 'legacy@example.test',
+    isAdmin: true,
+  });
+  const localToken = db.createSession(localAdmin.id).token;
+  const denied = await request('/api/test-admin', {}, localToken);
+  assert.equal(denied.status, 401);
+
+  const login = await request('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'legacy-admin', password: 'unused' }),
+  }, '');
+  assert.equal(login.status, 404);
+});
+
+test('unconfigured bootstrap setup can be resumed with the same credentials', async () => {
+  const databasePath = path.join(testRoot, 'bootstrap-resume.db');
+  const setupDb = new DatabaseService(databasePath, secret);
+  const setupApp = express();
+  setupApp.use(express.json());
+  setupApp.use('/api/auth', createAuthRouter(setupDb));
+  const setupServer = setupApp.listen(0);
+  await new Promise<void>(resolve => setupServer.once('listening', resolve));
+  const address = setupServer.address();
+  assert(address && typeof address === 'object');
+  const setupUrl = `http://127.0.0.1:${address.port}`;
+  const body = JSON.stringify({
+    username: 'bootstrap-admin',
+    password: 'bootstrap-password-123',
+  });
+  try {
+    const first = await fetch(`${setupUrl}/api/auth/setup`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    assert.equal(first.status, 200);
+
+    const required = await fetch(`${setupUrl}/api/auth/setup/required`);
+    assert.deepEqual(await required.json(), { setupRequired: true });
+
+    const resumed = await fetch(`${setupUrl}/api/auth/setup`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    assert.equal(resumed.status, 200);
+    assert.equal((await resumed.json() as { message: string }).message, 'Setup resumed successfully');
+  } finally {
+    await new Promise<void>(resolve => setupServer.close(() => resolve()));
+    setupDb.close();
+  }
+});
+
+test('database restart removes configured legacy admin accounts and sessions', () => {
+  const databasePath = path.join(testRoot, 'legacy-admin-cleanup.db');
+  const initial = new DatabaseService(databasePath, secret);
+  const legacy = initial.createAdminUser({
+    username: 'legacy',
+    passwordHash: 'unused',
+    email: 'legacy-cleanup@example.test',
+    isAdmin: true,
+  });
+  const legacySession = initial.createSession(legacy.id).token;
+  initial.setSetting('plex_machine_id', 'configured-machine');
+  initial.close();
+
+  const reopened = new DatabaseService(databasePath, secret);
+  assert.equal(reopened.hasAdminUser(), false);
+  assert.equal(reopened.getSessionByToken(legacySession), undefined);
+  reopened.close();
 });
 
 test('revoked membership invalidates active sessions', async () => {

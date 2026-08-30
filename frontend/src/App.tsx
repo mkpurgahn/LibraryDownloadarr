@@ -24,6 +24,18 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
   return <>{children}</>;
 };
 
+const AdminRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { token, user } = useAuthStore();
+
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
+  if (!user?.isAdmin) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+};
+
 const App: React.FC = () => {
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -39,8 +51,7 @@ const App: React.FC = () => {
       const required = await api.checkSetupRequired();
       setSetupRequired(required);
 
-      // If setup is not required and we have a token, check auth
-      if (!required && token) {
+      if (token) {
         await checkAuth();
       }
     } catch (error) {
@@ -62,8 +73,22 @@ const App: React.FC = () => {
     <Routes>
       {setupRequired ? (
         <>
-          <Route path="/setup" element={<Setup />} />
-          <Route path="*" element={<Navigate to="/setup" replace />} />
+          <Route
+            path="/setup"
+            element={token && user ? <Navigate to="/settings" replace /> : <Setup />}
+          />
+          <Route
+            path="/settings"
+            element={
+              <AdminRoute>
+                <Settings />
+              </AdminRoute>
+            }
+          />
+          <Route
+            path="*"
+            element={<Navigate to={token && user ? '/settings' : '/setup'} replace />}
+          />
         </>
       ) : (
         <>
@@ -96,7 +121,9 @@ const App: React.FC = () => {
             path="/settings"
             element={
               <ProtectedRoute>
-                <Settings />
+                <AdminRoute>
+                  <Settings />
+                </AdminRoute>
               </ProtectedRoute>
             }
           />
@@ -112,7 +139,9 @@ const App: React.FC = () => {
             path="/admin/download-history"
             element={
               <ProtectedRoute>
-                <DownloadHistory />
+                <AdminRoute>
+                  <DownloadHistory />
+                </AdminRoute>
               </ProtectedRoute>
             }
           />
@@ -120,7 +149,9 @@ const App: React.FC = () => {
             path="/admin/logs"
             element={
               <ProtectedRoute>
-                <Logs />
+                <AdminRoute>
+                  <Logs />
+                </AdminRoute>
               </ProtectedRoute>
             }
           />

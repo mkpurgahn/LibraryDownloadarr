@@ -172,4 +172,5 @@ export interface Settings {
   hasPlexToken: boolean;
   plexMachineId?: string;
   plexServerName?: string;
+  plexOwnerUsername?: string;
 }

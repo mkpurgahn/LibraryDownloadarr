@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import { DatabaseService } from '../models/database';
-import { plexService } from '../services/plexService';
+import { PlexServerOwnershipRequiredError, plexService } from '../services/plexService';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware, createAdminMiddleware } from '../middleware/auth';
 
 export const createSettingsRouter = (db: DatabaseService) => {
   const router = Router();
   const authMiddleware = createAuthMiddleware(db);
-  const adminMiddleware = createAdminMiddleware();
+  const adminMiddleware = createAdminMiddleware(db);
 
   // Get settings (admin only)
   router.get('/', authMiddleware, adminMiddleware, (_req: AuthRequest, res) => {
@@ -23,6 +23,7 @@ export const createSettingsRouter = (db: DatabaseService) => {
           hasPlexToken: !!plexToken,
           plexMachineId,
           plexServerName,
+          plexOwnerUsername: db.getSetting('plex_owner_username') || '',
         },
       });
     } catch (error) {
@@ -55,19 +56,32 @@ export const createSettingsRouter = (db: DatabaseService) => {
             const serverInfo = await client.getServerIdentity();
 
             if (serverInfo?.machineIdentifier) {
+              const owner = await plexService.getServerOwnerIdentity(
+                token,
+                serverInfo.machineIdentifier
+              );
               db.setSetting('plex_url', url);
               db.setSetting('plex_token', token);
               db.setSetting('plex_machine_id', serverInfo.machineIdentifier);
               db.setSetting('plex_server_name', serverInfo.friendlyName);
+              db.setSetting('plex_owner_id', owner.id);
+              db.setSetting('plex_owner_username', owner.username);
+              db.setSetting('plex_owner_validated_at', String(Date.now()));
+              db.setExclusivePlexAdminByPlexId(owner.id);
+              db.removeLocalAdminAccounts();
 
               logger.debug('Auto-fetched server identity', {
                 machineId: serverInfo.machineIdentifier,
-                serverName: serverInfo.friendlyName
+                serverName: serverInfo.friendlyName,
+                ownerUsername: owner.username,
               });
             } else {
               return res.status(400).json({ error: 'Plex server identity could not be verified' });
             }
           } catch (error) {
+            if (error instanceof PlexServerOwnershipRequiredError) {
+              return res.status(400).json({ error: error.message });
+            }
             return res.status(400).json({ error: 'Plex server identity could not be verified' });
           }
         }
