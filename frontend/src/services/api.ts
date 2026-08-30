@@ -11,6 +11,7 @@ import {
   BatchCompatibleResult,
   BatchDownloadTarget,
   DownloadTicket,
+  OnlineSubtitleSearchResponse,
 } from '../types';
 
 class ApiClient {
@@ -188,6 +189,18 @@ class ApiClient {
       subtitleStreamId,
     });
     return response.data.job;
+  }
+
+  async searchSubtitles(
+    ratingKey: string,
+    partKey: string,
+    language: string
+  ): Promise<OnlineSubtitleSearchResponse> {
+    const response = await this.client.get<OnlineSubtitleSearchResponse>(
+      `/media/${ratingKey}/subtitle-search`,
+      { params: { partKey, language } }
+    );
+    return response.data;
   }
 
   async createCompatibleJob(ratingKey: string, partKey: string): Promise<BurnJob> {

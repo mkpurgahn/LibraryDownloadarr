@@ -75,6 +75,24 @@ export interface MediaStream {
   burnSupported?: boolean;
 }
 
+export interface OnlineSubtitleResult {
+  id: string;
+  title: string;
+  language?: string;
+  languageCode?: string;
+  provider?: string;
+  codec: string;
+  forced: boolean;
+  hearingImpaired: boolean;
+  perfectMatch: boolean;
+  burnSupported: boolean;
+}
+
+export interface OnlineSubtitleSearchResponse {
+  results: OnlineSubtitleResult[];
+  expiresAt: string;
+}
+
 export interface Part {
   id: number;
   key: string;

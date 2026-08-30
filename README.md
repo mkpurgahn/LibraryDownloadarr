@@ -19,6 +19,7 @@ LibraryDownloadarr is a modern, self-hosted web application that provides a beau
 - 📱 **Progressive Web App** - Installable on mobile devices with a native-like experience
 - 🎨 **Modern Interface** - Beautiful, responsive design that works on all devices
 - 🔍 **Smart Search** - Search across all accessible libraries with relevance-based results
+- 💬 **Plex Subtitle Search** - Find OpenSubtitles matches and burn the selected track into the MP4
 - 📊 **Admin Dashboard** - Download history, logs, and settings management
 - 🚀 **Easy Setup** - Initial setup wizard with guided configuration
 
@@ -88,6 +89,7 @@ services:
       # Match the path Plex reports in Part.file.
       - MEDIA_ROOTS=/data/media
       - BURN_CACHE_DIR=/app/cache
+      - PLEX_REQUEST_TIMEOUT_SECONDS=30
       - FFMPEG_VIDEO_ENCODER=h264_vaapi
       - FFMPEG_QSV_DEVICE=/dev/dri/renderD128
       - TZ=America/New_York  # Change to your timezone
@@ -136,6 +138,7 @@ docker run -d \
   -e TOKEN_ENCRYPTION_KEY="$TOKEN_ENCRYPTION_KEY" \
   -e MEDIA_ROOTS=/data/media \
   -e BURN_CACHE_DIR=/app/cache \
+  -e PLEX_REQUEST_TIMEOUT_SECONDS=30 \
   -e FFMPEG_VIDEO_ENCODER=h264_vaapi \
   -e FFMPEG_QSV_DEVICE=/dev/dri/renderD128 \
   -e TZ=America/New_York \
@@ -185,6 +188,7 @@ Customize your deployment with environment variables:
 | `PORTMAP_LEASE_SECONDS` | Requested UPnP lease duration | `1200` | `1200` |
 | `PORTMAP_REFRESH_SECONDS` | Delay between UPnP mapping renewals | `600` | `600` |
 | `PLEX_MEMBERSHIP_TTL_SECONDS` | Maximum interval between active-membership checks | `300` | `120` |
+| `PLEX_REQUEST_TIMEOUT_SECONDS` | Maximum duration for each Plex metadata, activity, or subtitle transfer request | `30` | `45` |
 | `PLEX_ALLOW_INSECURE_TLS` | Explicit opt-in for self-signed/local Plex TLS | `false` | `true` |
 | `FFMPEG_PATH` | FFmpeg executable | `ffmpeg` | `/usr/bin/ffmpeg` |
 | `FFMPEG_VIDEO_ENCODER` | Burn output encoder | `libx264` | `h264_vaapi` |
@@ -358,6 +362,16 @@ the resulting MP4 download automatically. Text subtitles use libass; supported
 bitmap subtitles use FFmpeg overlay. If Plex omits real embedded subtitle
 streams, the authorized local media file is inspected with `ffprobe`. Outputs
 are atomically published into `BURN_CACHE_DIR`.
+
+For videos without a suitable local track, **Find subtitles** searches the
+configured Plex server's on-demand subtitle provider. Search results are
+represented by short-lived, user-scoped opaque IDs. When a result is selected,
+the backend temporarily asks Plex to attach it, copies the subtitle into the
+portal cache with a 50 MiB limit and content fingerprint, restores the user's
+previous Plex subtitle selection, and removes the temporary Plex stream. The
+owner token, provider resource key, and cached subtitle path are never exposed
+to the browser.
+
 For Unraid Intel UHD 730, mount `/dev/dri` and set
 `FFMPEG_VIDEO_ENCODER=h264_vaapi`; development should use `libx264`. The image
 also supports `h264_qsv`, but VAAPI is the verified path for this Unraid host.
@@ -377,6 +391,7 @@ header. The byte route accepts only its scoped ticket.
 | `POST` | `/api/media/compatible-jobs` with `{ items }` | batch `202 { jobs, errors }` |
 | `POST` | `/api/media/:ratingKey/download-ticket` with `{ partKey }` | `{ url, expiresAt, filename }` |
 | `POST` | `/api/media/:ratingKey/compatible-jobs` with `{ partKey }` | `202 { job }` |
+| `GET` | `/api/media/:ratingKey/subtitle-search?partKey=...&language=en` | short-lived opaque subtitle results |
 | `POST` | `/api/media/:ratingKey/burn-jobs` with `{ partKey, subtitleStreamId }` | `202 { job }` |
 | `GET` | `/api/media/burn-jobs/:jobId` | `{ job }` |
 | `DELETE` | `/api/media/burn-jobs/:jobId` | cancellation result |

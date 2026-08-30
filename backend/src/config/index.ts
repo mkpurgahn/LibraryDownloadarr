@@ -53,6 +53,7 @@ export const config = {
     device: 'Server',
     allowInsecureTls: boolFromEnv('PLEX_ALLOW_INSECURE_TLS'),
     membershipTtlMs: intFromEnv('PLEX_MEMBERSHIP_TTL_SECONDS', 300) * 1000,
+    requestTimeoutMs: Math.max(1000, intFromEnv('PLEX_REQUEST_TIMEOUT_SECONDS', 30) * 1000),
   },
   database: {
     path: process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'librarydownloadarr.db'),

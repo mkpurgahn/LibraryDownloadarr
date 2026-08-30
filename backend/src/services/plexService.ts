@@ -32,6 +32,24 @@ export interface PlexSubtitleTrack {
   file?: string;
 }
 
+export interface PlexOnlineSubtitleCandidate {
+  id: string;
+  key: string;
+  codec: string;
+  language?: string;
+  languageCode?: string;
+  title: string;
+  displayTitle?: string;
+  providerTitle?: string;
+  score?: number;
+  perfectMatch: boolean;
+  forced: boolean;
+  hearingImpaired: boolean;
+  downloaded: boolean;
+  transient?: boolean;
+  mediaItemId?: string;
+}
+
 export interface PlexPart {
   id: number | string;
   key: string;
@@ -121,6 +139,17 @@ export class PlexAccountUnauthorizedError extends Error {
   }
 }
 
+export class PlexSubtitleAttachError extends Error {
+  constructor(
+    message: string,
+    readonly mayHaveStarted: boolean,
+    readonly activityId?: string
+  ) {
+    super(message);
+    this.name = 'PlexSubtitleAttachError';
+  }
+}
+
 const normalizeBaseUrl = (input: string): string => {
   const withProtocol = /^https?:\/\//i.test(input) ? input : `http://${input}`;
   const parsed = new URL(withProtocol);
@@ -136,6 +165,18 @@ const axiosConfig = (headers?: Record<string, string>): AxiosRequestConfig => ({
 const asArray = <T>(value: T | T[] | undefined): T[] =>
   value === undefined ? [] : Array.isArray(value) ? value : [value];
 
+const flag = (value: unknown): boolean =>
+  value === true || value === 1 || value === '1';
+
+const cleanText = (value: unknown, maximumLength: number): string | undefined => {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const cleaned = String(value)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned ? cleaned.slice(0, maximumLength) : undefined;
+};
+
 export const enumerateSubtitles = (part: PlexPart): PlexSubtitleTrack[] => {
   let subtitleIndex = 0;
   return asArray(part.Stream)
@@ -146,11 +187,8 @@ export const enumerateSubtitles = (part: PlexPart): PlexSubtitleTrack[] => {
       const language = stream.language || undefined;
       const languageCode = stream.languageCode || undefined;
       const codec = String(stream.codec || '').toLowerCase();
-      const forced = stream.forced === true || stream.forced === 1 || stream.forced === '1';
-      const hearingImpaired =
-        stream.hearingImpaired === true || stream.hearingImpaired === 1 ||
-        stream.hearingImpaired === '1' || stream.sdh === true || stream.sdh === 1 ||
-        stream.sdh === '1';
+      const forced = flag(stream.forced);
+      const hearingImpaired = flag(stream.hearingImpaired) || flag(stream.sdh);
       const external = Boolean(stream.key || stream.file);
       const descriptors = [language || languageCode || 'Unknown', forced ? 'Forced' : '', hearingImpaired ? 'SDH' : '']
         .filter(Boolean);
@@ -190,14 +228,43 @@ export class PlexServerClient {
     this.token = token;
   }
 
-  private async get(endpoint: string, params?: Record<string, unknown>): Promise<any> {
+  private send(
+    method: 'GET' | 'PUT' | 'DELETE',
+    endpoint: string,
+    params?: Record<string, unknown>,
+    timeoutMs = config.plex.requestTimeoutMs
+  ) {
     const requestConfig = axiosConfig({
       'X-Plex-Token': this.token,
       Accept: 'application/json',
+      'X-Plex-Client-Identifier': config.plex.clientIdentifier,
+      'X-Plex-Product': config.plex.product,
+      'X-Plex-Version': config.plex.version,
+      'X-Plex-Device': config.plex.device,
     });
     requestConfig.params = params;
-    const response = await axios.get(`${this.baseUrl}${endpoint}`, requestConfig);
+    requestConfig.method = method;
+    requestConfig.url = `${this.baseUrl}${endpoint}`;
+    requestConfig.timeout = Math.max(1, timeoutMs);
+    return axios.request(requestConfig);
+  }
+
+  private async request(
+    method: 'GET' | 'PUT' | 'DELETE',
+    endpoint: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number
+  ): Promise<any> {
+    const response = await this.send(method, endpoint, params, timeoutMs);
     return response.data;
+  }
+
+  private get(
+    endpoint: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number
+  ): Promise<any> {
+    return this.request('GET', endpoint, params, timeoutMs);
   }
 
   async testConnection(): Promise<boolean> {
@@ -242,8 +309,12 @@ export class PlexServerClient {
     return asArray<PlexMedia>(data?.MediaContainer?.Metadata).map(decorateMetadata);
   }
 
-  async getMediaMetadata(ratingKey: string): Promise<PlexMedia> {
-    const data = await this.get(`/library/metadata/${encodeURIComponent(ratingKey)}`);
+  async getMediaMetadata(ratingKey: string, timeoutMs?: number): Promise<PlexMedia> {
+    const data = await this.get(
+      `/library/metadata/${encodeURIComponent(ratingKey)}`,
+      undefined,
+      timeoutMs
+    );
     const metadata = asArray<PlexMedia>(data?.MediaContainer?.Metadata)[0];
     if (!metadata) throw new Error('Media not found or not accessible');
     return decorateMetadata(metadata);
@@ -269,6 +340,142 @@ export class PlexServerClient {
   async search(query: string): Promise<PlexMedia[]> {
     const data = await this.get('/search', { query });
     return asArray<PlexMedia>(data?.MediaContainer?.Metadata).map(decorateMetadata);
+  }
+
+  async searchSubtitles(
+    ratingKey: string,
+    options: { language: string; mediaItemId?: number | string }
+  ): Promise<PlexOnlineSubtitleCandidate[]> {
+    const data = await this.get(`/library/metadata/${encodeURIComponent(ratingKey)}/subtitles`, {
+      language: options.language,
+      mediaItemID: options.mediaItemId,
+      hearingImpaired: 0,
+      forced: 0,
+    });
+    return asArray<any>(data?.MediaContainer?.Stream)
+      .map((stream): PlexOnlineSubtitleCandidate | undefined => {
+        const key = cleanText(stream.key, 2048);
+        const codec = cleanText(stream.codec, 32)?.toLowerCase();
+        const id = cleanText(stream.id, 128);
+        if (!key || !codec || !id || !key.startsWith('/library/streams/')) return undefined;
+        try {
+          this.getResourceRequest(key);
+        } catch {
+          return undefined;
+        }
+        const score = Number(stream.score);
+        return {
+          id,
+          key,
+          codec,
+          language: cleanText(stream.language, 64),
+          languageCode: cleanText(stream.languageCode, 16),
+          title:
+            cleanText(stream.title, 240) ||
+            cleanText(stream.displayTitle, 240) ||
+            'Untitled subtitle',
+          displayTitle: cleanText(stream.displayTitle, 120),
+          providerTitle: cleanText(stream.providerTitle, 80),
+          score: Number.isFinite(score) ? score : undefined,
+          perfectMatch: flag(stream.perfectMatch),
+          forced: flag(stream.forced),
+          hearingImpaired: flag(stream.hearingImpaired) || flag(stream.sdh),
+          downloaded: flag(stream.downloaded),
+          transient: stream.transient === undefined ? undefined : flag(stream.transient),
+          mediaItemId: options.mediaItemId === undefined
+            ? cleanText(stream.mediaItemID, 128)
+            : String(options.mediaItemId),
+        };
+      })
+      .filter((candidate): candidate is PlexOnlineSubtitleCandidate => Boolean(candidate));
+  }
+
+  async attachSubtitle(
+    ratingKey: string,
+    candidate: PlexOnlineSubtitleCandidate,
+    timeoutMs?: number
+  ): Promise<string | undefined> {
+    this.getResourceRequest(candidate.key);
+    try {
+      const response = await this.send(
+        'PUT',
+        `/library/metadata/${encodeURIComponent(ratingKey)}/subtitles`,
+        {
+          key: candidate.key,
+          codec: candidate.codec,
+          language: candidate.languageCode || candidate.language,
+          hearingImpaired: candidate.hearingImpaired ? 1 : 0,
+          forced: candidate.forced ? 1 : 0,
+          providerTitle: candidate.providerTitle,
+          mediaItemID: candidate.mediaItemId,
+          transient: 1,
+        },
+        timeoutMs
+      );
+      const activityId = response.headers['x-plex-activity'];
+      return typeof activityId === 'string' && activityId.length <= 128
+        ? activityId
+        : undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Plex subtitle attachment failed';
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      const definitivelyRejected = status !== undefined && status >= 400 && status < 500 && status !== 408;
+      const responseActivity = axios.isAxiosError(error)
+        ? error.response?.headers?.['x-plex-activity']
+        : undefined;
+      const activityId = typeof responseActivity === 'string' && responseActivity.length <= 128
+        ? responseActivity
+        : undefined;
+      throw new PlexSubtitleAttachError(message, !definitivelyRejected, activityId);
+    }
+  }
+
+  async selectSubtitle(
+    partId: number | string,
+    streamId: number | string,
+    timeoutMs?: number
+  ): Promise<void> {
+    if (!/^\d+$/.test(String(partId)) || !/^\d+$/.test(String(streamId))) {
+      throw new Error('Plex part and subtitle stream identifiers must be numeric');
+    }
+    await this.request(
+      'PUT',
+      `/library/parts/${encodeURIComponent(String(partId))}`,
+      { subtitleStreamID: String(streamId) },
+      timeoutMs
+    );
+  }
+
+  async deleteSubtitle(resourcePath: string, timeoutMs?: number): Promise<boolean> {
+    if (!/^\/library\/streams\/\d+$/.test(resourcePath)) {
+      throw new Error('Plex subtitle stream path is invalid');
+    }
+    this.getResourceRequest(resourcePath);
+    try {
+      await this.request('DELETE', resourcePath, undefined, timeoutMs);
+      return true;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return false;
+      throw error;
+    }
+  }
+
+  async cancelActivity(activityId: string, timeoutMs?: number): Promise<boolean> {
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(activityId)) {
+      throw new Error('Plex activity identifier is invalid');
+    }
+    try {
+      await this.request(
+        'DELETE',
+        `/activities/${encodeURIComponent(activityId)}`,
+        undefined,
+        timeoutMs
+      );
+      return true;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return false;
+      throw error;
+    }
   }
 
   async getRecentlyAdded(limit = 20): Promise<PlexMedia[]> {

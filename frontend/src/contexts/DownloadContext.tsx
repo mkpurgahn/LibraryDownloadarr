@@ -72,7 +72,7 @@ interface DownloadContextType {
     title: string,
     subtitleStreamId: number | string,
     subtitleLabel: string
-  ) => Promise<void>;
+  ) => Promise<'started' | 'cancelled' | 'expired' | 'failed'>;
   startCompatibleJob: (
     ratingKey: string,
     partKey: string,
@@ -610,7 +610,7 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
       try {
         handle = await pickParallelDownloadFile(filename);
       } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') return;
+        if (error instanceof DOMException && error.name === 'AbortError') return 'cancelled';
         setDownloads(current => [
           ...current.filter(download => download.id !== pendingId),
           {
@@ -626,7 +626,7 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
             error: errorMessage(error),
           },
         ]);
-        return;
+        return 'failed';
       }
     }
     setDownloads((current) => [
@@ -660,12 +660,15 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
           },
         ];
       });
+      return 'started';
     } catch (error) {
+      const status = responseStatus(error);
       setDownloads((current) =>
         current.map((download) =>
           download.id === pendingId ? { ...download, status: 'failed', error: errorMessage(error) } : download
         )
       );
+      return status === 410 ? 'expired' : 'failed';
     }
   };
 

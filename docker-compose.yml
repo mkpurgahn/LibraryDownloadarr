@@ -27,6 +27,7 @@ services:
       # Optional separate HTTPS origin for direct media delivery outside a tunnel/CDN.
       - DOWNLOAD_PUBLIC_ORIGIN=${DOWNLOAD_PUBLIC_ORIGIN:-}
       - PLEX_MEMBERSHIP_TTL_SECONDS=300
+      - PLEX_REQUEST_TIMEOUT_SECONDS=30
       - PLEX_ALLOW_INSECURE_TLS=false
       - FFMPEG_PATH=/usr/bin/ffmpeg
       - FFMPEG_VIDEO_ENCODER=${FFMPEG_VIDEO_ENCODER:-h264_vaapi}

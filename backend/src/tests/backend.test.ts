@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import test, { after, before } from 'node:test';
 import express from 'express';
 import axios from 'axios';
@@ -18,14 +18,21 @@ import {
 } from '../services/burnService';
 import { ensurePlexMembership } from '../services/membershipService';
 import { sanitizeMedia } from '../services/mediaSanitizer';
+import {
+  OnlineSubtitleResultUnavailableError,
+  OnlineSubtitleService,
+} from '../services/onlineSubtitleService';
 import { probeEmbeddedSubtitles } from '../services/subtitleProbe';
+import { cachePlexSubtitle } from '../services/subtitleCache';
 import { redactForLog } from '../utils/logger';
 import {
   PlexMedia,
   PlexAccountUnauthorizedError,
+  PlexOnlineSubtitleCandidate,
   PlexServerAccessDeniedError,
   PlexServerClient,
   PlexService,
+  PlexSubtitleAttachError,
   PlexSubtitleTrack,
 } from '../services/plexService';
 
@@ -128,18 +135,127 @@ const metadata = (file = mediaFile): PlexMedia => ({
 });
 
 class MockClient extends PlexServerClient {
-  constructor(private readonly value: PlexMedia, private readonly denied = false) {
+  private readonly current: PlexMedia;
+  private attachedOnlineSubtitle = false;
+  private pendingOnlineAttachment?: NodeJS.Timeout;
+
+  constructor(
+    private readonly service: MockPlexService,
+    value: PlexMedia,
+    private readonly denied = false
+  ) {
     super('http://plex.test:32400', 'token');
+    this.current = structuredClone(value);
   }
 
   override async getMediaMetadata(requestedRatingKey: string): Promise<PlexMedia> {
-    if (this.denied || requestedRatingKey !== this.value.ratingKey) throw new Error('not accessible');
-    return structuredClone(this.value);
+    if (this.denied || requestedRatingKey !== this.current.ratingKey) throw new Error('not accessible');
+    if (this.attachedOnlineSubtitle && this.service.metadataFailuresAfterAttach > 0) {
+      this.service.metadataFailuresAfterAttach -= 1;
+      throw new Error('simulated metadata failure after subtitle attachment');
+    }
+    return structuredClone(this.current);
   }
 
   override async getEpisodes(_seasonRatingKey: string): Promise<PlexMedia[]> {
     if (this.denied) throw new Error('not accessible');
-    return [structuredClone(this.value)];
+    return [structuredClone(this.current)];
+  }
+
+  override async searchSubtitles(
+    requestedRatingKey: string,
+    options: { language: string; mediaItemId?: number | string }
+  ): Promise<PlexOnlineSubtitleCandidate[]> {
+    if (this.denied || requestedRatingKey !== this.current.ratingKey) throw new Error('not accessible');
+    this.service.onlineEvents.push(
+      `search:${requestedRatingKey}:${options.language}:${options.mediaItemId || ''}`
+    );
+    return structuredClone(this.service.onlineCandidates);
+  }
+
+  override async attachSubtitle(
+    requestedRatingKey: string,
+    candidate: PlexOnlineSubtitleCandidate
+  ): Promise<string | undefined> {
+    if (this.denied || requestedRatingKey !== this.current.ratingKey) throw new Error('not accessible');
+    this.service.activeOnlineAttachments += 1;
+    this.service.maximumConcurrentOnlineAttachments = Math.max(
+      this.service.maximumConcurrentOnlineAttachments,
+      this.service.activeOnlineAttachments
+    );
+    if (this.service.onlineAttachDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, this.service.onlineAttachDelayMs));
+    }
+    this.service.onlineEvents.push(`attach:${candidate.id}`);
+    this.service.activeOnlineAttachments -= 1;
+    if (this.service.onlineAsyncAttachDelayMs > 0) {
+      this.pendingOnlineAttachment = setTimeout(
+        () => this.applyOnlineSubtitle(candidate),
+        this.service.onlineAsyncAttachDelayMs
+      );
+    } else {
+      this.applyOnlineSubtitle(candidate);
+    }
+    return `activity-${candidate.id}`;
+  }
+
+  private applyOnlineSubtitle(candidate: PlexOnlineSubtitleCandidate): void {
+    const part = this.current.Media![0].Part[0];
+    for (const stream of part.Stream || []) {
+      if (Number(stream.streamType) === 3) stream.selected = 0;
+    }
+    const attachedId = Number(candidate.id) + 1000;
+    part.Stream = [
+      ...(part.Stream || []),
+      {
+        id: attachedId,
+        index: 7,
+        streamType: 3,
+        codec: candidate.codec,
+        language: candidate.language,
+        languageCode: candidate.languageCode,
+        title: candidate.title,
+        displayTitle: candidate.displayTitle,
+        providerTitle: candidate.providerTitle,
+        forced: candidate.forced ? 1 : 0,
+        hearingImpaired: candidate.hearingImpaired ? 1 : 0,
+        selected: 1,
+        downloaded: 1,
+        transient: 1,
+        sourceKey: candidate.key,
+        key: `/library/streams/${attachedId}`,
+      },
+    ];
+    this.attachedOnlineSubtitle = true;
+    this.pendingOnlineAttachment = undefined;
+  }
+
+  override async selectSubtitle(
+    partId: number | string,
+    selectedId: number | string
+  ): Promise<void> {
+    this.service.onlineEvents.push(`select:${partId}:${selectedId}`);
+    for (const stream of this.current.Media![0].Part[0].Stream || []) {
+      if (Number(stream.streamType) === 3) {
+        stream.selected = String(stream.id) === String(selectedId) ? 1 : 0;
+      }
+    }
+  }
+
+  override async deleteSubtitle(resourcePath: string): Promise<boolean> {
+    this.service.onlineEvents.push(`delete:${resourcePath}`);
+    const part = this.current.Media![0].Part[0];
+    const before = part.Stream?.length || 0;
+    part.Stream = (part.Stream || []).filter(stream => stream.key !== resourcePath);
+    return part.Stream.length < before;
+  }
+
+  override async cancelActivity(activityId: string): Promise<boolean> {
+    this.service.onlineEvents.push(`cancel:${activityId}`);
+    if (!this.pendingOnlineAttachment) return false;
+    clearTimeout(this.pendingOnlineAttachment);
+    this.pendingOnlineAttachment = undefined;
+    return true;
   }
 }
 
@@ -147,9 +263,31 @@ class MockPlexService extends PlexService {
   revoked = false;
   denyUserMedia = false;
   value = metadata();
+  onlineEvents: string[] = [];
+  metadataFailuresAfterAttach = 0;
+  onlineAttachDelayMs = 0;
+  onlineAsyncAttachDelayMs = 0;
+  activeOnlineAttachments = 0;
+  maximumConcurrentOnlineAttachments = 0;
+  onlineCandidates: PlexOnlineSubtitleCandidate[] = [{
+    id: '700',
+    key: '/library/streams/700',
+    codec: 'srt',
+    language: 'English',
+    languageCode: 'eng',
+    title: 'Test Movie 1080p WEB-DL',
+    displayTitle: 'English',
+    providerTitle: 'OpenSubtitles',
+    score: 9900,
+    perfectMatch: true,
+    forced: false,
+    hearingImpaired: false,
+    downloaded: false,
+    mediaItemId: '1',
+  }];
 
   override createServerClient(_serverUrl: string, token: string): PlexServerClient {
-    return new MockClient(this.value, this.denyUserMedia && token === 'server-token');
+    return new MockClient(this, this.value, this.denyUserMedia && token === 'server-token');
   }
 
   override async validateExactServerMembership(
@@ -167,6 +305,15 @@ let baseUrl: string;
 let adminOneToken: string;
 let adminTwoToken: string;
 const service = new MockPlexService();
+const onlineSubtitles = new OnlineSubtitleService({
+  pollIntervalMs: 1,
+  pollTimeoutMs: 100,
+  cacheSubtitle: async subtitleTrack => {
+    const subtitlePath = path.join(cacheRoot, `${subtitleTrack.id}.srt`);
+    await fs.writeFile(subtitlePath, '1\n00:00:00,000 --> 00:00:01,000\nTest subtitle\n');
+    subtitleTrack.file = subtitlePath;
+  },
+});
 
 const request = async (
   pathname: string,
@@ -188,6 +335,7 @@ before(async () => {
   config.media.roots.splice(0, config.media.roots.length, mediaRoot);
   config.burn.cacheDir = cacheRoot;
   config.plex.membershipTtlMs = 60_000;
+  config.rateLimit.creationMax = 1000;
   db = new DatabaseService(path.join(testRoot, 'test.db'), secret);
   db.setSetting('plex_url', 'http://plex.test:32400');
   db.setSetting('plex_token', 'owner-token');
@@ -211,6 +359,7 @@ before(async () => {
   app.use(express.json());
   app.use('/api/media', createMediaRouter(db, {
     plex: service,
+    onlineSubtitles,
     burnManager: {
       enqueue: () => undefined,
       cancel: () => ({ cancelled: false }),
@@ -644,6 +793,492 @@ test('compatible MP4 converts unknown audio and rejects audio-only media', async
     );
   } finally {
     service.value = original;
+  }
+});
+
+test('online subtitle search is exact-part authorized, bounded, and opaque', async () => {
+  const originalCandidates = service.onlineCandidates;
+  service.onlineEvents = [];
+  service.onlineCandidates = Array.from({ length: 24 }, (_, index) => ({
+    ...originalCandidates[0],
+    id: String(700 + index),
+    key: `/library/streams/${700 + index}`,
+    title: `Subtitle result ${index + 1}`,
+    score: index,
+    perfectMatch: false,
+  }));
+  try {
+    const invalidLanguage = await request(
+      `/api/media/${ratingKey}/subtitle-search?partKey=${encodeURIComponent(partKey)}&language=english`
+    );
+    assert.equal(invalidLanguage.status, 400);
+
+    const wrongPart = await request(
+      `/api/media/${ratingKey}/subtitle-search?partKey=${encodeURIComponent('/library/parts/999/file.mkv')}&language=en`
+    );
+    assert.equal(wrongPart.status, 403);
+
+    const response = await request(
+      `/api/media/${ratingKey}/subtitle-search?partKey=${encodeURIComponent(partKey)}&language=en`
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      results: Array<{
+        id: string;
+        title: string;
+        provider?: string;
+        burnSupported: boolean;
+        key?: string;
+      }>;
+      expiresAt: string;
+    };
+    assert.equal(body.results.length, 20);
+    assert.equal(body.results[0].title, 'Subtitle result 24');
+    assert.match(body.results[0].id, /^online_[A-Za-z0-9_-]+$/);
+    assert.equal(body.results[0].provider, 'OpenSubtitles');
+    assert.equal(body.results[0].burnSupported, true);
+    assert.equal(body.results.every(result => !('key' in result)), true);
+    assert(Number.isFinite(Date.parse(body.expiresAt)));
+    assert.deepEqual(service.onlineEvents, ['search:42:en:1']);
+  } finally {
+    service.onlineCandidates = originalCandidates;
+  }
+});
+
+test('online subtitle selection is user-scoped, cached, restored, and queued for burn-in', async () => {
+  const originalMetadata = service.value;
+  const selectedMetadata = metadata();
+  selectedMetadata.Media![0].Part[0].Stream!
+    .find(stream => String(stream.id) === '77')!.selected = 1;
+  service.value = selectedMetadata;
+  service.onlineEvents = [];
+  try {
+    const search = await request(
+      `/api/media/${ratingKey}/subtitle-search?partKey=${encodeURIComponent(partKey)}&language=en`
+    );
+    assert.equal(search.status, 200);
+    const searchBody = await search.json() as { results: Array<{ id: string }> };
+    const resultId = searchBody.results[0].id;
+
+    const denied = await request(`/api/media/${ratingKey}/burn-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ partKey, subtitleStreamId: resultId }),
+    }, adminTwoToken);
+    assert.equal(denied.status, 410);
+    assert.equal(service.onlineEvents.some(event => event.startsWith('attach:')), false);
+
+    const response = await request(`/api/media/${ratingKey}/burn-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ partKey, subtitleStreamId: resultId }),
+    });
+    const body = await response.json() as {
+      job: { id: string; subtitleStreamId: string; filename: string };
+      error?: string;
+    };
+    assert.equal(response.status, 202, JSON.stringify({
+      body,
+      events: service.onlineEvents,
+    }));
+    assert.match(body.job.subtitleStreamId, /^online-[a-f0-9]{64}$/);
+    assert.equal(body.job.filename, 'movie.eng.mp4');
+
+    const job = db.getBurnJob(body.job.id)!;
+    const savedSubtitle = JSON.parse(job.subtitleJson) as PlexSubtitleTrack;
+    assert.equal(savedSubtitle.external, true);
+    assert.equal(savedSubtitle.embedded, false);
+    assert.equal(savedSubtitle.codec, 'srt');
+    assert.match(savedSubtitle.file || '', new RegExp(`^${cacheRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    const cachedSubtitle = await fs.readFile(savedSubtitle.file!);
+    assert.equal(
+      job.subtitleFingerprint,
+      createHash('sha256').update(cachedSubtitle).digest('hex')
+    );
+    assert.deepEqual(
+      service.onlineEvents.filter(event =>
+        event.startsWith('attach:') ||
+        event.startsWith('select:') ||
+        event.startsWith('delete:')
+      ),
+      [
+        'attach:700',
+        'select:123:77',
+        'delete:/library/streams/1700',
+      ]
+    );
+
+    const reused = await request(`/api/media/${ratingKey}/burn-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ partKey, subtitleStreamId: resultId }),
+    });
+    assert.equal(reused.status, 410);
+  } finally {
+    service.value = originalMetadata;
+  }
+});
+
+test('unsupported and expired online subtitle results fail before Plex attachment', async () => {
+  const originalCandidates = service.onlineCandidates;
+  try {
+    service.onlineEvents = [];
+    service.onlineCandidates = [{
+      ...originalCandidates[0],
+      id: '701',
+      key: '/library/streams/701',
+      codec: 'eia_608',
+    }];
+    const search = await request(
+      `/api/media/${ratingKey}/subtitle-search?partKey=${encodeURIComponent(partKey)}&language=en`
+    );
+    const resultId = ((await search.json()) as { results: Array<{ id: string }> }).results[0].id;
+    const unsupported = await request(`/api/media/${ratingKey}/burn-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ partKey, subtitleStreamId: resultId }),
+    });
+    assert.equal(unsupported.status, 422);
+    assert.equal(service.onlineEvents.some(event => event.startsWith('attach:')), false);
+
+    let now = 1000;
+    const expiring = new OnlineSubtitleService({
+      ttlMs: 10,
+      now: () => now,
+      cacheSubtitle: async () => undefined,
+    });
+    service.onlineCandidates = originalCandidates;
+    const client = new MockClient(service, metadata());
+    const result = await expiring.search({
+      userId: 'user-one',
+      ratingKey,
+      partKey,
+      language: 'en',
+      mediaItemId: 1,
+      client,
+    });
+    now = 1011;
+    await assert.rejects(
+      () => expiring.acquire({
+        userId: 'user-one',
+        ratingKey,
+        partKey,
+        resultId: result.results[0].id,
+        client,
+      }),
+      OnlineSubtitleResultUnavailableError
+    );
+  } finally {
+    service.onlineCandidates = originalCandidates;
+  }
+});
+
+test('online subtitle results are atomically claimed and item mutations are serialized', async () => {
+  service.onlineEvents = [];
+  service.onlineAttachDelayMs = 10;
+  service.activeOnlineAttachments = 0;
+  service.maximumConcurrentOnlineAttachments = 0;
+  const broker = new OnlineSubtitleService({
+    pollIntervalMs: 1,
+    pollTimeoutMs: 100,
+    cleanupTimeoutMs: 100,
+    cacheSubtitle: async subtitleTrack => {
+      const subtitlePath = path.join(cacheRoot, `${subtitleTrack.id}-serialized.srt`);
+      await fs.writeFile(subtitlePath, 'serialized');
+      subtitleTrack.file = subtitlePath;
+    },
+  });
+  try {
+    const firstClient = new MockClient(service, metadata());
+    const secondItem = metadata();
+    secondItem.Media![0].Part[0].id = 124;
+    secondItem.Media![0].Part[0].key = '/library/parts/124/file.mkv';
+    const secondClient = new MockClient(service, secondItem);
+    const firstSearch = await broker.search({
+      userId: 'user-one',
+      ratingKey,
+      partKey,
+      language: 'en',
+      mediaItemId: 1,
+      client: firstClient,
+    });
+    const secondSearch = await broker.search({
+      userId: 'user-two',
+      ratingKey,
+      partKey: '/library/parts/124/file.mkv',
+      language: 'en',
+      mediaItemId: 1,
+      client: secondClient,
+    });
+
+    const firstAcquisition = broker.acquire({
+      userId: 'user-one',
+      ratingKey,
+      partKey,
+      resultId: firstSearch.results[0].id,
+      client: firstClient,
+    });
+    await assert.rejects(
+      () => broker.acquire({
+        userId: 'user-one',
+        ratingKey,
+        partKey,
+        resultId: firstSearch.results[0].id,
+        client: firstClient,
+      }),
+      OnlineSubtitleResultUnavailableError
+    );
+    const secondAcquisition = broker.acquire({
+      userId: 'user-two',
+      ratingKey,
+      partKey: '/library/parts/124/file.mkv',
+      resultId: secondSearch.results[0].id,
+      client: secondClient,
+    });
+    await Promise.all([firstAcquisition, secondAcquisition]);
+    assert.equal(service.maximumConcurrentOnlineAttachments, 1);
+  } finally {
+    service.onlineAttachDelayMs = 0;
+  }
+});
+
+test('post-attach metadata failures still restore and delete the temporary subtitle', async () => {
+  service.onlineEvents = [];
+  service.metadataFailuresAfterAttach = 0;
+  const broker = new OnlineSubtitleService({
+    pollIntervalMs: 1,
+    pollTimeoutMs: 100,
+    cleanupTimeoutMs: 100,
+    cacheSubtitle: async subtitleTrack => {
+      const subtitlePath = path.join(cacheRoot, `${subtitleTrack.id}-cleanup.srt`);
+      await fs.writeFile(subtitlePath, 'cleanup');
+      subtitleTrack.file = subtitlePath;
+    },
+  });
+  const client = new MockClient(service, metadata());
+  const search = await broker.search({
+    userId: 'cleanup-user',
+    ratingKey,
+    partKey,
+    language: 'en',
+    mediaItemId: 1,
+    client,
+  });
+  service.metadataFailuresAfterAttach = 1;
+  await assert.rejects(
+    () => broker.acquire({
+      userId: 'cleanup-user',
+      ratingKey,
+      partKey,
+      resultId: search.results[0].id,
+      client,
+    }),
+    /simulated metadata failure/
+  );
+  assert.deepEqual(
+    service.onlineEvents.filter(event =>
+      event.startsWith('cancel:') ||
+      event.startsWith('select:') ||
+      event.startsWith('delete:')
+    ),
+    [
+      'cancel:activity-700',
+      'select:123:0',
+      'delete:/library/streams/1700',
+    ]
+  );
+  assert.equal(service.metadataFailuresAfterAttach, 0);
+});
+
+test('timed-out Plex subtitle activities are cancelled before a late attachment can appear', async () => {
+  service.onlineEvents = [];
+  service.onlineAsyncAttachDelayMs = 50;
+  const broker = new OnlineSubtitleService({
+    pollIntervalMs: 1,
+    pollTimeoutMs: 5,
+    cleanupTimeoutMs: 10,
+    cacheSubtitle: async () => undefined,
+  });
+  const client = new MockClient(service, metadata());
+  try {
+    const search = await broker.search({
+      userId: 'late-user',
+      ratingKey,
+      partKey,
+      language: 'en',
+      mediaItemId: 1,
+      client,
+    });
+    await assert.rejects(
+      () => broker.acquire({
+        userId: 'late-user',
+        ratingKey,
+        partKey,
+        resultId: search.results[0].id,
+        client,
+      }),
+      /did not finish downloading/
+    );
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const current = await client.getMediaMetadata(ratingKey);
+    assert.equal(
+      current.Media![0].Part[0].Stream!.some(stream => String(stream.id) === '1700'),
+      false
+    );
+    assert.equal(service.onlineEvents.includes('cancel:activity-700'), true);
+  } finally {
+    service.onlineAsyncAttachDelayMs = 0;
+  }
+});
+
+test('external subtitle cache enforces limits and rejects error documents', async () => {
+  const fixtureServer = http.createServer((req, res) => {
+    if (req.url === '/oversized.srt') {
+      res.writeHead(200, {
+        'content-type': 'application/x-subrip',
+        'content-length': String(50 * 1024 * 1024 + 1),
+      });
+      res.end();
+      return;
+    }
+    if (req.url === '/error.srt') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<html><body>Plex error</body></html>');
+      return;
+    }
+    if (req.url === '/plex-mislabeled.srt') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('1\n00:00:00,000 --> 00:00:01,000\nValid Plex subtitle\n');
+      return;
+    }
+    if (req.url === '/slow.srt') {
+      res.writeHead(200, { 'content-type': 'application/x-subrip' });
+      res.write('1\n00:00:00,000 --> 00:00:01,000\n');
+      setTimeout(() => res.end('Too late\n'), 1000);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/x-subrip' });
+    res.end('1\n00:00:00,000 --> 00:00:01,000\nCached subtitle\n');
+  });
+  fixtureServer.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => fixtureServer.once('listening', resolve));
+  const address = fixtureServer.address();
+  assert(address && typeof address === 'object');
+  const fixturePort = address.port;
+
+  class FixtureResourceClient extends PlexServerClient {
+    constructor() {
+      super(`http://127.0.0.1:${fixturePort}`, 'fixture-token');
+    }
+
+    override getResourceRequest(resourcePath: string) {
+      return {
+        url: `${this.baseUrl}${resourcePath}`,
+        headers: { 'X-Plex-Token': 'fixture-token' },
+        maxRedirects: 0 as const,
+      };
+    }
+  }
+
+  const client = new FixtureResourceClient();
+  try {
+    const cached = subtitle({
+      id: 'online-test',
+      codec: 'srt',
+      embedded: false,
+      external: true,
+      key: '/ok.srt',
+      file: undefined,
+    });
+    await cachePlexSubtitle(cached, client, cacheRoot);
+    assert.equal(await fs.readFile(cached.file!, 'utf8'), '1\n00:00:00,000 --> 00:00:01,000\nCached subtitle\n');
+
+    const mislabeled = subtitle({
+      id: 'online-mislabeled',
+      codec: 'srt',
+      embedded: false,
+      external: true,
+      key: '/plex-mislabeled.srt',
+      file: undefined,
+    });
+    await cachePlexSubtitle(mislabeled, client, cacheRoot);
+    assert.equal(
+      await fs.readFile(mislabeled.file!, 'utf8'),
+      '1\n00:00:00,000 --> 00:00:01,000\nValid Plex subtitle\n'
+    );
+
+    const oversized = subtitle({
+      codec: 'srt',
+      embedded: false,
+      external: true,
+      key: '/oversized.srt',
+      file: undefined,
+    });
+    await assert.rejects(
+      () => cachePlexSubtitle(oversized, client, cacheRoot),
+      /exceeds the 50 MiB limit/
+    );
+
+    const errorDocument = subtitle({
+      codec: 'srt',
+      embedded: false,
+      external: true,
+      key: '/error.srt',
+      file: undefined,
+    });
+    await assert.rejects(
+      () => cachePlexSubtitle(errorDocument, client, cacheRoot),
+      /error document instead of subtitle text/
+    );
+
+    const originalTimeout = config.plex.requestTimeoutMs;
+    config.plex.requestTimeoutMs = 50;
+    try {
+      const slow = subtitle({
+        codec: 'srt',
+        embedded: false,
+        external: true,
+        key: '/slow.srt',
+        file: undefined,
+      });
+      await assert.rejects(
+        () => cachePlexSubtitle(slow, client, cacheRoot),
+        /aborted|canceled|timeout/i
+      );
+    } finally {
+      config.plex.requestTimeoutMs = originalTimeout;
+    }
+  } finally {
+    await new Promise<void>(resolve => fixtureServer.close(() => resolve()));
+  }
+});
+
+test('Plex attachment errors distinguish definitive rejection from ambiguous server failure', async () => {
+  let responseStatus = 502;
+  const fixtureServer = http.createServer((_req, res) => {
+    res.setHeader('X-Plex-Activity', 'activity-from-error');
+    res.writeHead(responseStatus, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  fixtureServer.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => fixtureServer.once('listening', resolve));
+  const address = fixtureServer.address();
+  assert(address && typeof address === 'object');
+  const client = new PlexServerClient(`http://127.0.0.1:${address.port}`, 'fixture-token');
+  const candidate = service.onlineCandidates[0];
+  try {
+    await assert.rejects(
+      () => client.attachSubtitle(ratingKey, candidate, 1000),
+      (error: unknown) =>
+        error instanceof PlexSubtitleAttachError &&
+        error.mayHaveStarted &&
+        error.activityId === 'activity-from-error'
+    );
+    responseStatus = 400;
+    await assert.rejects(
+      () => client.attachSubtitle(ratingKey, candidate, 1000),
+      (error: unknown) =>
+        error instanceof PlexSubtitleAttachError &&
+        !error.mayHaveStarted
+    );
+  } finally {
+    await new Promise<void>(resolve => fixtureServer.close(() => resolve()));
   }
 });
 

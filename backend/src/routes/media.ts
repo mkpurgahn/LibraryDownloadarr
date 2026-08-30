@@ -3,9 +3,7 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import https from 'https';
 import fs from 'fs';
-import fsPromises from 'fs/promises';
 import path from 'path';
-import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { config } from '../config';
 import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
@@ -27,7 +25,13 @@ import {
   resolveAuthorizedPart,
 } from '../services/mediaAccess';
 import { sanitizeMedia, sanitizeMediaList } from '../services/mediaSanitizer';
+import {
+  OnlineSubtitleResultUnavailableError,
+  OnlineSubtitleService,
+  OnlineSubtitleUnsupportedError,
+} from '../services/onlineSubtitleService';
 import { PlexMedia, PlexServerClient, PlexService, plexService } from '../services/plexService';
+import { cachePlexSubtitle } from '../services/subtitleCache';
 import { probeEmbeddedSubtitles } from '../services/subtitleProbe';
 import { logger } from '../utils/logger';
 import { readSessionCookie } from '../utils/sessionCookie';
@@ -35,6 +39,7 @@ import { readSessionCookie } from '../utils/sessionCookie';
 interface MediaRouterDependencies {
   plex?: PlexService;
   burnManager?: BurnManager;
+  onlineSubtitles?: OnlineSubtitleService;
 }
 
 const validRatingKey = (value: string): boolean => /^[A-Za-z0-9._:-]{1,128}$/.test(value);
@@ -42,6 +47,8 @@ const validPartKey = (value: unknown): value is string =>
   typeof value === 'string' && value.length <= 512 && /^\/library\/parts\/[^?#]+$/.test(value);
 const validStreamId = (value: unknown): boolean =>
   (typeof value === 'string' || typeof value === 'number') && /^[A-Za-z0-9._:-]{1,128}$/.test(String(value));
+const validSubtitleLanguage = (value: unknown): value is string =>
+  typeof value === 'string' && /^[a-z]{2}$/.test(value);
 const validId = (value: string): boolean => /^[A-Za-z0-9_-]{10,128}$/.test(value);
 const downloadTicketUrl = (token: string): string => {
   const pathname = `/api/media/downloads/${encodeURIComponent(token)}`;
@@ -113,6 +120,7 @@ export const createMediaRouter = (
   const router = Router();
   const service = dependencies.plex || plexService;
   const burnManager = dependencies.burnManager || new BurnManager(db);
+  const onlineSubtitles = dependencies.onlineSubtitles || new OnlineSubtitleService();
   const authMiddleware = createAuthMiddleware(db, service);
   const creationLimiter = rateLimit({
     windowMs: config.rateLimit.windowMs,
@@ -277,69 +285,6 @@ export const createMediaRouter = (
     );
   };
 
-  const prepareExternalSubtitle = async (
-    subtitle: NonNullable<Awaited<ReturnType<typeof resolveAuthorizedPart>>['subtitle']>,
-    owner: PlexServerClient
-  ): Promise<void> => {
-    if (!subtitle.external || subtitle.file) return;
-    if (!subtitle.key || !subtitle.key.startsWith('/')) {
-      throw new Error('External subtitle track has no resolvable Plex resource');
-    }
-    await fsPromises.mkdir(config.burn.cacheDir, { recursive: true });
-    const extension = subtitle.codec === 'subrip' ? 'srt' : subtitle.codec.replace(/[^a-z0-9]/gi, '') || 'sub';
-    const workPath = path.join(
-      config.burn.cacheDir,
-      `.subtitle-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.partial`
-    );
-    const maximumBytes = 50 * 1024 * 1024;
-    try {
-      const resource = owner.getResourceRequest(subtitle.key);
-      const response = await axios.get(resource.url, {
-        headers: resource.headers,
-        maxRedirects: resource.maxRedirects,
-        responseType: 'stream',
-        httpsAgent: new https.Agent({ rejectUnauthorized: !config.plex.allowInsecureTls }),
-      });
-      const declaredLength = Number(response.headers['content-length']);
-      if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
-        response.data.destroy();
-        throw new Error('External subtitle exceeds the 50 MiB limit');
-      }
-      let receivedBytes = 0;
-      const limiter = new Transform({
-        transform(chunk, _encoding, callback) {
-          receivedBytes += chunk.length;
-          callback(
-            receivedBytes > maximumBytes
-              ? new Error('External subtitle exceeds the 50 MiB limit')
-              : null,
-            chunk
-          );
-        },
-      });
-      await pipeline(response.data, limiter, fs.createWriteStream(workPath, { flags: 'wx' }));
-      const stat = await fsPromises.stat(workPath);
-      if (!stat.isFile() || stat.size === 0) {
-        throw new Error('External subtitle download was empty');
-      }
-      const contentFingerprint = await fingerprintContents(workPath);
-      const finalPath = path.join(config.burn.cacheDir, `subtitle-${contentFingerprint}.${extension}`);
-      const existing = await fsPromises.stat(finalPath).catch(() => undefined);
-      const existingFingerprint = existing?.isFile() && existing.size > 0
-        ? await fingerprintContents(finalPath).catch(() => undefined)
-        : undefined;
-      if (existingFingerprint === contentFingerprint) {
-        await fsPromises.rm(workPath, { force: true });
-      } else {
-        await fsPromises.rename(workPath, finalPath);
-      }
-      subtitle.file = finalPath;
-    } catch (error) {
-      await fsPromises.rm(workPath, { force: true }).catch(() => undefined);
-      throw error;
-    }
-  };
-
   const handleRouteError = (res: any, error: unknown, message: string): any => {
     if (res.headersSent) {
       res.destroy(error instanceof Error ? error : undefined);
@@ -348,12 +293,18 @@ export const createMediaRouter = (
     if (error instanceof MembershipError) {
       return res.status(403).json({ error: error.message, code: 'PLEX_ACCESS_REVOKED' });
     }
+    if (error instanceof OnlineSubtitleResultUnavailableError) {
+      return res.status(410).json({ error: error.message });
+    }
+    if (error instanceof OnlineSubtitleUnsupportedError) {
+      return res.status(422).json({ error: error.message });
+    }
     const detail = error instanceof Error ? error.message : message;
     logger.error(message, { error });
     if (/does not belong|not accessible|cannot resolve|outside MEDIA_ROOTS|not configured/.test(detail)) {
       return res.status(403).json({ error: detail });
     }
-    if (/Unsupported subtitle|Subtitle track|no local file|External subtitle|requires a media part with a video stream/.test(detail)) {
+    if (/Unsupported subtitle|Subtitle track|no local file|External subtitle|requires a media part with a video stream|Plex did not finish downloading/.test(detail)) {
       return res.status(422).json({ error: detail });
     }
     if (/changed since the ticket|ticket must be renewed/.test(detail)) {
@@ -701,11 +652,26 @@ export const createMediaRouter = (
       try {
         await forceMembership(req);
         const clients = credentials(req);
+        const onlineResultId = String(subtitleStreamId);
+        const isOnlineResult = onlineSubtitles.isResultId(onlineResultId);
         const authorized = await resolveAuthorizedPart(
-          ratingKey, partKey, clients.user, clients.owner, config.media.roots, String(subtitleStreamId)
+          ratingKey,
+          partKey,
+          clients.user,
+          clients.owner,
+          config.media.roots,
+          isOnlineResult ? undefined : onlineResultId
         );
-        const subtitle = authorized.subtitle!;
-        await prepareExternalSubtitle(subtitle, clients.owner);
+        const subtitle = isOnlineResult
+          ? await onlineSubtitles.acquire({
+            userId: req.user!.id,
+            ratingKey,
+            partKey,
+            resultId: onlineResultId,
+            client: clients.user,
+          })
+          : authorized.subtitle!;
+        await cachePlexSubtitle(subtitle, clients.owner);
         classifySubtitle(subtitle.codec);
         let subtitleFingerprint = '';
         if (subtitle.external) {
@@ -715,6 +681,7 @@ export const createMediaRouter = (
             [...config.media.roots, config.burn.cacheDir]
           );
           subtitleFingerprint = await fingerprintContents(subtitle.file);
+          if (isOnlineResult) subtitle.id = `online-${subtitleFingerprint}`;
         }
         buildBurnCommand(authorized.sourcePath, 'validation.mp4', subtitle, config.burn);
         const cacheKey = burnCacheKey(
@@ -766,6 +733,61 @@ export const createMediaRouter = (
       return handleRouteError(res, error, 'Failed to get recently added media');
     }
   });
+
+  router.get(
+    '/:ratingKey/subtitle-search',
+    creationLimiter,
+    authMiddleware,
+    async (req: AuthRequest, res) => {
+      const { ratingKey } = req.params;
+      const partKey = typeof req.query.partKey === 'string' ? req.query.partKey : '';
+      const language = typeof req.query.language === 'string'
+        ? req.query.language.trim().toLowerCase()
+        : '';
+      if (
+        !validRatingKey(ratingKey) ||
+        !validPartKey(partKey) ||
+        !validSubtitleLanguage(language)
+      ) {
+        return res.status(400).json({
+          error: 'Valid ratingKey, partKey, and two-letter subtitle language are required',
+        });
+      }
+      try {
+        await forceMembership(req);
+        const client = credentials(req).user;
+        const metadata = await ensureAccessiblePart(ratingKey, partKey, client);
+        const mediaVersion = metadata.Media?.find(media =>
+          (media.Part || []).some(part => part.key === partKey)
+        );
+        const hasVideo = Boolean(
+          mediaVersion?.videoCodec ||
+          mediaVersion?.Part
+            ?.find(part => part.key === partKey)
+            ?.Stream?.some(stream =>
+              Number(stream.streamType ?? stream.streamTypeId) === 1
+            )
+        );
+        if (!hasVideo) {
+          return res.status(422).json({ error: 'Subtitle search is only available for video files' });
+        }
+        const result = await onlineSubtitles.search({
+          userId: req.user!.id,
+          ratingKey,
+          partKey,
+          language,
+          mediaItemId: mediaVersion?.id,
+          client,
+        });
+        return res.json({
+          results: result.results,
+          expiresAt: new Date(result.expiresAt).toISOString(),
+        });
+      } catch (error) {
+        return handleRouteError(res, error, 'Plex subtitle search failed');
+      }
+    }
+  );
 
   router.get('/download-history', authMiddleware, (req: AuthRequest, res) => {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
