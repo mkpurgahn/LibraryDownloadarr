@@ -33,7 +33,8 @@ export const COMPATIBLE_STREAM_ID = '__compatible__';
 export type CompatibleStrategy = 'remux' | 'audio' | 'transcode';
 
 const escapeFilterPath = (value: string): string =>
-  value.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "'\\''").replace(/,/g, '\\,');
+  // Escape the option value first, then the filtergraph. spawn() adds no shell layer.
+  value.replace(/[\\':\s]/g, '\\$&').replace(/[\\'[\],;]/g, '\\$&');
 
 export const classifySubtitle = (codec: string): 'text' | 'bitmap' => {
   const kind = subtitleKind(codec);
@@ -68,7 +69,7 @@ export const buildBurnCommand = (
     const selector = subtitle.external ? '' : `:si=${subtitle.subtitleIndex}`;
     args.push(
       '-vf',
-      `subtitles='${escapeFilterPath(subtitlePath)}'${selector}${softwareFilterSuffix}`,
+      `subtitles=filename=${escapeFilterPath(subtitlePath)}${selector}${softwareFilterSuffix}`,
       '-map',
       '0:v:0'
     );

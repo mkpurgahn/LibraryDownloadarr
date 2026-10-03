@@ -1819,13 +1819,14 @@ test('expired Plex account authorization revokes sessions', async () => {
 });
 
 test('FFmpeg command selects exact text and bitmap subtitle streams', () => {
-  const text = buildBurnCommand(mediaFile, 'text.mp4', subtitle({ subtitleIndex: 2 }), {
+  const commandSource = '/media/movie.mkv';
+  const text = buildBurnCommand(commandSource, 'text.mp4', subtitle({ subtitleIndex: 2 }), {
     ffmpegPath: 'ffmpeg',
     encoder: 'libx264',
     qsvDevice: '/dev/dri/renderD128',
   });
   assert.equal(text.kind, 'text');
-  assert(text.args.includes(`subtitles='${mediaFile}':si=2`));
+  assert(text.args.includes('subtitles=filename=/media/movie.mkv:si=2'));
   assert.deepEqual(text.args.slice(text.args.indexOf('-map'), text.args.indexOf('-map') + 2), ['-map', '0:v:0']);
 
   const bitmap = buildBurnCommand(
@@ -1838,13 +1839,13 @@ test('FFmpeg command selects exact text and bitmap subtitle streams', () => {
   assert(bitmap.args.includes('[0:v:0][0:s:3]overlay,format=nv12[v]'));
   assert.deepEqual(bitmap.args.slice(0, 4), ['-hide_banner', '-y', '-qsv_device', '/dev/dri/renderD128']);
 
-  const vaapi = buildBurnCommand(mediaFile, 'vaapi.mp4', subtitle(), {
+  const vaapi = buildBurnCommand(commandSource, 'vaapi.mp4', subtitle(), {
     ffmpegPath: 'ffmpeg',
     encoder: 'h264_vaapi',
     qsvDevice: '/dev/dri/renderD128',
   });
   assert(vaapi.args.includes('-vaapi_device'));
-  assert(vaapi.args.includes(`subtitles='${mediaFile}':si=1,format=nv12,hwupload`));
+  assert(vaapi.args.includes('subtitles=filename=/media/movie.mkv:si=1,format=nv12,hwupload'));
   assert.deepEqual(vaapi.args.slice(vaapi.args.indexOf('-c:v'), vaapi.args.indexOf('-c:v') + 4), [
     '-c:v', 'h264_vaapi', '-qp', '23',
   ]);

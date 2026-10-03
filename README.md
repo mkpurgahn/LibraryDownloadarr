@@ -365,6 +365,8 @@ the resulting MP4 download automatically. Text subtitles use libass; supported
 bitmap subtitles use FFmpeg overlay. If Plex omits real embedded subtitle
 streams, the authorized local media file is inspected with `ffprobe`. Outputs
 are atomically published into `BURN_CACHE_DIR`.
+Source and external subtitle filenames are preserved, including apostrophes,
+Unicode, and FFmpeg filter punctuation; no media renaming is required.
 
 For videos without a suitable local track, **Find subtitles** searches the
 configured Plex server's on-demand subtitle provider. Search results are
@@ -465,6 +467,9 @@ Found a bug or have a feature request?
    - Update documentation as needed
 
 4. **Test your changes**
+   Backend tests require FFmpeg with libass and libx264 on `PATH` (or set
+   `FFMPEG_PATH`). Subtitle regressions generate tiny temporary videos, compare
+   burned frames, and remove their fixtures without touching library media.
    ```bash
    # Backend tests
    cd backend
