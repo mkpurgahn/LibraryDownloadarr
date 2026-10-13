@@ -11,3 +11,6 @@ logs/
 *~
 .vscode/
 .idea/
+.superpowers/
+.test-data/
+artifacts/books/

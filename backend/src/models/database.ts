@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { logger } from '../utils/logger';
 import { decryptSecret, encryptSecret, hashToken, isEncrypted, randomToken } from '../utils/crypto';
+import { BooksRepository } from '../books/repository';
 
 export interface User {
   id: string;
@@ -84,6 +85,7 @@ export interface BurnJob {
 export class DatabaseService {
   private db: Database.Database;
   private readonly secret: string;
+  readonly books: BooksRepository;
 
   constructor(dbPath: string, secret = process.env.TOKEN_ENCRYPTION_KEY || '') {
     if (secret.length < 32) {
@@ -99,6 +101,7 @@ export class DatabaseService {
     this.initializeTables();
     this.migrateSecretsAndSessions();
     this.retireLocalAdminAccounts();
+    this.books = new BooksRepository(this.db, this.secret);
     logger.info(`Database initialized at ${dbPath}`);
   }
 

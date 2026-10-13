@@ -12,6 +12,8 @@ import { createMediaRouter } from './routes/media';
 import { createSettingsRouter } from './routes/settings';
 import { BurnManager } from './services/burnService';
 import { logger } from './utils/logger';
+import { createBooksRouter } from './books/routes';
+import { createBooksSettingsRouter } from './books/settingsRoutes';
 
 export const createApp = (db: DatabaseService, burnManager: BurnManager): express.Express => {
   const app = express();
@@ -35,6 +37,8 @@ export const createApp = (db: DatabaseService, burnManager: BurnManager): expres
   app.use('/api/auth', createAuthRouter(db));
   app.use('/api/libraries', createLibrariesRouter(db));
   app.use('/api/media', createMediaRouter(db, { burnManager }));
+  app.use('/api/books', createBooksRouter(db));
+  app.use('/api/settings/books', createBooksSettingsRouter(db));
   app.use('/api/settings', createSettingsRouter(db));
   app.use('/api/logs', createLogsRouter(db));
 

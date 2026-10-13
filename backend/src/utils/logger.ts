@@ -4,6 +4,7 @@ const logLevel = process.env.LOG_LEVEL || 'info';
 
 const redactString = (value: string): string =>
   value
+    .replace(/(\/api\/books\/(?:downloads|readers)\/)[^\s"'<>]+/gi, '$1[REDACTED]')
     .replace(/([?&]X-Plex-Token=)[^&\s"']+/gi, '$1[REDACTED]')
     .replace(/(["']?X-Plex-Token["']?\s*[:=]\s*["']?)[^"',}\s]+/gi, '$1[REDACTED]')
     .replace(
@@ -18,7 +19,7 @@ export const redactForLog = (
   depth = 0,
   seen = new WeakSet<object>()
 ): unknown => {
-  if (/token|authorization|cookie/i.test(key)) return '[REDACTED]';
+  if (/token|authorization|cookie|credential|locator|position|progress/i.test(key)) return '[REDACTED]';
   if (typeof value === 'string') return redactString(value);
   if (value === null || typeof value !== 'object') return value;
   if (depth >= 6) return '[Truncated]';

@@ -25,6 +25,43 @@ LibraryDownloadarr is a modern, self-hosted web application that provides a beau
 
 ---
 
+## Books preview (disabled by default)
+
+The Books subsystem uses Audiobookshelf 2.30.0 as its catalog, independently of
+Plex and Seekr. Only the explicitly selected `ebooks` library
+(`163ac435-50a9-4f56-96d0-276edf9303c1`) is shared with existing authorized Plex
+users. Its name does not mean ebook-only: a title may contain ebooks and audio.
+Future libraries are not inherited. No extra media mount, scanner, ABS database
+access, conversion, or source-file changes are involved.
+
+`BOOKS_ENABLED` defaults to false. Enabling also requires the Plex owner's
+separate Books configuration, a verified server-binding record, and a protected
+ABS credential for an active non-admin principal restricted to that library.
+Required effective permissions are catalog/content access and download, with
+update/delete/upload/admin disabled and `accessAllLibraries=false`. Library
+visibility alone is not proof of these permissions. Provisioning credentials and
+production enablement require an operator decision; the application does not
+create users or extract another application's token.
+
+Books credentials are encrypted in their own configuration table using
+`TOKEN_ENCRYPTION_KEY`, not ordinary settings. Owner responses never return the
+credential or provider origin. Use HTTPS, or an explicitly approved private HTTP
+origin. Redirects are rejected. Catalog failures do not invalidate Plex login.
+Configuration changes invalidate Books identities and caches. Catalog and cover
+responses are private/no-store; files use item-scoped opaque identities rather
+than provider paths.
+
+The native reader/player and original-delivery features are under development.
+Do not enable this preview for production until real provider, reader-isolation,
+resume, privacy, and preservation acceptance has passed. The isolated read-only
+proof entrypoint is `backend\dist\books\proof\verifyAbs.js --read-only --out
+artifacts\books\L1`; use protected `BOOKS_PROOF_ABS_TOKEN` or
+`BOOKS_PROOF_ABS_TOKEN_FILE` input and a redacted restricted-principal attestation.
+Proof never provisions an account or mutates ABS. A successful build is not
+provider or playback proof.
+
+---
+
 ## Why You Need LibraryDownloadarr
 
 ### Common Use Cases
