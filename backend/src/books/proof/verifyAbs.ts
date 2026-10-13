@@ -5,6 +5,198 @@ import Database from 'better-sqlite3';
 import { AbsClient } from '../absClient';
 import { BooksRepository } from '../repository';
 import { boundedQuery, providerOrigin } from '../limits';
+import https from 'node:https';
+import { IncomingHttpHeaders } from 'node:http';
+import { BookItem } from '../types';
+
+export interface ConsumerFixtureManifest {
+  schemaVersion: 1;
+  kind: 'independent-abs';
+  runId: string;
+  absVersion: '2.30.0';
+  serverBindingProofId: string;
+  providerInstanceId: string;
+  libraryId: string;
+  files: Array<{
+    absItemId: string; absIno: string; relativePath: string; role: 'ebook' | 'audio';
+    size: number; sha256: string; manifestVersion: string; expectedText?: string;
+  }>;
+}
+type NormalizedFixture = Omit<ConsumerFixtureManifest, 'kind' | 'providerInstanceId'> & {
+  providerInstanceId?: string;
+  kind: 'independent-abs' | 'seekr-handoff';
+};
+const record = (input: unknown): Record<string, unknown> => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid fixture manifest');
+  return input as Record<string, unknown>;
+};
+const identity = (input: unknown): string => {
+  if (typeof input !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(input)) throw new Error('Invalid fixture identity');
+  return input;
+};
+
+export function normalizeFixtureManifest(input: unknown): NormalizedFixture {
+  const raw = record(input);
+  if (raw.schemaVersion !== 1) throw new Error('Unsupported fixture schema version');
+  let files: unknown;
+  let libraryId: unknown;
+  let bindingId: unknown;
+  let providerId: unknown;
+  let kind: NormalizedFixture['kind'];
+  if (raw.kind === 'independent-abs') {
+    if (Object.keys(raw).some(key => !['schemaVersion', 'kind', 'runId', 'absVersion', 'serverBindingProofId', 'providerInstanceId', 'libraryId', 'files'].includes(key)) ||
+        raw.absVersion !== '2.30.0') throw new Error('Invalid independent fixture manifest');
+    kind = 'independent-abs'; files = raw.files; libraryId = raw.libraryId;
+    bindingId = raw.serverBindingProofId; providerId = identity(raw.providerInstanceId);
+  } else {
+    if (Object.keys(raw).some(key => !['schemaVersion', 'runId', 'revisions', 'services', 'binding', 'jobs', 'preservationEvidence'].includes(key))) throw new Error('Invalid joined fixture manifest');
+    const services = record(raw.services);
+    const binding = record(raw.binding);
+    if (services.absVersion !== '2.30.0' || services.qbitVersion !== '5.1.3' || !Array.isArray(raw.jobs)) throw new Error('Invalid fixture service versions');
+    kind = 'seekr-handoff';
+    files = raw.jobs.flatMap(job => {
+      const row = record(job);
+      if (!Array.isArray(row.files)) throw new Error('Invalid fixture job files');
+      return row.files;
+    });
+    libraryId = binding.libraryId; bindingId = binding.serverBindingProofId;
+    providerId = binding.ldaProviderInstanceId;
+  }
+  if (!Array.isArray(files) || files.length === 0 || files.length > 10000) throw new Error('Invalid fixture file count');
+  const seen = new Set<string>();
+  const normalized = files.map<ConsumerFixtureManifest['files'][number]>(value => {
+    const file = record(value);
+    if (Object.keys(file).some(key => !['absItemId', 'absIno', 'relativePath', 'role', 'size', 'sha256', 'manifestVersion', 'expectedText', 'limitation'].includes(key))) throw new Error('Invalid fixture file fields');
+    const absItemId = identity(file.absItemId); const absIno = identity(file.absIno);
+    const key = `${absItemId}:${absIno}`;
+    if (seen.has(key)) throw new Error('Ambiguous fixture file identity');
+    seen.add(key);
+    if (typeof file.relativePath !== 'string' || !file.relativePath || file.relativePath.length > 2000 ||
+        file.relativePath.startsWith('/') || /[\\\u0000-\u001f]/.test(file.relativePath) ||
+        /^[A-Za-z]:/.test(file.relativePath) || file.relativePath.split('/').some(part => !part || part === '.' || part === '..') ||
+        (file.role !== 'ebook' && file.role !== 'audio') || typeof file.size !== 'number' ||
+        !Number.isSafeInteger(file.size) || file.size <= 0 || typeof file.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('Invalid fixture file representation');
+    return {
+      absItemId, absIno, relativePath: file.relativePath, role: file.role, size: file.size,
+      sha256: file.sha256, manifestVersion: identity(file.manifestVersion),
+      ...(typeof file.expectedText === 'string' ? { expectedText: file.expectedText.slice(0, 10000) } : {}),
+    };
+  });
+  return {
+    schemaVersion: 1, kind, runId: identity(raw.runId), absVersion: '2.30.0',
+    serverBindingProofId: identity(bindingId), libraryId: identity(libraryId),
+    ...(providerId ? { providerInstanceId: identity(providerId) } : {}), files: normalized,
+  };
+}
+
+async function fixtureRequest(
+  url: URL, ca: Buffer, options: { method?: string; headers?: Record<string, string>; body?: string; prefixBytes?: number } = {}
+): Promise<{ status: number; headers: IncomingHttpHeaders; bytes: Buffer; interrupted: boolean }> {
+  return new Promise((resolve, reject) => {
+    const request = https.request(url, { ca, method: options.method ?? 'GET', headers: options.headers }, response => {
+      const chunks: Buffer[] = [];
+      let size = 0; let settled = false;
+      const finish = (interrupted: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve({ status: response.statusCode!, headers: response.headers, bytes: Buffer.concat(chunks, size), interrupted });
+      };
+      response.on('data', (chunk: Buffer) => {
+        if (settled) return;
+        const accepted = options.prefixBytes ? chunk.subarray(0, Math.max(0, options.prefixBytes - size)) : chunk;
+        chunks.push(accepted); size += accepted.length;
+        if (size > 16 * 1024 * 1024) { settled = true; response.destroy(); reject(new Error('Fixture response exceeded proof memory bound')); return; }
+        if (options.prefixBytes && size >= options.prefixBytes) {
+          const interrupted = !response.complete && size < Number(response.headers['content-length']);
+          finish(interrupted); response.destroy(); request.destroy();
+        }
+      });
+      response.once('end', () => finish(false));
+      response.once('error', error => { if (!settled) reject(error); });
+    });
+    request.setTimeout(15000, () => request.destroy(new Error('Fixture response deadline')));
+    request.once('error', reject);
+    if (options.body) request.write(options.body);
+    request.end();
+  });
+}
+
+async function verifyDelivery(manifest: NormalizedFixture, origin: string, out: string) {
+  if (manifest.libraryId !== process.env.BOOKS_PROOF_LIBRARY_ID ||
+      manifest.serverBindingProofId !== process.env.BOOKS_PROOF_SERVER_BINDING) throw new Error('Fixture binding mismatch');
+  const { startFixtureApp } = await import('./fixtureApp');
+  const root = path.join(process.cwd(), '.test-data', 'books', manifest.runId);
+  const app = await startFixtureApp(root, origin, manifest.libraryId);
+  const ca = await fs.readFile(process.env.BOOKS_PROOF_TLS_CERT_FILE!);
+  const auth = { Authorization: `Bearer ${app.users[0].bearer}`, Origin: app.origin };
+  const get = (pathname: string, options: Parameters<typeof fixtureRequest>[2] = {}) =>
+    fixtureRequest(new URL(pathname, app.origin), ca, options);
+  const results = [];
+  try {
+    const bridge = await get('/api/books/media-session', { method: 'POST', headers: auth });
+    if (bridge.status !== 200) throw new Error('Fixture media-session exchange failed');
+    const cookie = bridge.headers['set-cookie']?.find(value => value.startsWith('__Secure-lda_books='))?.split(';')[0];
+    if (!cookie) throw new Error('Fixture Secure cookie absent');
+    for (const [index, expected] of manifest.files.entries()) {
+      const detailResponse = await get(`/api/books/items/${expected.absItemId}`, { headers: auth });
+      if (detailResponse.status !== 200) throw new Error('Fixture item unavailable');
+      const item = JSON.parse(detailResponse.bytes.toString()) as BookItem;
+      const mapping = new Database(path.join(root, 'books-fixture.db'), { readonly: true, fileMustExist: true });
+      let fileId: string | undefined;
+      try {
+        const row = mapping.prepare(`SELECT file_id FROM books_files
+          WHERE provider_id = ? AND library_id = ? AND item_id = ? AND ino = ?`)
+          .get(item.providerInstanceId, item.libraryId, item.itemId, expected.absIno) as { file_id: string } | undefined;
+        fileId = row?.file_id;
+      } finally { mapping.close(); }
+      const file = item.files.find(file => file.fileId === fileId);
+      if (!file || file.role !== expected.role || file.size !== expected.size) throw new Error('Fixture manifest identity mismatch');
+      const issue = await get('/api/books/download-tickets', {
+        method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targets: [{ itemId: item.itemId, fileId: file.fileId, contentVersion: file.contentVersion }] }),
+      });
+      const ticket = (JSON.parse(issue.bytes.toString()) as { results: Array<{ ticket?: { url: string } }> }).results[0].ticket;
+      if (!ticket) throw new Error('Fixture original ticket unavailable');
+      const head = await get(ticket.url, { method: 'HEAD', headers: { Cookie: cookie } });
+      const full = await get(ticket.url, { headers: { Cookie: cookie } });
+      const cut = Math.max(1, Math.min(8192, Math.floor(expected.size / 2)));
+      const prefix = await get(ticket.url, { headers: { Cookie: cookie }, prefixBytes: cut });
+      const validator = head.headers.etag?.startsWith('W/') ? head.headers['last-modified'] : head.headers.etag ?? head.headers['last-modified'];
+      const resumed = await get(ticket.url, { headers: { Cookie: cookie, Range: `bytes=${prefix.bytes.length}-`, ...(validator ? { 'If-Range': validator } : {}) } });
+      const bounded = await get(ticket.url, { headers: { Cookie: cookie, Range: 'bytes=2-5' } });
+      const suffix = await get(ticket.url, { headers: { Cookie: cookie, Range: 'bytes=-3' } });
+      const invalid = await get(ticket.url, { headers: { Cookie: cookie, Range: `bytes=${expected.size + 1}-` } });
+      const mismatch = await get(ticket.url, { headers: { Cookie: cookie, Range: 'bytes=2-', 'If-Range': '"not-the-original"' } });
+      const other = await get(ticket.url, { headers: { Authorization: `Bearer ${app.users[1].bearer}` } });
+      const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+      const combined = Buffer.concat([prefix.bytes, resumed.bytes]);
+      const pass = head.status === 200 && head.bytes.length === 0 && Number(head.headers['content-length']) === expected.size &&
+        full.status === 200 && hash(full.bytes) === expected.sha256 &&
+        resumed.status === 206 && hash(combined) === expected.sha256 &&
+        bounded.status === 206 && bounded.bytes.equals(full.bytes.subarray(2, 6)) &&
+        bounded.headers['content-range'] === `bytes 2-5/${expected.size}` && bounded.headers['content-length'] === '4' &&
+        suffix.status === 206 && suffix.bytes.equals(full.bytes.subarray(-3)) &&
+        invalid.status === 416 && mismatch.status === 200 && hash(mismatch.bytes) === expected.sha256 && other.status === 404;
+      await fs.writeFile(path.join(out, `download-${index}.bin`), combined);
+      results.push({
+        itemId: item.itemId, fileId: file.fileId, consumerProviderInstanceId: item.providerInstanceId,
+        expectedSha256: expected.sha256, originalSha256: hash(full.bytes), resumedSha256: hash(combined),
+        size: expected.size, etag: head.headers.etag, lastModified: head.headers['last-modified'],
+        interrupted: prefix.interrupted, savedPrefixBytes: prefix.bytes.length,
+        head: head.status, bounded: bounded.status, suffix: suffix.status, unsatisfiable: invalid.status,
+        ifRangeMismatch: mismatch.status, otherUser: other.status, verdict: pass ? 'pass' : 'fail',
+      });
+    }
+    return {
+      schemaVersion: 1, runId: manifest.runId, serverBindingProofId: manifest.serverBindingProofId,
+      sourceProviderInstanceId: manifest.providerInstanceId, absVersion: manifest.absVersion,
+      runtime: { node: process.version }, files: results,
+      verdict: results.every(result => result.verdict === 'pass') && results.some(result => result.interrupted) ? 'pass' : 'blocked',
+      observedAt: new Date().toISOString(),
+    };
+  } finally { await app.stop(); }
+}
 
 interface PrincipalAttestation {
   absVersion: '2.30.0';
@@ -82,9 +274,12 @@ export async function verifyCatalogContract(repository: BooksRepository, attesta
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const outIndex = args.indexOf('--out');
+  const delivery = args.includes('--delivery');
+  const manifestIndex = args.indexOf('--fixture-manifest');
   if (!args.includes('--read-only') || outIndex < 0 || !args[outIndex + 1] ||
-      args.length !== 3 || new Set(args).size !== 3) {
-    throw new Error('Usage: verifyAbs --read-only --out <execution-root directory>');
+      args.length !== (delivery ? 6 : 3) || new Set(args).size !== args.length ||
+      (delivery && (manifestIndex < 0 || !args[manifestIndex + 1]))) {
+    throw new Error('Usage: verifyAbs --read-only [--delivery --fixture-manifest <file>] --out <execution-root directory>');
   }
   const root = await fs.realpath(process.cwd());
   const out = path.resolve(args[outIndex + 1]);
@@ -117,6 +312,15 @@ async function main(): Promise<void> {
     await fs.writeFile(path.join(out, 'catalog-contract.json'), JSON.stringify(evidence, null, 2));
     console.log(JSON.stringify({ verdict: report.verdict, count: report.inventory.total, dualItems: report.dualItems.length }));
     if (report.verdict !== 'pass') process.exitCode = 2;
+    if (delivery) {
+      const manifest = normalizeFixtureManifest(JSON.parse(await fs.readFile(args[manifestIndex + 1], 'utf8')));
+      const result = await verifyDelivery(manifest, origin, out);
+      await fs.writeFile(path.join(out, 'delivery-contract.json'), JSON.stringify({
+        ...result, revision: evidence.revision, probeSha256: evidence.probeSha256,
+      }, null, 2));
+      console.log(JSON.stringify({ deliveryVerdict: result.verdict, files: result.files.length }));
+      if (result.verdict !== 'pass') process.exitCode = 2;
+    }
   } finally { db.close(); }
 }
 

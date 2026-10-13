@@ -5,10 +5,11 @@ import { logger } from '../utils/logger';
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
+import { PlexService, plexService } from '../services/plexService';
 
-export const createLogsRouter = (db: DatabaseService) => {
+export const createLogsRouter = (db: DatabaseService, service: PlexService = plexService) => {
   const router = Router();
-  const authMiddleware = createAuthMiddleware(db);
+  const authMiddleware = createAuthMiddleware(db, service);
   const adminMiddleware = createAdminMiddleware(db);
 
   interface LogEntry {

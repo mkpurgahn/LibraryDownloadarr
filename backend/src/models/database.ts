@@ -86,6 +86,7 @@ export class DatabaseService {
   private db: Database.Database;
   private readonly secret: string;
   readonly books: BooksRepository;
+  private readonly sessionRevokedListeners = new Set<(sessionId: string) => void>();
 
   constructor(dbPath: string, secret = process.env.TOKEN_ENCRYPTION_KEY || '') {
     if (secret.length < 32) {
@@ -473,17 +474,39 @@ export class DatabaseService {
     return row ? this.mapSession(row) : undefined;
   }
 
+  getSessionById(id: string): Session | undefined {
+    const row = this.db.prepare('SELECT id, user_id, expires_at, created_at FROM sessions WHERE id = ? AND expires_at > ?')
+      .get(id, Date.now());
+    return row ? this.mapSession(row) : undefined;
+  }
+
+  onSessionRevoked(listener: (sessionId: string) => void): () => void {
+    this.sessionRevokedListeners.add(listener);
+    return () => { this.sessionRevokedListeners.delete(listener); };
+  }
+
+  private notifyRevoked(sessions: Array<{ id: string }>): void {
+    for (const session of sessions) for (const listener of this.sessionRevokedListeners) listener(session.id);
+  }
+
   deleteSession(token: string): void {
+    const sessions = this.db.prepare('SELECT id FROM sessions WHERE token_hash = ?').all(hashToken(token)) as Array<{ id: string }>;
     this.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(token));
+    this.notifyRevoked(sessions);
   }
 
   deleteSessionsForUser(userId: string): void {
+    const sessions = this.db.prepare('SELECT id FROM sessions WHERE user_id = ?').all(userId) as Array<{ id: string }>;
     this.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+    this.notifyRevoked(sessions);
   }
 
   cleanupExpiredSessions(): void {
+    const sessions = this.db.prepare('SELECT id FROM sessions WHERE expires_at <= ?').all(Date.now()) as Array<{ id: string }>;
     this.db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
     this.db.prepare('DELETE FROM download_tickets WHERE expires_at <= ?').run(Date.now());
+    this.books.cleanupExpired();
+    this.notifyRevoked(sessions);
   }
 
   getSetting(key: string): string | undefined {
@@ -773,6 +796,11 @@ export class DatabaseService {
   }
 
   close(): void {
+    this.stopBooks();
     this.db.close();
+  }
+
+  stopBooks(): void {
+    this.notifyRevoked(this.db.prepare('SELECT id FROM sessions').all() as Array<{ id: string }>);
   }
 }

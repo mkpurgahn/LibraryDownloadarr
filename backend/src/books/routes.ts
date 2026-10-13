@@ -1,12 +1,19 @@
 import { Router, Response, NextFunction } from 'express';
-import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
+import { AuthRequest } from '../middleware/auth';
 import { DatabaseService } from '../models/database';
 import { logger } from '../utils/logger';
 import { BooksCatalog } from './catalog';
 import { BooksError, boundedQuery, invalidInput, WindowBudget } from './limits';
+import { BooksMediaAuth, BooksPrincipal } from './mediaAuth';
+import { BookStreams } from './streams';
+import { BooksRelay } from './relay';
+import { BooksTickets, bookTarget } from './tickets';
+import { PlexService, plexService } from '../services/plexService';
 
 export function booksError(error: unknown, res: Response): void {
   if (res.headersSent) { res.destroy(); return; }
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   if (error instanceof BooksError) {
     if (error.status === 429) res.setHeader('Retry-After', '2');
     if (error.status >= 500) logger.warn('Books request unavailable', { code: error.code, status: error.status });
@@ -29,24 +36,63 @@ export function bookHandler(
   };
 }
 
-export function createBooksRouter(db: DatabaseService): Router {
+export function createBooksRouter(db: DatabaseService, dependencies: { plex?: PlexService } = {}): Router {
   const router = Router();
   const catalog = new BooksCatalog(db.books);
+  const plex = dependencies.plex ?? plexService;
+  const auth = new BooksMediaAuth(db, plex);
+  const streams = new BookStreams();
+  const relay = new BooksRelay(db, catalog, streams, plex);
+  const tickets = new BooksTickets(db, relay);
+  const principals = new WeakMap<AuthRequest, BooksPrincipal>();
   const reads = new WindowBudget(120, 60000);
+  const mutations = new WindowBudget(20, 60000);
+  db.onSessionRevoked(id => { db.books.revokeBooksSession(id); streams.revokeSession(id); });
+  db.books.onConfigChanged(() => streams.invalidateGeneration());
   router.use((_req, res, next) => {
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     next();
   });
-  router.use(createAuthMiddleware(db));
+  router.post('/media-session', bookHandler(async (req, res) => {
+    const principal = await auth.requireBooksMutation(req, true);
+    catalog.current();
+    mutations.take(principal.userId);
+    auth.exchange(res, principal);
+    return res.json({ expiresAt: principal.expiresAt });
+  }));
   router.use((req: AuthRequest, res, next) => {
-    try {
-      if (!req.user?.plexId) throw new BooksError(403, 'PLEX_ACCESS_REQUIRED', 'Plex access required');
+    const mutating = !['GET', 'HEAD'].includes(req.method);
+    const force = req.path.startsWith('/downloads/') || req.path.endsWith('/content') || req.path === '/download-tickets';
+    void (mutating ? auth.requireBooksMutation(req, false, force) : auth.authenticateBooks(req, force)).then(principal => {
       catalog.current();
-      reads.take(req.user.id);
+      (mutating ? mutations : reads).take(principal.userId);
+      principals.set(req, principal);
+      const user = db.getPlexUserById(principal.userId)!;
+      req.user = { id: user.id, username: user.username, plexId: user.plexId, isAdmin: false };
       next();
-    } catch (error) { booksError(error, res); }
+    }).catch(error => booksError(error, res));
   });
+  router.delete('/media-session', bookHandler(async (req, res) => {
+    const principal = principals.get(req)!;
+    auth.clear(res, principal);
+    streams.revokeSession(principal.sessionId);
+    return res.status(204).end();
+  }));
+  router.post('/download-tickets', bookHandler(async (req, res, signal) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) ||
+        Object.keys(req.body).some(key => key !== 'targets')) throw invalidInput();
+    return res.json({ results: await tickets.issue(principals.get(req)!, req.body.targets, signal) });
+  }));
+  router.get('/downloads/:ticket', bookHandler(async (req, res) => {
+    const principal = principals.get(req)!;
+    await relay.relayOriginal(req, res, principal, tickets.resolve(principal, req.params.ticket), 'attachment');
+  }));
+  router.get('/items/:itemId/files/:fileId/content', bookHandler(async (req, res) => {
+    if (Object.keys(req.query).some(key => key !== 'version')) throw invalidInput();
+    const target = bookTarget({ itemId: req.params.itemId, fileId: req.params.fileId, contentVersion: req.query.version });
+    await relay.relayOriginal(req, res, principals.get(req)!, target, 'inline');
+  }));
   router.get('/libraries', bookHandler(async (_req, res, signal) => res.json(await catalog.libraries(signal))));
   router.get('/libraries/:libraryId/items', bookHandler(async (req, res, signal) =>
     res.json(await catalog.list(req.user!.id, req.params.libraryId, boundedQuery(req.query), signal))));

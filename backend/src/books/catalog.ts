@@ -43,6 +43,9 @@ export class BooksCatalog {
     const { config, client } = this.current();
     const item = await client.item(opaqueSegment(itemId), signal);
     this.unchanged(config.configGeneration);
+    item.files = item.files.map(file => ({
+      ...file, contentVersion: this.repository.fileVersion(file.fileId, file.contentVersion),
+    }));
     return { item, configGeneration: config.configGeneration };
   }
   async resolveFile(userId: string, itemId: string, fileId: string, version: string | undefined, signal: AbortSignal) {

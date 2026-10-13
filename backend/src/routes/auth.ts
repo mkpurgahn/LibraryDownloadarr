@@ -5,6 +5,7 @@ import {
   PlexAuthResponse,
   PlexAccountUnauthorizedError,
   PlexServerAccessDeniedError,
+  PlexService,
   plexService,
 } from '../services/plexService';
 import { logger } from '../utils/logger';
@@ -13,9 +14,9 @@ import rateLimit from 'express-rate-limit';
 import { config } from '../config';
 import { clearSessionCookie, setSessionCookie } from '../utils/sessionCookie';
 
-export const createAuthRouter = (db: DatabaseService) => {
+export const createAuthRouter = (db: DatabaseService, service: PlexService = plexService) => {
   const router = Router();
-  const authMiddleware = createAuthMiddleware(db);
+  const authMiddleware = createAuthMiddleware(db, service);
   const loginLimiter = rateLimit({
     windowMs: config.rateLimit.windowMs,
     limit: config.rateLimit.loginMax,
@@ -64,7 +65,7 @@ export const createAuthRouter = (db: DatabaseService) => {
       return undefined;
     }
     try {
-      const owner = await plexService.getServerOwnerIdentity(ownerToken, machineId);
+      const owner = await service.getServerOwnerIdentity(ownerToken, machineId);
       savePlexOwner(owner);
       return owner;
     } catch (error) {
@@ -140,7 +141,7 @@ export const createAuthRouter = (db: DatabaseService) => {
   // Plex OAuth: Generate PIN
   router.post('/plex/pin', loginLimiter, async (_req, res) => {
     try {
-      const pin = await plexService.generatePin();
+      const pin = await service.generatePin();
       return res.json({
         id: pin.id,
         code: pin.code,
@@ -167,7 +168,7 @@ export const createAuthRouter = (db: DatabaseService) => {
 
       logger.debug('Checking Plex PIN', { pinId });
 
-      const authResponse = await plexService.checkPin(pinId);
+      const authResponse = await service.checkPin(pinId);
       if (!authResponse) {
         return res.status(400).json({ error: 'PIN not yet authorized' });
       }
@@ -192,7 +193,7 @@ export const createAuthRouter = (db: DatabaseService) => {
       let userToken: string;
       let authenticatedOwnsServer = false;
       try {
-        const membership = await plexService.validateExactServerMembership(
+        const membership = await service.validateExactServerMembership(
           authResponse.authToken,
           adminMachineId
         );

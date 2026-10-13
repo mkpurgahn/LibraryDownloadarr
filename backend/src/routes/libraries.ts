@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import { DatabaseService } from '../models/database';
-import { plexService } from '../services/plexService';
+import { PlexService, plexService } from '../services/plexService';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
 import { sanitizeMediaList } from '../services/mediaSanitizer';
 
-export const createLibrariesRouter = (db: DatabaseService) => {
+export const createLibrariesRouter = (db: DatabaseService, service: PlexService = plexService) => {
   const router = Router();
-  const authMiddleware = createAuthMiddleware(db);
+  const authMiddleware = createAuthMiddleware(db, service);
 
   // Helper function to get user credentials
   // SECURITY: Always use admin's server URL, never user-specific URLs
@@ -63,7 +63,7 @@ export const createLibrariesRouter = (db: DatabaseService) => {
         isAdmin: req.user?.isAdmin
       });
 
-      const libraries = await plexService.createServerClient(serverUrl, token).getLibraries();
+      const libraries = await service.createServerClient(serverUrl, token).getLibraries();
       return res.json({ libraries });
     } catch (error: any) {
       logger.error('Failed to get libraries', {
@@ -90,7 +90,7 @@ export const createLibrariesRouter = (db: DatabaseService) => {
         return res.status(500).json({ error: 'Plex server not configured' });
       }
 
-      const content = await plexService.createServerClient(serverUrl, token).getLibraryContent(
+      const content = await service.createServerClient(serverUrl, token).getLibraryContent(
         libraryKey,
         viewType as string | undefined
       );

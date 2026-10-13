@@ -51,7 +51,22 @@ Configuration changes invalidate Books identities and caches. Catalog and cover
 responses are private/no-store; files use item-scoped opaque identities rather
 than provider paths.
 
-The native reader/player and original-delivery features are under development.
+Original Books delivery uses same-origin, session-bound per-file tickets and a
+Books-only `HttpOnly; Secure; SameSite=Strict` media cookie. The cookie cannot
+authorize mutations or other API groups. GET and HEAD recheck membership and
+the current item/file manifest. Logout, configuration changes, and shutdown
+cancel Books streams without changing Plex's download transport.
+
+Original bytes support single bounded, open, and suffix ranges with truthful
+HEAD/206/416 headers and If-Range restart behavior. Upstream weak ETags stay
+weak; Books never use the Plex segmented accelerator or direct download origin.
+Missing safe validators/range support is explicitly fresh-download-only.
+Changed representations invalidate the old ticket. Native browser downloads
+must be reported as started, not as proven complete. Capacity is two Books file
+streams per user and eight globally; file connection and idle deadlines are
+10 and 60 seconds respectively, not a short total-transfer deadline.
+
+The native reader/player features are under development.
 Do not enable this preview for production until real provider, reader-isolation,
 resume, privacy, and preservation acceptance has passed. The isolated read-only
 proof entrypoint is `backend\dist\books\proof\verifyAbs.js --read-only --out
@@ -59,6 +74,12 @@ artifacts\books\L1`; use protected `BOOKS_PROOF_ABS_TOKEN` or
 `BOOKS_PROOF_ABS_TOKEN_FILE` input and a redacted restricted-principal attestation.
 Proof never provisions an account or mutates ABS. A successful build is not
 provider or playback proof.
+
+`--delivery --fixture-manifest <file>` also exercises the built HTTPS application
+with synthetic application sessions and known original hashes. Supply protected
+`BOOKS_PROOF_TLS_CERT_FILE` and `BOOKS_PROOF_TLS_KEY_FILE`; do not remove Secure
+cookies or disable TLS validation to work around a missing fixture certificate.
+The fixture helper has no test-login route and refuses non-isolated providers.
 
 ---
 

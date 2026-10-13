@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import { DatabaseService } from '../models/database';
-import { PlexServerOwnershipRequiredError, plexService } from '../services/plexService';
+import { PlexServerOwnershipRequiredError, PlexService, plexService } from '../services/plexService';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware, createAdminMiddleware } from '../middleware/auth';
 
-export const createSettingsRouter = (db: DatabaseService) => {
+export const createSettingsRouter = (db: DatabaseService, service: PlexService = plexService) => {
   const router = Router();
-  const authMiddleware = createAuthMiddleware(db);
+  const authMiddleware = createAuthMiddleware(db, service);
   const adminMiddleware = createAdminMiddleware(db);
 
   // Get settings (admin only)
@@ -52,11 +52,11 @@ export const createSettingsRouter = (db: DatabaseService) => {
         if (url && token) {
           // Auto-fetch machine ID and server name
           try {
-            const client = plexService.createServerClient(url, token);
+            const client = service.createServerClient(url, token);
             const serverInfo = await client.getServerIdentity();
 
             if (serverInfo?.machineIdentifier) {
-              const owner = await plexService.getServerOwnerIdentity(
+              const owner = await service.getServerOwnerIdentity(
                 token,
                 serverInfo.machineIdentifier
               );
@@ -103,13 +103,13 @@ export const createSettingsRouter = (db: DatabaseService) => {
 
       // If URL and token provided in request, test those; otherwise test saved settings
       if (plexUrl && plexToken) {
-        const isConnected = await plexService.testConnectionWithCredentials(plexUrl, plexToken);
+        const isConnected = await service.testConnectionWithCredentials(plexUrl, plexToken);
         return res.json({ connected: isConnected });
       } else {
         const url = db.getSetting('plex_url');
         const token = db.getSetting('plex_token');
         const isConnected = Boolean(url && token) &&
-          await plexService.testConnectionWithCredentials(url!, token!);
+          await service.testConnectionWithCredentials(url!, token!);
         return res.json({ connected: isConnected });
       }
     } catch (error) {

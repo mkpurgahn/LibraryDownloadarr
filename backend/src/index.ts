@@ -12,11 +12,16 @@ import { createMediaRouter } from './routes/media';
 import { createSettingsRouter } from './routes/settings';
 import { BurnManager } from './services/burnService';
 import { logger } from './utils/logger';
-import { createBooksRouter } from './books/routes';
+import { booksError, createBooksRouter } from './books/routes';
 import { createBooksSettingsRouter } from './books/settingsRoutes';
+import { PlexService, plexService } from './services/plexService';
+import { BooksError } from './books/limits';
 
-export const createApp = (db: DatabaseService, burnManager: BurnManager): express.Express => {
+export const createApp = (
+  db: DatabaseService, burnManager: BurnManager, dependencies: { plex?: PlexService } = {}
+): express.Express => {
   const app = express();
+  const plex = dependencies.plex ?? plexService;
   app.disable('x-powered-by');
   if (config.server.trustProxyHops > 0) {
     app.set('trust proxy', config.server.trustProxyHops);
@@ -34,18 +39,25 @@ export const createApp = (db: DatabaseService, burnManager: BurnManager): expres
 
   app.get('/api/health', (_req, res) =>
     res.json({ status: 'ok', timestamp: new Date().toISOString() }));
-  app.use('/api/auth', createAuthRouter(db));
-  app.use('/api/libraries', createLibrariesRouter(db));
-  app.use('/api/media', createMediaRouter(db, { burnManager }));
-  app.use('/api/books', createBooksRouter(db));
-  app.use('/api/settings/books', createBooksSettingsRouter(db));
-  app.use('/api/settings', createSettingsRouter(db));
-  app.use('/api/logs', createLogsRouter(db));
+  app.use('/api/auth', createAuthRouter(db, plex));
+  app.use('/api/libraries', createLibrariesRouter(db, plex));
+  app.use('/api/media', createMediaRouter(db, { burnManager, plex }));
+  app.use('/api/books', createBooksRouter(db, { plex }));
+  app.use('/api/settings/books', createBooksSettingsRouter(db, plex));
+  app.use('/api/settings', createSettingsRouter(db, plex));
+  app.use('/api/logs', createLogsRouter(db, plex));
 
   const publicPath = path.join(__dirname, '..', 'public');
   app.use(express.static(publicPath));
   app.get('*', (_req, res) => res.sendFile(path.join(publicPath, 'index.html')));
-  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (/^\/api\/(?:books|settings\/books)(?:\/|$)/.test(req.path)) {
+      const type = error instanceof Error && 'type' in error ? error.type : undefined;
+      booksError(type === 'entity.parse.failed' || type === 'entity.too.large'
+        ? new BooksError(type === 'entity.too.large' ? 413 : 400, 'INVALID_BOOKS_REQUEST', 'Invalid Books request')
+        : error, res);
+      return;
+    }
     logger.error('Unhandled error', { error });
     return res.status(500).json({ error: 'Internal server error' });
   });
@@ -67,6 +79,7 @@ export const startServer = async (): Promise<void> => {
     logger.info(`LibraryDownloadarr server started on port ${config.server.port}`);
   });
   const shutdown = (): void => {
+    db.stopBooks();
     server.close(() => {
       db.close();
       process.exit(0);

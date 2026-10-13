@@ -5,8 +5,9 @@ import { AbsClient } from './absClient';
 import { bookHandler, booksError } from './routes';
 import { BooksError, invalidInput, providerOrigin, sameOrigin, SELECTED_LIBRARY_ID, WindowBudget } from './limits';
 import { BooksConfig } from './types';
+import { PlexService, plexService } from '../services/plexService';
 
-export function createBooksSettingsRouter(db: DatabaseService): Router {
+export function createBooksSettingsRouter(db: DatabaseService, service: PlexService = plexService): Router {
   const router = Router();
   const mutations = new WindowBudget(20, 60000);
   const status = () => {
@@ -22,7 +23,7 @@ export function createBooksSettingsRouter(db: DatabaseService): Router {
     };
   };
   router.use((_req, res, next) => { res.setHeader('Cache-Control', 'private, no-store'); next(); });
-  router.use(createAuthMiddleware(db), createAdminMiddleware(db));
+  router.use(createAuthMiddleware(db, service), createAdminMiddleware(db));
   router.use((req: AuthRequest, res, next) => {
     try {
       if (req.method !== 'GET' && req.method !== 'HEAD') {
