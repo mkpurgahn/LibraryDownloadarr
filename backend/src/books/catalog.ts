@@ -2,6 +2,7 @@ import { AbsClient } from './absClient';
 import { BooksRepository } from './repository';
 import { BOOKS_LIMITS, BooksError, ByteCache, notFound, opaqueSegment } from './limits';
 import { BooksConfig, CatalogQuery } from './types';
+import { audioEdition } from './progressTypes';
 
 export class BooksCatalog {
   private readonly covers = new ByteCache<{ body: Buffer; mime: string }>(BOOKS_LIMITS.coverCacheBytes, BOOKS_LIMITS.coverTtlMs);
@@ -46,6 +47,7 @@ export class BooksCatalog {
     item.files = item.files.map(file => ({
       ...file, contentVersion: this.repository.fileVersion(file.fileId, file.contentVersion),
     }));
+    item.audioEdition = audioEdition(item);
     return { item, configGeneration: config.configGeneration };
   }
   async resolveFile(userId: string, itemId: string, fileId: string, version: string | undefined, signal: AbortSignal) {

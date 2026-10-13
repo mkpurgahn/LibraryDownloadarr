@@ -66,6 +66,16 @@ must be reported as started, not as proven complete. Capacity is two Books file
 streams per user and eight globally; file connection and idle deadlines are
 10 and 60 seconds respectively, not a short total-transfer deadline.
 
+Reading and listening progress is stored in LibraryDownloadarr, never in ABS's
+shared account. Records are isolated by user, provider, library, item, mode,
+and original/ordered-audio edition. An explicit writer claim creates a new
+epoch; stale devices and out-of-order updates receive a conflict rather than
+overwriting newer progress. Intentional rewind is supported, and an identical
+retry does not create another revision. Replaced originals retain incompatible
+history instead of silently reusing a stale page, section, or track position.
+History responses show the latest 100 records; older versions remain stored.
+EPUB positions are rejected until validated reader preparation is available.
+
 The native reader/player features are under development.
 Do not enable this preview for production until real provider, reader-isolation,
 resume, privacy, and preservation acceptance has passed. The isolated read-only

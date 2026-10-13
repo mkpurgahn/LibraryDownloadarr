@@ -4,6 +4,7 @@ import fs from 'fs';
 import { logger } from '../utils/logger';
 import { decryptSecret, encryptSecret, hashToken, isEncrypted, randomToken } from '../utils/crypto';
 import { BooksRepository } from '../books/repository';
+import { BooksProgressRepository } from '../books/progressRepository';
 
 export interface User {
   id: string;
@@ -86,6 +87,7 @@ export class DatabaseService {
   private db: Database.Database;
   private readonly secret: string;
   readonly books: BooksRepository;
+  readonly booksProgress: BooksProgressRepository;
   private readonly sessionRevokedListeners = new Set<(sessionId: string) => void>();
 
   constructor(dbPath: string, secret = process.env.TOKEN_ENCRYPTION_KEY || '') {
@@ -103,6 +105,7 @@ export class DatabaseService {
     this.migrateSecretsAndSessions();
     this.retireLocalAdminAccounts();
     this.books = new BooksRepository(this.db, this.secret);
+    this.booksProgress = new BooksProgressRepository(this.db);
     logger.info(`Database initialized at ${dbPath}`);
   }
 

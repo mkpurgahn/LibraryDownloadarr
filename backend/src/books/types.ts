@@ -28,6 +28,7 @@ export interface BookItem extends BookKey {
   chapters: Array<{ id: string; title: string; start: number; end: number }>;
   read: { available: boolean; reason?: string };
   listen: { available: boolean; reason?: string };
+  audioEdition?: { editionId: string; contentVersion: string };
 }
 
 export type BookSummary = Omit<BookItem, 'files' | 'tracks' | 'chapters'> & {

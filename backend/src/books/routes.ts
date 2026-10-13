@@ -9,6 +9,7 @@ import { BookStreams } from './streams';
 import { BooksRelay } from './relay';
 import { BooksTickets, bookTarget } from './tickets';
 import { PlexService, plexService } from '../services/plexService';
+import { createBooksProgressRouter } from './progressRoutes';
 
 export function booksError(error: unknown, res: Response): void {
   if (res.headersSent) { res.destroy(); return; }
@@ -106,6 +107,7 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
     const { body, mime } = await catalog.cover(req.user!.id, req.params.itemId, signal);
     return res.type(mime).send(body);
   }));
+  router.use(createBooksProgressRouter(db, catalog));
   router.use((_req, res) => res.status(404).json({ error: 'Book not found', code: 'BOOK_NOT_FOUND' }));
   return router;
 }
