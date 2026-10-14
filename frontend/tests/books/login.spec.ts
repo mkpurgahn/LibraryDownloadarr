@@ -47,8 +47,10 @@ for (const closure of ['before-result', 'after-result'] as const) {
       await expect(page.getByRole('button', { name: 'Sign in with Plex', exact: true })).toHaveCount(0);
       await page.goto(`${app.origin}/books`);
       await expect(page.getByRole('heading', { name: 'Books', exact: true })).toBeVisible();
+      await expect(page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true })).toBeVisible();
       await page.reload();
       await expect(page.getByRole('heading', { name: 'Books', exact: true })).toBeVisible();
+      await expect(page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true })).toBeVisible();
       expect(checks).toBe(1);
       await capture(page, `authorized-login-${closure}`, info);
       await fs.writeFile(info.outputPath('login-transition.json'), JSON.stringify({
