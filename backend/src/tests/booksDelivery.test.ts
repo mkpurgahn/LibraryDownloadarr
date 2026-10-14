@@ -196,6 +196,79 @@ test('every_content_route_rechecks_identity', async () => {
   } finally { await f.close(); }
 });
 
+for (const spelling of ['canonical', 'uppercase', 'trailing-slash'] as const) {
+  for (const failure of ['denied', 'unavailable'] as const) {
+    test(`accepted_transfer_aliases_recheck_membership_${spelling}_${failure}`, async () => {
+      const requests = [
+        ['GET', 'content'], ['HEAD', 'content'], ['GET', 'download'], ['HEAD', 'download'],
+        ['POST', 'tickets'], ['POST', 'reader'], ['GET', 'resource'], ['HEAD', 'resource'],
+      ] as const;
+      for (const [method, kind] of requests) {
+        const f = await fixture();
+        try {
+          const ticket = await f.issue();
+          const cookie = await f.bridge();
+          const paths = {
+            content: f.content.split('?')[0], download: ticket, tickets: '/api/books/download-tickets',
+            reader: '/api/books/items/item/reader', resource: '/api/books/readers/unknown/resources/unknown',
+          };
+          let pathname = paths[kind];
+          if (spelling === 'uppercase') {
+            pathname = pathname.replace(/\/(items|files|content|downloads|download-tickets|reader|readers|resources)(?=\/|$)/g,
+              segment => segment.toUpperCase());
+          } else if (spelling === 'trailing-slash') pathname += '/';
+          if (kind === 'content') pathname += `?version=${f.target.contentVersion}`;
+          const before = f.plex.forceChecks;
+          f.plex[failure] = true;
+          const response = await f.get(pathname, {
+            method, headers: {
+              ...f.auth(), Cookie: cookie, Origin: f.origin, 'Content-Type': 'application/json',
+            },
+            ...(method === 'POST' ? { body: JSON.stringify(kind === 'tickets'
+              ? { targets: [f.target] } : { fileId: f.target.fileId, contentVersion: f.target.contentVersion }) } : {}),
+          });
+          assert.equal(response.status, failure === 'denied' ? 403 : 503, `${method} ${kind} ${spelling}`);
+          assert.equal(response.headers.get('cache-control'), 'private, no-store');
+          assert.equal(f.plex.forceChecks, before + 1);
+          const sql = new Database(path.join(f.root, 'fixture.db'), { readonly: true });
+          try {
+            const count = sql.prepare('SELECT COUNT(*) AS count FROM books_tickets').get() as { count: number };
+            assert.equal(count.count, failure === 'denied' ? 0 : 1, 'No capability created after denial/uncertainty');
+          } finally { sql.close(); }
+          await response.arrayBuffer();
+        } finally { await f.close(); }
+      }
+    });
+  }
+}
+
+test('if_range_mismatch_restarts_unsatisfiable_single_range_get_and_head', async () => {
+  const f = await fixture();
+  try {
+    const ticket = await f.issue();
+    for (const method of ['GET', 'HEAD']) {
+      for (const [validator, status] of [
+        ['"fixture-v1"', 416], ['"old-longer-original"', 200],
+        ['Tue, 14 Nov 2023 22:13:20 GMT', 416], ['Tue, 14 Nov 2023 22:13:19 GMT', 200],
+      ] as const) {
+        const response = await f.get(ticket, { method, headers: { ...f.auth(), Range: 'bytes=100-', 'If-Range': validator } });
+        assert.equal(response.status, status, `${method} ${validator}`);
+        assert.equal(response.headers.get('content-range'), status === 416 ? 'bytes */10' : null);
+        if (status === 200) {
+          assert.equal(response.headers.get('content-length'), '10');
+          assert.equal(response.headers.get('etag'), '"fixture-v1"');
+        }
+        assert.equal(await response.text(), method === 'GET' && status === 200 ? '0123456789' : '');
+      }
+      for (const range of ['bytes=0-1,4-5', 'bytes=bad', 'bytes=5-2']) {
+        const response = await f.get(ticket, { method, headers: { ...f.auth(), Range: range, 'If-Range': '"different"' } });
+        assert.equal(response.status, 416, 'Malformed/multipart policy is unchanged');
+        await response.arrayBuffer();
+      }
+    }
+  } finally { await f.close(); }
+});
+
 test('books_saturation_and_provider_failure_preserve_plex_routes', async () => {
   const f = await fixture();
   const controllers = [new AbortController(), new AbortController()];

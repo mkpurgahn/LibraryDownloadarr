@@ -9,10 +9,14 @@ import {
 } from './limits';
 
 type Json = Record<string, unknown>;
+const optionalObject = (value: unknown): Json | undefined =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
 const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BooksError(502, 'ABS_INVALID_RESPONSE');
   return value as Json;
 };
+const optionalArray = (value: unknown, max = 10000): unknown[] =>
+  Array.isArray(value) && value.length <= max ? value : [];
 const array = (value: unknown, max = 10000): unknown[] => {
   if (!Array.isArray(value) || value.length > max) throw new BooksError(502, 'ABS_INVALID_RESPONSE');
   return value;
@@ -25,7 +29,7 @@ const number = (value: unknown): number => {
   return value;
 };
 const names = (value: unknown, fallback?: unknown): string[] => {
-  if (Array.isArray(value)) return value.slice(0, 1000).map(v => text(typeof v === 'string' ? v : object(v).name, 500)).filter(Boolean);
+  if (Array.isArray(value)) return value.slice(0, 1000).map(v => text(typeof v === 'string' ? v : optionalObject(v)?.name, 500)).filter(Boolean);
   const name = text(fallback, 1000);
   return name ? [name] : [];
 };
@@ -130,7 +134,7 @@ export class AbsClient {
   private summary(raw: Json): BookSummary {
     const key = this.key(raw);
     const media = object(raw.media);
-    const meta = object(media.metadata);
+    const meta = optionalObject(media.metadata) ?? {};
     const hasEbook = Boolean(media.ebookFile || media.ebookFormat);
     const audioTrackCount = number(media.numTracks ?? media.numAudioFiles ??
       (Array.isArray(media.tracks) ? media.tracks.length : Array.isArray(media.audioFiles) ? media.audioFiles.length : 0));
@@ -219,8 +223,9 @@ export class AbsClient {
     const tracks: BookItem['tracks'] = [];
     let offset = 0;
     let validTimeline = true;
-    for (const value of array(media.tracks ?? [])) {
-      const track = object(value);
+    for (const value of optionalArray(media.tracks)) {
+      const track = optionalObject(value);
+      if (!track) { validTimeline = false; break; }
       const file = typeof track.ino === 'string' ? byIno.get(track.ino) : undefined;
       const duration = typeof track.duration === 'number' ? track.duration : NaN;
       const startOffset = typeof track.startOffset === 'number' ? track.startOffset : NaN;
@@ -233,9 +238,9 @@ export class AbsClient {
     if (!validTimeline) tracks.length = 0;
     let chapters: BookItem['chapters'] = [];
     let previous = 0;
-    for (const value of array(media.chapters ?? [])) {
-      const chapter = object(value);
-      if (typeof chapter.start !== 'number' || typeof chapter.end !== 'number' ||
+    for (const value of optionalArray(media.chapters)) {
+      const chapter = optionalObject(value);
+      if (!validTimeline || !chapter || typeof chapter.start !== 'number' || typeof chapter.end !== 'number' ||
           !Number.isFinite(chapter.start) || !Number.isFinite(chapter.end) || chapter.start < previous ||
           chapter.end <= chapter.start || chapter.end > offset + 0.05) { chapters = []; break; }
       chapters.push({ id: String(chapter.id), title: text(chapter.title, 500), start: chapter.start, end: chapter.end });

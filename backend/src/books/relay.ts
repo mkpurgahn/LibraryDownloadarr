@@ -42,6 +42,13 @@ function matchesIfRange(header: string | string[] | undefined, representation: B
   return !!representation.lastModified && Number.isFinite(Date.parse(header)) &&
     Date.parse(header) === Date.parse(representation.lastModified);
 }
+function wellFormedSingleRange(header: string | undefined): boolean {
+  if (!header?.startsWith('bytes=')) return false;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match || (!match[1] && !match[2])) return false;
+  if ([match[1], match[2]].some(value => value && !Number.isSafeInteger(Number(value)))) return false;
+  return !match[1] || !match[2] || Number(match[1]) <= Number(match[2]);
+}
 function dispositionHeader(name: string, disposition: 'inline' | 'attachment'): string {
   const safe = name.replace(/["\\\r\n]/g, '_').replace(/[^\x20-\x7e]/g, '_');
   const encoded = encodeURIComponent(name).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -129,7 +136,9 @@ export class BooksRelay {
           !['application/pdf', 'audio/mpeg', 'audio/mp4', 'audio/x-m4b'].includes(checked.mime))) {
         throw new BooksError(422, 'BOOK_DOWNLOAD_ONLY', 'This original is download-only');
       }
-      const range = parseRange(req.headers.range, checked.file.size);
+      const conditionalRestart = !matchesIfRange(req.headers['if-range'], checked.representation) &&
+        wellFormedSingleRange(req.headers.range);
+      const range = parseRange(conditionalRestart ? undefined : req.headers.range, checked.file.size);
       if (range === 'invalid') {
         res.setHeader('Content-Range', `bytes */${checked.file.size}`);
         res.status(416).end();

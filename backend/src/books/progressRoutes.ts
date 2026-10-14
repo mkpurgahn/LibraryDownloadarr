@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import { DatabaseService } from '../models/database';
 import { logger } from '../utils/logger';
 import { BookItem } from './types';
@@ -43,17 +43,40 @@ export function createBooksProgressRouter(
   principal?: (req: AuthRequest) => BooksPrincipal
 ): Router {
   const router = Router();
-  router.get('/items/:itemId/progress/:mode', bookHandler(async (req, res, signal) => {
-    if (!req.user) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
+  const authorizedHandler = (handler: (
+    req: AuthRequest, res: Response, signal: AbortSignal, identity: BooksPrincipal, check: () => void
+  ) => Promise<unknown>) => bookHandler(async (req, res, signal) => {
+    const identity = principal?.(req);
+    if (!identity || req.user?.id !== identity.userId) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
+    const check = () => {
+      const session = db.getSessionById(identity.sessionId);
+      if (!session || session.userId !== identity.userId) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
+    };
+    check();
+    const controller = new AbortController();
+    const unsubscribe = db.onSessionRevoked(id => { if (id === identity.sessionId) controller.abort(); });
+    const expiry = setTimeout(() => controller.abort(), Math.max(0, Math.min(2147483647, identity.expiresAt - Date.now())));
+    expiry.unref();
+    try {
+      return await handler(req, res, AbortSignal.any([signal, controller.signal]), identity, check);
+    } catch (error) {
+      check();
+      throw error;
+    } finally {
+      clearTimeout(expiry); unsubscribe();
+    }
+  });
+  router.get('/items/:itemId/progress/:mode', authorizedHandler(async (req, res, signal, identity, check) => {
     if (!['ebook', 'audio'].includes(req.params.mode) ||
         Object.keys(req.query).some(key => key !== 'editionId')) throw invalidInput();
     const editionId = opaqueSegment(req.query.editionId);
-    const { item } = await catalog.authorizeItem(req.user.id, req.params.itemId, signal);
+    const { item } = await catalog.authorizeItem(identity.userId, req.params.itemId, signal);
     const mode = req.params.mode as 'ebook' | 'audio';
     const key: ProgressKey = {
       providerInstanceId: item.providerInstanceId, libraryId: item.libraryId, itemId: item.itemId,
-      userId: req.user.id, mode, editionId,
+      userId: identity.userId, mode, editionId,
     };
+    check();
     const progress = db.booksProgress.read(key);
     const edition = currentEdition(item, mode, editionId);
     if (!edition && !progress) throw notFound();
@@ -64,19 +87,19 @@ export function createBooksProgressRouter(
       : history.length === 0));
     return res.json({ progress: progress ?? null, compatible, history, edition: edition ?? null });
   }));
-  router.put('/items/:itemId/progress/:mode', bookHandler(async (req, res, signal) => {
-    if (!req.user) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
+  router.put('/items/:itemId/progress/:mode', authorizedHandler(async (req, res, signal, identity, check) => {
     if (!['ebook', 'audio'].includes(req.params.mode) || !req.body || typeof req.body !== 'object' || Array.isArray(req.body)) throw invalidInput();
     const { editionId: rawEdition, ...input } = req.body as Record<string, unknown>;
     const editionId = opaqueSegment(rawEdition);
     const write = progressWrite(input);
     const mode = req.params.mode as 'ebook' | 'audio';
     if ((mode === 'audio') !== (write.locator.kind === 'audio')) throw invalidInput();
-    const { item, configGeneration } = await catalog.authorizeItem(req.user.id, req.params.itemId, signal);
+    const { item, configGeneration } = await catalog.authorizeItem(identity.userId, req.params.itemId, signal);
     const key: ProgressKey = {
       providerInstanceId: item.providerInstanceId, libraryId: item.libraryId, itemId: item.itemId,
-      userId: req.user.id, mode, editionId,
+      userId: identity.userId, mode, editionId,
     };
+    check();
     const edition = currentEdition(item, mode, editionId);
     const current = db.booksProgress.read(key);
     if (!edition && !current) throw notFound();
@@ -84,11 +107,12 @@ export function createBooksProgressRouter(
       return res.status(409).json({ code: 'BOOK_VERSION_CHANGED', error: 'The original changed; choose a new position', canonical: current ?? null });
     }
     const original = item.files.find(file => file.fileId === editionId);
-    const valid = write.locator.kind === 'epub' && original?.extension === 'epub' && preparation && principal
-      ? await preparation.validateLocator(principal(req), {
+    const valid = write.locator.kind === 'epub' && original?.extension === 'epub' && preparation
+      ? await preparation.validateLocator(identity, {
         itemId: item.itemId, fileId: editionId, contentVersion: original.contentVersion,
       }, write.locator, signal)
       : await validateProgressLocator(item, editionId, write);
+    check();
     if (!valid) {
       throw new BooksError(422, 'BOOK_PROGRESS_LOCATION_UNSUPPORTED', 'Cannot save this position for the current original');
     }

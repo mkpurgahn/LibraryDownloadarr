@@ -1,4 +1,4 @@
-import { Router, Response, NextFunction } from 'express';
+import { Router, Response, NextFunction, RequestHandler } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { DatabaseService } from '../models/database';
 import { logger } from '../utils/logger';
@@ -68,9 +68,7 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
   }));
   router.use((req: AuthRequest, res, next) => {
     const mutating = !['GET', 'HEAD'].includes(req.method);
-    const force = req.path.startsWith('/downloads/') || req.path.endsWith('/content') || req.path === '/download-tickets' ||
-      req.path.startsWith('/readers/') || req.path.endsWith('/reader');
-    void (mutating ? auth.requireBooksMutation(req, false, force) : auth.authenticateBooks(req, force)).then(principal => {
+    void (mutating ? auth.requireBooksMutation(req) : auth.authenticateBooks(req, false)).then(principal => {
       catalog.current();
       (mutating ? (/\/progress\/(ebook|audio)$/.test(req.path) ? positions : mutations) : reads).take(principal.userId);
       principals.set(req, principal);
@@ -79,6 +77,12 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
       next();
     }).catch(error => booksError(error, res));
   });
+  const freshMembership: RequestHandler = (req, res, next) => {
+    void auth.authenticateBooks(req, true).then(principal => {
+      principals.set(req, principal);
+      next();
+    }).catch(error => booksError(error, res));
+  };
   router.delete('/media-session', bookHandler(async (req, res) => {
     const principal = principals.get(req)!;
     auth.clear(res, principal);
@@ -86,16 +90,16 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
     preparation.revokeSession(principal.sessionId);
     return res.status(204).end();
   }));
-  router.post('/download-tickets', bookHandler(async (req, res, signal) => {
+  router.post('/download-tickets', freshMembership, bookHandler(async (req, res, signal) => {
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) ||
         Object.keys(req.body).some(key => key !== 'targets')) throw invalidInput();
     return res.json({ results: await tickets.issue(principals.get(req)!, req.body.targets, signal) });
   }));
-  router.get('/downloads/:ticket', bookHandler(async (req, res) => {
+  router.get('/downloads/:ticket', freshMembership, bookHandler(async (req, res) => {
     const principal = principals.get(req)!;
     await relay.relayOriginal(req, res, principal, tickets.resolve(principal, req.params.ticket), 'attachment');
   }));
-  router.get('/items/:itemId/files/:fileId/content', bookHandler(async (req, res) => {
+  router.get('/items/:itemId/files/:fileId/content', freshMembership, bookHandler(async (req, res) => {
     if (Object.keys(req.query).some(key => key !== 'version')) throw invalidInput();
     const target = bookTarget({ itemId: req.params.itemId, fileId: req.params.fileId, contentVersion: req.query.version });
     await relay.relayOriginal(req, res, principals.get(req)!, target, 'inline');
@@ -113,7 +117,7 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
     const { body, mime } = await catalog.cover(req.user!.id, req.params.itemId, signal);
     return res.type(mime).send(body);
   }));
-  router.use(createEpubRouter(preparation, req => principals.get(req)!));
+  router.use(createEpubRouter(preparation, req => principals.get(req)!, freshMembership));
   router.use(createBooksProgressRouter(db, catalog, preparation, req => principals.get(req)!));
   router.use((_req, res) => res.status(404).json({ error: 'Book not found', code: 'BOOK_NOT_FOUND' }));
   return router;

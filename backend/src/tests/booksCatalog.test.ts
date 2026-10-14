@@ -57,7 +57,8 @@ async function fixture() {
   let denied = false;
   let special: 'redirect' | 'oversized' | undefined;
   const fileRequests: Array<{ method?: string; range?: string; ifRange?: string | string[]; path: string }> = [];
-  let responseItem = rawItem();
+  let responseItem: Record<string, unknown> = rawItem();
+  let mixedSearch = false;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url!, 'http://fixture');
     requests.push(url);
@@ -78,7 +79,10 @@ async function fixture() {
     }
     res.setHeader('Content-Type', 'application/json');
     if (url.pathname.endsWith('/search')) {
-      res.end(JSON.stringify({ book: [{ libraryItem: responseItem }], authors: [{ name: 'Not a book' }] }));
+      res.end(JSON.stringify({
+        book: (mixedSearch ? [responseItem, rawItem('item-b')] : [responseItem]).map(libraryItem => ({ libraryItem })),
+        authors: [{ name: 'Not a book' }],
+      }));
     } else if (url.pathname.endsWith('/items')) {
       res.end(JSON.stringify({ results: [responseItem, rawItem('item-b')], total: 2, page: 0, limit: 50 }));
     } else if (url.pathname === '/api/libraries') {
@@ -105,7 +109,8 @@ async function fixture() {
     repo, sqlite, client, catalog, config: repo.readConfig()!, requests, fileRequests,
     deny: () => { denied = true; },
     respond: (mode: typeof special) => { special = mode; },
-    replace: (item: ReturnType<typeof rawItem>) => { responseItem = item; },
+    replace: (item: Record<string, unknown>) => { responseItem = item; },
+    mixedSearch: () => { mixedSearch = true; },
     async close() {
       sqlite.close();
       server.closeAllConnections();
@@ -176,6 +181,47 @@ test('dual_item_keeps_independent_actions', async () => {
     assert.notEqual((await f.client.item('item-a', signal())).files[0].contentVersion, item.files[0].contentVersion);
   } finally { await f.close(); }
 });
+
+for (const invalid of ['metadata', 'authors', 'narrators', 'series', 'chapters', 'tracks', 'chapter-list', 'track-list'] as const) {
+  test(`optional_${invalid}_does_not_poison_catalog_or_original_authority`, async () => {
+    const f = await fixture();
+    try {
+      const control = await f.catalog.authorizeItem('user', 'item-a', signal());
+      const raw = rawItem();
+      const media: Record<string, unknown> = raw.media;
+      const meta: Record<string, unknown> = raw.media.metadata;
+      if (invalid === 'metadata') media.metadata = null;
+      else if (['authors', 'narrators', 'series'].includes(invalid)) meta[invalid] = [null, 17, {}, { name: 'Known name' }];
+      else if (invalid === 'chapter-list') media.chapters = 'unavailable';
+      else if (invalid === 'track-list') media.tracks = 'unavailable';
+      else media[invalid] = [null];
+      f.replace(raw); f.mixedSearch();
+      const page = await f.catalog.list('user', libraryId, boundedQuery({}), signal());
+      assert.deepEqual(page.items.map(item => item.itemId), ['item-a', 'item-b']);
+      assert.equal(page.items[1].title, 'A dual book');
+      const matches = await f.catalog.search('user', libraryId, 'dual', signal());
+      assert.deepEqual(matches.map(item => item.itemId), ['item-a', 'item-b']);
+      const { item } = await f.catalog.authorizeItem('user', 'item-a', signal());
+      assert.equal(item.title, invalid === 'metadata' ? 'Untitled' : 'A dual book');
+      assert.equal(item.read.available, true);
+      assert.equal(item.listen.available, invalid !== 'tracks' && invalid !== 'track-list');
+      if (invalid === 'chapters' || invalid === 'chapter-list' || invalid === 'tracks' || invalid === 'track-list') {
+        assert.deepEqual(item.chapters, []);
+      }
+      if (invalid === 'authors') assert.deepEqual(item.authors, ['Known name']);
+      assert.deepEqual(item.files, control.item.files, 'Optional metadata must not change original identity/version');
+      for (const file of item.files) {
+        const resolved = await f.catalog.resolveFile('user', item.itemId, file.fileId, file.contentVersion, signal());
+        assert.equal(resolved.file.available, true);
+        assert.deepEqual(resolved.file, file);
+      }
+      f.replace({ ...raw, libraryId: 'unselected' });
+      await assert.rejects(f.catalog.authorizeItem('user', 'item-a', signal()), { status: 404 });
+      f.replace({ ...raw, libraryFiles: [raw.libraryFiles[0], raw.libraryFiles[0]] });
+      await assert.rejects(f.catalog.authorizeItem('user', 'item-a', signal()), { status: 502, code: 'ABS_AMBIGUOUS_MANIFEST' });
+    } finally { await f.close(); }
+  });
+}
 
 test('secrets_and_paths_never_leave_backend', async () => {
   const f = await fixture();
