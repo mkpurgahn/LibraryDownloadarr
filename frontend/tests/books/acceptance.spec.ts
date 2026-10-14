@@ -24,7 +24,7 @@ async function managedDual(page: Page, app: BooksApp) {
   expect(item.providerInstanceId).toBe(app.binding?.providerInstanceId);
   await page.goto(`${app.origin}/books/items/${item.itemId}`);
   await expect(page.getByRole('heading', { name: item.title, exact: true })).toBeVisible();
-  return { item, ebook, handoffSha256: createHash('sha256').update(bytes).digest('hex') };
+  return { item, ebook, manifest, handoffSha256: createHash('sha256').update(bytes).digest('hex') };
 }
 
 test.describe('frozen managed consumer', () => {
@@ -122,6 +122,35 @@ test.describe('frozen managed consumer', () => {
     await fs.writeFile(info.outputPath('managed-reader.json'), JSON.stringify({
       handoffSha256, candidate: app.candidate, itemId: item.itemId, fileId: mapped.fileId,
       absIno: ebook.absIno, sourceSha256: ebook.sha256, rendered: true,
+    }, null, 2));
+  });
+
+  test('managed_native_original_saves_without_replacing_the_app', async ({ page, app }, info) => {
+    const { item, manifest, handoffSha256 } = await managedDual(page, app);
+    const expected = manifest.files.find(file => file.absItemId === item.itemId && file.role === 'audio' &&
+      file.relativePath.endsWith('.mp3') && file.size <= 1024 * 1024);
+    expect(expected).toBeDefined();
+    const mapped = app.fileMap!.find(file => file.absItemId === expected!.absItemId && file.absIno === expected!.absIno)!;
+    const original = item.files.find(file => file.fileId === mapped.fileId)!;
+    const downloading = page.waitForEvent('download', { timeout: 10000 });
+    await page.getByRole('button', { name: `Download original ${original.basename}`, exact: true }).click();
+    const download = await downloading;
+    await download.saveAs(info.outputPath('managed-native-original.bin'));
+    expect(await download.failure()).toBeNull();
+    const bytes = await fs.readFile(info.outputPath('managed-native-original.bin'));
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    expect(bytes.length).toBe(expected!.size);
+    expect(sha256).toBe(expected!.sha256);
+    await expect(page).toHaveURL(`${app.origin}/books/items/${item.itemId}`);
+    await expect(page.getByRole('heading', { name: item.title, exact: true })).toBeVisible();
+    await expect(page.getByText('Started', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('Complete', { exact: true })).toHaveCount(0);
+    expect(page.context().pages()).toHaveLength(1);
+    await capture(page, 'managed-native-original-retained-app', info);
+    await fs.writeFile(info.outputPath('managed-native-original.json'), JSON.stringify({
+      candidate: app.candidate, handoffSha256, itemId: item.itemId, fileId: mapped.fileId,
+      sourceBasename: original.basename, suggestedFilename: download.suggestedFilename(),
+      bytes: bytes.length, sha256, appRetained: true, popupCount: 0,
     }, null, 2));
   });
 

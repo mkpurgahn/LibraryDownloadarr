@@ -158,8 +158,12 @@ have explicit **Save file** actions. This avoids silently exceeding stream limit
 when native browser completion cannot be observed. Expired links can be renewed
 per file. A valid manual Save changes only that row to **Started**, never Complete;
 expired or cancelled handoffs remain ready for renewal or another attempt.
-Native transfers use the server's attachment headers, including UTF-8
-filenames, rather than relying on the HTML `download` attribute.
+Same-origin Books handoffs use one hidden, script-disabled download frame so
+media-capable browsers do not replace the application with an inline original.
+The frame is cleared on session/configuration changes and page exit. The server's attachment
+headers, including UTF-8 filenames, remain authoritative; a browser may adapt
+its suggested local filename. Cancelled automatic handoffs expose an explicit
+Save action without being marked Started.
 
 Books queue rows/tickets and in-memory protected views are cleared on user or
 session change, including changes in another tab. Existing user-scoped Plex jobs

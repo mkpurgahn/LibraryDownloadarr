@@ -1,4 +1,5 @@
-import { booksApi, booksErrorMessage } from './api';
+import { booksApi, booksErrorMessage, BOOKS_CHANGED_EVENT } from './api';
+import { SESSION_CHANGED_EVENT } from '../stores/authStore';
 
 export type DownloadSource =
   { source: 'plex'; ratingKey: string; partKey: string } |
@@ -11,11 +12,40 @@ export type BookQueueItem = Extract<DownloadSource, { source: 'abs' }> & {
 const queueId = (target: BookDownloadTarget) =>
   `abs-${target.providerInstanceId}-${target.libraryId}-${target.itemId}-${target.fileId}-${target.contentVersion}`;
 
+let downloadFrame: HTMLIFrameElement | undefined;
+export function bookDownloadTarget(): string {
+  if (!downloadFrame) {
+    const frame = document.createElement('iframe');
+    frame.name = `books-download-${crypto.randomUUID()}`;
+    frame.title = 'Books original download';
+    frame.hidden = true;
+    // Allow session cookies and native downloads, but never book scripts, plugins or top navigation.
+    frame.sandbox.add('allow-same-origin', 'allow-downloads');
+    document.body.appendChild(frame);
+    downloadFrame = frame;
+    const clear = () => {
+      frame.remove(); downloadFrame = undefined;
+      window.removeEventListener(SESSION_CHANGED_EVENT, clear);
+      window.removeEventListener(BOOKS_CHANGED_EVENT, clear);
+      window.removeEventListener('pagehide', clear);
+    };
+    window.addEventListener(SESSION_CHANGED_EVENT, clear);
+    window.addEventListener(BOOKS_CHANGED_EVENT, clear);
+    window.addEventListener('pagehide', clear);
+  }
+  return downloadFrame.name;
+}
+
 function handoff(url: string): void {
   const anchor = document.createElement('a');
-  anchor.href = url; anchor.rel = 'noopener';
+  anchor.href = url; anchor.target = bookDownloadTarget();
+  const observed: { event?: MouseEvent } = {};
+  anchor.addEventListener('click', event => { observed.event = event; }, { once: true });
   document.body.appendChild(anchor);
-  try { anchor.click(); } finally { anchor.remove(); }
+  try {
+    anchor.click();
+    if (!observed.event || observed.event.defaultPrevented) throw new Error('Browser download handoff cancelled');
+  } finally { anchor.remove(); }
 }
 
 export async function startBookDownloads(

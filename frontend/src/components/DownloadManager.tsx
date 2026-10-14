@@ -1,6 +1,6 @@
 import React from 'react';
 import { useDownloads } from '../contexts/DownloadContext';
-import { BookQueueItem } from '../books/downloads';
+import { BookQueueItem, bookDownloadTarget } from '../books/downloads';
 import { booksErrorMessage } from '../books/api';
 
 function BookDownloadRow({ item, dismiss, retry, started }: {
@@ -36,6 +36,8 @@ function BookDownloadRow({ item, dismiss, retry, started }: {
               event.preventDefault(); setNotice('This link expired. Renew it before saving.');
               return;
             }
+            if (event.defaultPrevented) return;
+            event.currentTarget.target = bookDownloadTarget();
             const nativeEvent = event.nativeEvent;
             const url = item.manualUrl!;
             window.setTimeout(() => { if (!nativeEvent.defaultPrevented) started(url); }, 0);

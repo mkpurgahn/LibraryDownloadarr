@@ -2,6 +2,7 @@ import { test, expect, signIn, capture, originalDownload } from './harness';
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { PNG } from 'pngjs';
+import { parseBookItem } from '../../src/books/types';
 
 function luminance(rgb: number[]): number {
   const values = rgb.map(value => {
@@ -75,6 +76,8 @@ test('books_keyboard_navigation_and_narrow_layout_are_usable', async ({ page, ap
 test('book_download_never_uses_plex_adapter', async ({ page, app }, info) => {
   const batches: number[] = [];
   let plexDownloads = 0;
+  let nativeDownloads = 0;
+  page.on('download', () => { nativeDownloads += 1; });
   page.on('request', request => {
     const pathname = new URL(request.url()).pathname;
     if (pathname === '/api/books/download-tickets') {
@@ -85,13 +88,80 @@ test('book_download_never_uses_plex_adapter', async ({ page, app }, info) => {
   });
   await signIn(page, app);
   await page.getByRole('link', { name: 'Open One Hundred and One Tracks', exact: true }).click();
+  const downloading = page.waitForEvent('download', { timeout: 10000 });
   await page.getByRole('button', { name: 'Prepare all downloads' }).click();
+  const file = await downloading;
+  await file.saveAs(info.outputPath('collection-first-original.bin'));
+  expect(await file.failure()).toBeNull();
+  const bytes = await fs.readFile(info.outputPath('collection-first-original.bin'));
+  expect(bytes.length).toBe(1376);
+  expect(createHash('sha256').update(bytes).digest('hex')).toBe('336ecdb8b42605af02328146db964bb04d1ab3981d2c13b8bf3fdda99c6b682c');
+  expect(new URL(file.url()).origin).toBe(app.origin);
   await expect.poll(() => batches).toEqual([100, 1]);
   expect(plexDownloads).toBe(0);
+  await expect(page).toHaveURL(`${app.origin}/books/items/collection`);
+  await expect(page.getByRole('heading', { name: 'One Hundred and One Tracks', exact: true })).toBeVisible();
+  const rows = page.getByRole('complementary', { name: 'Download activity' }).locator('section');
+  await expect(rows).toHaveCount(101);
+  await expect(page.getByText('Ready to save', { exact: true })).toHaveCount(100);
+  const transport = page.locator('iframe[title="Books original download"]');
+  await expect(transport).toHaveCount(1);
+  await expect(transport).toHaveAttribute('sandbox', 'allow-same-origin allow-downloads');
+  await expect(transport).toBeHidden();
+  expect(page.context().pages()).toHaveLength(1);
+  expect(nativeDownloads).toBe(1);
   await expect(page.getByText('Started', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Complete', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Save file', exact: true }).first()).toBeVisible();
   await capture(page, 'batch-handoff', info);
+  await page.getByRole('button', { name: 'Dismiss Books download', exact: true }).first().click();
+  await expect(rows).toHaveCount(100);
+  await expect(page).toHaveURL(`${app.origin}/books/items/collection`);
+  expect(nativeDownloads).toBe(1);
+  await fs.writeFile(info.outputPath('batch-native-contract.json'), JSON.stringify({
+    bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+    nativeDownloads, preparedRows: 101, retainedReadyRows: 100, queueControlWorked: true, appRetained: true,
+  }, null, 2));
+});
+
+test('blocked_automatic_original_has_safe_explicit_save_recovery', async ({ page, app }, info) => {
+  await signIn(page, app);
+  await page.getByRole('link', { name: 'Open One Hundred and One Tracks', exact: true }).click();
+  let nativeDownloads = 0;
+  page.on('download', () => { nativeDownloads += 1; });
+  await page.evaluate(() => {
+    document.addEventListener('click', event => {
+      const anchor = event.target instanceof Element ? event.target.closest('a') : null;
+      if (!event.isTrusted && anchor && new URL(anchor.href).pathname.startsWith('/api/books/downloads/')) {
+        event.preventDefault();
+        document.documentElement.dataset.blockedBooksHandoffs = String(Number(document.documentElement.dataset.blockedBooksHandoffs ?? 0) + 1);
+      }
+    }, true);
+  });
+  await page.getByRole('button', { name: 'Prepare all downloads' }).click();
+  const rows = page.getByRole('complementary', { name: 'Download activity' }).locator('section');
+  await expect(rows).toHaveCount(101);
+  await expect(rows.first().getByText('Your browser needs a direct click. Use Save file below.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Started', { exact: true })).toHaveCount(0);
+  await expect(page).toHaveURL(`${app.origin}/books/items/collection`);
+  expect(await page.evaluate(() => document.documentElement.dataset.blockedBooksHandoffs)).toBe('1');
+  expect(nativeDownloads).toBe(0);
+  const downloading = page.waitForEvent('download', { timeout: 10000 });
+  await rows.first().getByRole('link', { name: 'Save file', exact: true }).click({ noWaitAfter: true });
+  const file = await downloading;
+  await file.saveAs(info.outputPath('recovered-original.bin'));
+  expect(await file.failure()).toBeNull();
+  const bytes = await fs.readFile(info.outputPath('recovered-original.bin'));
+  expect(bytes.length).toBe(1376);
+  expect(createHash('sha256').update(bytes).digest('hex')).toBe('336ecdb8b42605af02328146db964bb04d1ab3981d2c13b8bf3fdda99c6b682c');
+  await expect(page).toHaveURL(`${app.origin}/books/items/collection`);
+  await expect(page.getByRole('heading', { name: 'One Hundred and One Tracks', exact: true })).toBeVisible();
+  await expect(rows).toHaveCount(101);
+  await expect(rows.first().getByText('Started', { exact: true })).toBeVisible();
+  await expect(page.getByText('Ready to save', { exact: true })).toHaveCount(100);
+  await expect(page.getByText('Complete', { exact: true })).toHaveCount(0);
+  expect(nativeDownloads).toBe(1);
+  await capture(page, 'blocked-auto-manual-recovery', info);
 });
 
 test('native_batch_is_started_not_complete', async ({ page, app }, info) => {
@@ -109,7 +179,7 @@ test('native_batch_is_started_not_complete', async ({ page, app }, info) => {
   await capture(page, 'native-handoff', info);
 });
 
-test('prepared_original_has_an_explicit_native_save_action', async ({ page, app }, info) => {
+test('prepared_original_has_an_explicit_native_save_action', async ({ page, app, browserName }, info) => {
   await signIn(page, app);
   await page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true }).click();
   const first = await originalDownload(page, () => page.getByRole('button', { name: 'Prepare all downloads' }).click(), info);
@@ -119,14 +189,34 @@ test('prepared_original_has_an_explicit_native_save_action', async ({ page, app 
   const download = page.waitForEvent('download', { timeout: 10000 });
   await link.click();
   const file = await download;
-  expect(file.suggestedFilename()).toBe('A Tale in Two Formats 2.pdf');
+  const allowedNames = process.platform !== 'win32' && browserName === 'webkit'
+    ? ['A Tale in Two Formats 2.pdf', 'A_Tale_in_Two_Formats_2.pdf'] : ['A Tale in Two Formats 2.pdf'];
+  expect(allowedNames).toContain(file.suggestedFilename());
   await file.saveAs(info.outputPath('explicit-original.bin'));
+  expect(await file.failure()).toBeNull();
+  const bytes = await fs.readFile(info.outputPath('explicit-original.bin'));
+  expect(bytes.length).toBe(2764);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  expect(sha256).toBe('aecf044dd110f22404976cd5728757da18fe7c0e626ae0f4b6eb871b8cbfccce');
+  const book = parseBookItem(await (await page.request.get(`${app.origin}/api/books/items/dual`)).json());
+  expect(book.files.find(file => file.extension === 'pdf')?.basename).toBe('A Tale in Two Formats 2.pdf');
+  const head = await page.request.head(file.url());
+  expect(head.status()).toBe(200);
+  expect(head.headers()['content-disposition']).toBe('attachment; filename="A Tale in Two Formats 2.pdf"; filename*=UTF-8\'\'A%20Tale%20in%20Two%20Formats%202.pdf');
+  expect(head.headers()['content-type']).toBe('application/pdf');
+  expect(head.headers()['content-length']).toBe('2764');
   const rows = page.getByRole('complementary', { name: 'Download activity' }).locator('section');
   await expect(rows.nth(1).getByText('Started', { exact: true })).toBeVisible();
   await expect(rows.nth(2).getByText('Ready to save', { exact: true })).toBeVisible();
   await expect(rows.nth(3).getByText('Ready to save', { exact: true })).toBeVisible();
   await expect(page.getByText('Started', { exact: true })).toHaveCount(2);
   await expect(page.getByText('Complete', { exact: true })).toHaveCount(0);
+  await expect(page).toHaveURL(`${app.origin}/books/items/dual`);
+  await fs.writeFile(info.outputPath('manual-download-contract.json'), JSON.stringify({
+    sourceBasename: 'A Tale in Two Formats 2.pdf', suggestedFilename: file.suggestedFilename(),
+    contentDisposition: head.headers()['content-disposition'], bytes: bytes.length, sha256,
+    appRetained: true, startedRows: 2, readyRows: 2,
+  }, null, 2));
   await capture(page, 'manual-original-started', info);
 });
 
@@ -156,9 +246,11 @@ test('user_change_clears_book_state', async ({ page, context, app }, info) => {
   await page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true }).click();
   await page.getByRole('button', { name: /Download original/ }).first().click();
   await expect(page.getByRole('complementary', { name: 'Download activity' })).toBeVisible();
+  await expect(page.locator('iframe[title="Books original download"]')).toHaveCount(1);
   const second = await context.newPage();
   await signIn(second, app, 1);
   await expect(page.getByRole('complementary', { name: 'Download activity' })).toHaveCount(0);
+  await expect(page.locator('iframe[title="Books original download"]')).toHaveCount(0);
   await second.evaluate(() => { localStorage.removeItem('token'); });
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByRole('heading', { name: 'A Tale in Two Formats', exact: true })).toHaveCount(0);
