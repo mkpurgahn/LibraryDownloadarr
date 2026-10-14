@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { MediaItem } from '../types';
 import { api } from '../services/api';
 import { FilmIcon, TvIcon } from './Icons';
@@ -10,6 +10,8 @@ interface MediaCardProps {
 
 export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick }) => {
   const thumbnailUrl = media.thumb ? api.getThumbnailUrl(media.ratingKey, media.thumb) : null;
+  const [missingArtwork, setMissingArtwork] = useState(false);
+  useEffect(() => setMissingArtwork(false), [thumbnailUrl]);
 
   // Format display info based on media type
   const getDisplayInfo = () => {
@@ -51,45 +53,38 @@ export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick }) => {
   const { title, subtitle, meta } = getDisplayInfo();
 
   return (
-    <div
+    <button
+      type="button"
       onClick={onClick}
-      className="card cursor-pointer transition-all duration-300 hover:scale-105 hover:shadow-2xl group"
+      aria-label={[title, subtitle, meta, media.contentRating].filter(Boolean).join(' - ')}
+      className="media-card group min-w-0 text-left"
     >
-      <div className="relative aspect-[2/3] bg-dark-200">
-        {thumbnailUrl ? (
+      <div className="relative aspect-[2/3] overflow-hidden rounded-xl bg-dark-200">
+        {thumbnailUrl && !missingArtwork ? (
           <img
             src={thumbnailUrl}
-            alt={media.title}
+            alt=""
             className="w-full h-full object-cover"
             loading="lazy"
+            onError={() => setMissingArtwork(true)}
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center text-gray-600">
+          <div className="w-full h-full flex flex-col gap-3 items-center justify-center px-3 text-center text-gray-400">
             {media.type === 'movie' ? (
               <FilmIcon className="h-10 w-10" />
             ) : (
               <TvIcon className="h-10 w-10" />
             )}
+            <span className="text-sm">No artwork</span>
           </div>
         )}
-
-        {/* Overlay on hover */}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
-          <h3 className="font-semibold text-sm line-clamp-2 mb-1">{title}</h3>
-          {subtitle && <p className="text-xs text-gray-300 line-clamp-2">{subtitle}</p>}
-          {meta && <p className="text-xs text-gray-400 mt-1">{meta}</p>}
-          {media.contentRating && (
-            <span className="text-xs text-gray-400 mt-1">{media.contentRating}</span>
-          )}
-        </div>
       </div>
-
-      {/* Title below card (always visible) */}
-      <div className="p-3">
-        <h3 className="font-medium text-sm line-clamp-1">{title}</h3>
-        {subtitle && <p className="text-xs text-gray-400 mt-1 line-clamp-1">{subtitle}</p>}
-        {!subtitle && meta && <p className="text-xs text-gray-400 mt-1">{meta}</p>}
+      <div className="pt-3">
+        <h3 className="break-words text-base font-semibold leading-snug group-hover:text-primary-300">{title}</h3>
+        {subtitle && <p className="mt-1 break-words text-sm leading-relaxed text-gray-400">{subtitle}</p>}
+        {meta && <p className="mt-1 text-sm text-gray-400">{meta}</p>}
+        {media.contentRating && <p className="mt-1 text-sm text-gray-400">{media.contentRating}</p>}
       </div>
-    </div>
+    </button>
   );
 };

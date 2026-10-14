@@ -25,6 +25,17 @@ LibraryDownloadarr is a modern, self-hosted web application that provides a beau
 
 ---
 
+## Library navigation
+
+Home links directly to the available libraries. Books appears under **Libraries**
+alongside Movies, TV Shows, and other Plex libraries when Books is enabled and
+accessible. The two sources load independently: Plex loading or an outage does
+not hide Books, and unavailable Books does not hide Plex.
+
+**Recently Added** and the header search are Plex-only; Books has its own search.
+Download totals and Settings are compact owner-only Home utilities. Download
+History, Logs, and Settings remain under **Management** in the sidebar.
+
 ## Books preview (disabled by default)
 
 The Books subsystem uses Audiobookshelf 2.30.0 as its catalog, independently of

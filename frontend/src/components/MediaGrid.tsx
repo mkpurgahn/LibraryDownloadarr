@@ -28,7 +28,7 @@ export const MediaGrid: React.FC<MediaGridProps> = ({ media, isLoading }) => {
   }
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-4">
+    <div className="media-grid grid items-start gap-x-4 gap-y-6 md:gap-x-5 md:gap-y-8">
       {media.map((item) => (
         <MediaCard
           key={item.ratingKey}

@@ -29,13 +29,16 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
       paddingTop: 'calc(0.75rem + env(safe-area-inset-top))',
       paddingBottom: '0.75rem',
     }}>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2 md:gap-3">
           {/* Hamburger Menu Button (Mobile) */}
           {onMenuClick && (
             <button
-              onClick={onMenuClick}
-              className="md:hidden p-2 hover:bg-dark-200 rounded-lg transition-colors"
+              onClick={event => {
+                event.currentTarget.focus();
+                onMenuClick();
+              }}
+              className="header-control md:hidden p-2 hover:bg-dark-200 rounded-lg transition-colors"
               aria-label="Toggle menu"
             >
               <svg
@@ -52,18 +55,19 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
             </button>
           )}
 
-          <h1 className="text-xl md:text-2xl font-bold bg-gradient-to-r from-primary-500 to-secondary-500 bg-clip-text text-transparent">
+          <h1 className="min-w-0 break-words text-base font-bold text-primary-300 sm:text-xl md:text-2xl">
             LibraryDownloadarr
           </h1>
         </div>
 
-        <div className="flex items-center space-x-2 md:space-x-4">
+        <div className="flex min-w-0 max-w-full items-center gap-1 md:gap-4">
           {/* Desktop Search Bar */}
-          <div className="hidden md:block">
+          <div className="hidden min-w-0 md:block">
             <input
               type="text"
               placeholder="Search media..."
-              className="input w-64"
+              aria-label="Search Plex media"
+              className="input w-64 max-w-full placeholder:text-gray-400"
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   handleSearch(e.currentTarget.value);
@@ -75,7 +79,7 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
           {/* Mobile Search Button */}
           <button
             onClick={() => setShowMobileSearch(!showMobileSearch)}
-            className="md:hidden p-2 hover:bg-dark-200 rounded-lg transition-colors"
+            className="header-control md:hidden p-2 hover:bg-dark-200 rounded-lg transition-colors"
             aria-label="Search"
           >
             <svg
@@ -95,9 +99,11 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
           <div className="relative">
             <button
               onClick={() => setShowMenu(!showMenu)}
-              className="flex items-center space-x-2 px-2 md:px-3 py-2 rounded-lg hover:bg-dark-200 transition-colors"
+              aria-label={`Account menu for ${user?.username ?? 'user'}`}
+              aria-expanded={showMenu}
+              className="header-control flex items-center space-x-2 px-2 md:px-3 py-2 rounded-lg hover:bg-dark-200 transition-colors"
             >
-              <div className="w-8 h-8 bg-gradient-to-br from-primary-500 to-secondary-500 rounded-full flex items-center justify-center text-white font-semibold text-sm">
+              <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center text-white font-semibold text-sm">
                 {user?.username.charAt(0).toUpperCase()}
               </div>
               <span className="hidden md:block text-sm font-medium">{user?.username}</span>
@@ -134,7 +140,8 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
           <input
             type="text"
             placeholder="Search media..."
-            className="input w-full"
+            aria-label="Search Plex media"
+            className="input w-full placeholder:text-gray-400"
             autoFocus
             onKeyDown={(e) => {
               if (e.key === 'Enter') {

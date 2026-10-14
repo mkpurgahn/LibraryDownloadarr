@@ -1,46 +1,46 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { Header } from '../components/Header';
-import { Sidebar } from '../components/Sidebar';
+import { Sidebar, LibraryIcon } from '../components/Sidebar';
 import { MediaGrid } from '../components/MediaGrid';
 import { api } from '../services/api';
 import { MediaItem } from '../types';
 import { useAuthStore } from '../stores/authStore';
 import { useMobileMenu } from '../hooks/useMobileMenu';
-import { FilmIcon, HistoryIcon, SettingsIcon } from '../components/Icons';
+import { useLibraryNavigation } from '../hooks/useLibraryNavigation';
+import { DocumentIcon, HistoryIcon, SettingsIcon } from '../components/Icons';
 
 export const Dashboard: React.FC = () => {
   const [recentlyAdded, setRecentlyAdded] = useState<MediaItem[]>([]);
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<{ count: number; total_size: number | null } | null>(null);
+  const [statsError, setStatsError] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const navigate = useNavigate();
-  const { user } = useAuthStore();
+  const [mediaError, setMediaError] = useState(false);
+  const { user, sessionRevision } = useAuthStore();
   const { isMobileMenuOpen, toggleMobileMenu, closeMobileMenu } = useMobileMenu();
+  const navigation = useLibraryNavigation();
 
   useEffect(() => {
-    // Wait for user to be loaded
-    if (!user) {
-      return;
+    let current = true;
+    setRecentlyAdded([]); setStats(null); setIsLoading(true); setMediaError(false); setStatsError(false);
+    void api.getRecentlyAdded(100).then(media => {
+      if (current) setRecentlyAdded(media);
+    }).catch(error => {
+      if (!current) return;
+      console.error('Failed to load recently added Plex media:', error);
+      setMediaError(true);
+    }).finally(() => { if (current) setIsLoading(false); });
+    if (user?.isAdmin) {
+      void api.getDownloadStats().then(data => {
+        if (current) setStats(data);
+      }).catch(error => {
+        if (!current) return;
+        console.error('Failed to load download stats:', error);
+        setStatsError(true);
+      });
     }
-
-    // Load dashboard for all users
-    loadDashboard();
-  }, [user]);
-
-  const loadDashboard = async () => {
-    try {
-      const [media, downloadStats] = await Promise.all([
-        api.getRecentlyAdded(100),
-        api.getDownloadStats().catch(() => null),
-      ]);
-      setRecentlyAdded(media);
-      setStats(downloadStats);
-    } catch (error) {
-      console.error('Failed to load dashboard', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    return () => { current = false; };
+  }, [user?.isAdmin, sessionRevision]);
 
   const formatBytes = (bytes: number | null) => {
     if (!bytes) return '0 B';
@@ -54,59 +54,53 @@ export const Dashboard: React.FC = () => {
     <div className="min-h-screen flex flex-col">
       <Header onMenuClick={toggleMobileMenu} />
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar isOpen={isMobileMenuOpen} onClose={closeMobileMenu} />
-        <main className="flex-1 p-4 md:p-8 overflow-y-auto">
-          <div className="max-w-7xl mx-auto">
-            <h2 className="text-2xl md:text-3xl font-bold mb-4 md:mb-6">Home</h2>
-
-            {user?.isAdmin && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 md:gap-6 mb-6 md:mb-8">
-                <div className="card p-4 md:p-6">
-                  <FilmIcon className="mb-4 h-8 w-8 text-primary-300" />
-                  <h3 className="text-lg md:text-xl font-semibold mb-2">Browse Libraries</h3>
-                  <p className="text-gray-400 text-xs md:text-sm">
-                    Access all your Plex libraries with full metadata and artwork
-                  </p>
-                </div>
-
-                <div className="card p-4 md:p-6 cursor-pointer hover:border-primary-500 transition-colors" onClick={() => navigate('/admin/download-history')}>
-                  <HistoryIcon className="mb-4 h-8 w-8 text-primary-300" />
-                  <h3 className="text-lg md:text-xl font-semibold mb-2">Downloads</h3>
-                  {stats ? (
-                    <div className="text-xs md:text-sm space-y-1">
-                      <p className="text-gray-400">Total: {stats.count || 0}</p>
-                      <p className="text-gray-400">Size: {formatBytes(stats.total_size)}</p>
-                      <p className="text-primary-400 text-xs mt-2">Click to view history →</p>
-                    </div>
-                  ) : (
-                    <p className="text-gray-400 text-xs md:text-sm">Track your download history and stats</p>
-                  )}
-                </div>
-
-                <div className="card p-4 md:p-6 cursor-pointer hover:border-primary-500 transition-colors sm:col-span-2 md:col-span-1" onClick={() => navigate('/settings')}>
-                  <SettingsIcon className="mb-4 h-8 w-8 text-primary-300" />
-                  <h3 className="text-lg md:text-xl font-semibold mb-2">Settings</h3>
-                  <p className="text-gray-400 text-xs md:text-sm">
-                    Configure your Plex server connection
-                  </p>
-                </div>
+        <Sidebar isOpen={isMobileMenuOpen} onClose={closeMobileMenu} navigation={navigation} />
+        <main className="min-w-0 flex-1 overflow-y-auto p-4 pb-24 md:p-8 md:pb-24">
+          <div className="mx-auto max-w-7xl">
+            <h2 className="mb-6 text-2xl font-bold md:text-3xl">Home</h2>
+            <section aria-label="Libraries" className="mb-8">
+              <h3 className="mb-3 text-xl font-semibold">Libraries</h3>
+              <div className="flex flex-wrap gap-3">
+                {navigation.libraries.map(library => <Link key={library.key}
+                  to={`/library/${library.key}`} className="library-destination">
+                  <LibraryIcon type={library.type} />
+                  <span className="min-w-0 flex-1 break-words">{library.title}</span>
+                  <span aria-hidden="true" className="text-gray-400">&rarr;</span>
+                </Link>)}
+                {navigation.booksVisible && <Link to="/books" className="library-destination">
+                  <DocumentIcon className="h-5 w-5 flex-none" />
+                  <span className="flex-1">Books</span><span aria-hidden="true" className="text-gray-400">&rarr;</span>
+                </Link>}
               </div>
-            )}
+              {navigation.plexLoading && <p role="status" className="mt-3 text-sm text-gray-400">Loading Plex libraries...</p>}
+              {navigation.plexError && <p role="status" className="mt-3 text-sm text-gray-400">Plex libraries unavailable. Reload to try again.</p>}
+              {!navigation.plexLoading && !navigation.plexError && !navigation.libraries.length &&
+                <p className="mt-3 text-sm text-gray-400">No Plex libraries available.</p>}
+              {navigation.booksUnavailable && <p role="status" className="mt-3 text-sm text-gray-400">Books is temporarily unavailable. Open Books to retry.</p>}
+            </section>
 
-            {isLoading ? (
-              <div className="text-center text-gray-400 py-12">Loading...</div>
-            ) : recentlyAdded.length > 0 ? (
-              <div>
-                <h3 className="text-xl md:text-2xl font-bold mb-3 md:mb-4">Recently Added</h3>
-                <MediaGrid media={recentlyAdded} />
+            {user?.isAdmin && <section aria-label="Management"
+              className="mb-8 flex flex-wrap items-center gap-x-6 gap-y-1 border-y border-dark-50 py-2 text-sm text-gray-400">
+              <Link to="/admin/download-history" className="utility-link flex-wrap">
+                <HistoryIcon className="h-4 w-4 flex-none" /><span className="text-gray-200">Downloads</span>
+                {stats && <span className="tabular-nums">{stats.count || 0} total &middot; {formatBytes(stats.total_size)}</span>}
+                {statsError && <span>Stats unavailable</span>}
+              </Link>
+              <Link to="/settings" className="utility-link">
+                <SettingsIcon className="h-4 w-4 flex-none" /><span>Settings</span>
+              </Link>
+            </section>}
+
+            <section aria-labelledby="recently-added-heading">
+              <div className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <h3 id="recently-added-heading" className="text-xl font-semibold">Recently Added</h3>
+                <span className="text-sm text-gray-400">Plex</span>
               </div>
-            ) : (
-              <div className="card p-6 md:p-8 text-center">
-                <p className="text-gray-400 text-sm md:text-base">
-                  No recently added media found. Make sure your Plex server is configured in Settings.
-                </p>
-              </div>
-            )}
+              {isLoading ? <p role="status" className="py-8 text-gray-400">Loading recently added media...</p>
+                : mediaError ? <p role="alert" className="py-8 text-gray-400">Recently added Plex media is unavailable. Reload to try again.</p>
+                : recentlyAdded.length > 0 ? <MediaGrid media={recentlyAdded} />
+                : <p className="py-8 text-gray-400">No recently added media found. Make sure your Plex server is configured in Settings.</p>}
+            </section>
           </div>
         </main>
       </div>

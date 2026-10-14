@@ -93,6 +93,8 @@ test.describe('durable reader lifecycle', () => {
     await page.getByLabel('Enable Books', { exact: true }).check();
     await page.getByLabel(/I verified this server binding/).check();
     await page.getByRole('button', { name: 'Save Books settings' }).click();
+    await expect(page.getByText('Books settings saved', { exact: true })).toBeVisible();
+    if (await menu.isVisible()) await menu.click();
     await expect(page.getByRole('button', { name: 'Books', exact: true })).toBeVisible();
     expect((await page.request.get(`${app.origin}${ticket}`, { headers: bearerOnly })).status()).toBe(410);
     expect((await page.request.get(`${app.origin}/api/books/items/dual`, {
