@@ -6,7 +6,7 @@ test.use({ cbzFixtures: true, controlledReaderClock: true, reverseProxy: true })
 
 test('CBZ same-input detail and real numbered pages', async ({ page, app }, info) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'The Paper Observatory', exact: true }).click();
+  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
   await expect(page.getByLabel('Ebook original').locator('option')).toHaveCount(2);
   await capture(page, 'cbz-detail', info);
   if (process.env.BOOKS_CBZ_BEFORE === 'true') {
@@ -40,7 +40,7 @@ test('CBZ same-input detail and real numbered pages', async ({ page, app }, info
 
 test('CBZ originals keep independent private progress across handles cache and backend restart', async ({ page, app }, info) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'The Paper Observatory', exact: true }).click();
+  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
   const options = await page.getByLabel('Ebook original').locator('option').evaluateAll(elements =>
     elements.map(element => (element as HTMLOptionElement).value));
   await page.getByRole('link', { name: 'Read', exact: true }).click();
@@ -73,7 +73,7 @@ test('CBZ originals keep independent private progress across handles cache and b
   await expect(page.getByRole('img', { name: 'Comic page 2 of 3', exact: true })).toBeVisible();
   await capture(page, 'cbz-chapter-B-resumed', info);
   await signIn(page, app, 1);
-  await page.getByRole('link', { name: 'The Paper Observatory', exact: true }).click();
+  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expect(page.getByRole('img', { name: 'Comic page 1 of 3', exact: true })).toBeVisible();
 });
@@ -81,7 +81,7 @@ test('CBZ originals keep independent private progress across handles cache and b
 test('CBZ corrupt pages fail honestly and original bytes still download unchanged', async ({ page, app }, info) => {
   await app.setCbz('corrupt');
   await signIn(page, app);
-  await page.getByRole('link', { name: 'The Paper Observatory', exact: true }).click();
+  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
   const { buildCbzFixture, comicPanel } = await import('../../../backend/dist/books/proof/cbzFixture.js');
   const expected = await buildCbzFixture([10, 2, 1].map(number => ({
     name: `Pages/${number}.png`, data: number === 2 ? Buffer.from('Damaged generated page') : comicPanel(number, 1),
