@@ -88,13 +88,16 @@ export class DatabaseService {
   private readonly secret: string;
   readonly books: BooksRepository;
   readonly booksProgress: BooksProgressRepository;
+  readonly booksCacheDir: string;
   private readonly sessionRevokedListeners = new Set<(sessionId: string) => void>();
+  private readonly booksStoppedListeners = new Set<() => void>();
 
   constructor(dbPath: string, secret = process.env.TOKEN_ENCRYPTION_KEY || '') {
     if (secret.length < 32) {
       throw new Error('TOKEN_ENCRYPTION_KEY is required and must be at least 32 characters');
     }
     this.secret = secret;
+    this.booksCacheDir = path.resolve(path.dirname(dbPath), `.books-epub-${hashToken(path.resolve(dbPath)).slice(0, 24)}`);
 
     const dir = path.dirname(dbPath);
     fs.mkdirSync(dir, { recursive: true });
@@ -488,6 +491,11 @@ export class DatabaseService {
     return () => { this.sessionRevokedListeners.delete(listener); };
   }
 
+  onBooksStopped(listener: () => void): () => void {
+    this.booksStoppedListeners.add(listener);
+    return () => { this.booksStoppedListeners.delete(listener); };
+  }
+
   private notifyRevoked(sessions: Array<{ id: string }>): void {
     for (const session of sessions) for (const listener of this.sessionRevokedListeners) listener(session.id);
   }
@@ -805,5 +813,6 @@ export class DatabaseService {
 
   stopBooks(): void {
     this.notifyRevoked(this.db.prepare('SELECT id FROM sessions').all() as Array<{ id: string }>);
+    for (const listener of this.booksStoppedListeners) listener();
   }
 }

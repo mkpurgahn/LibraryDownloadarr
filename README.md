@@ -74,9 +74,34 @@ overwriting newer progress. Intentional rewind is supported, and an identical
 retry does not create another revision. Replaced originals retain incompatible
 history instead of silently reusing a stale page, section, or track position.
 History responses show the latest 100 records; older versions remain stored.
-EPUB positions are rejected until validated reader preparation is available.
+EPUB positions require a current prepared spine and bounded text offset; file
+and sanitizer-policy changes make older locations incompatible.
 
-The native reader/player features are under development.
+The EPUB preview has native contents, previous/next sections, scrolling, font
+size, and private resume. A second device must explicitly claim the saved
+position; conflicts offer **Resume saved position** or **Continue here**.
+Positions save every ten seconds and on navigation/visibility changes when
+possible. Network failures show an unsaved state; browser-close delivery is
+best effort. PDF and audio playback remain under development.
+
+EPUB archives are processed in a cancellable worker, never in the main request
+thread: 100 MiB compressed, 512 MiB expanded, 10,000 entries, 32 MiB per entry,
+100:1 expansion ratio, 30 seconds, and a 256 MiB memory budget. Only one
+preparation runs at a time. The separate database-scoped cache is limited to
+1 GiB/24 hours and excludes active reads from eviction; handles expire after
+30 minutes or with their application session. Restart may require preparation
+again, but does not erase durable progress. Unsafe/encrypted/fixed-layout books
+remain explicitly original-download-only.
+
+The reader uses one opaque-origin sandbox, a self-contained hash-CSP script,
+DOMPurify sanitation and parsed CSS restrictions. Book payloads are served as
+authenticated, non-executable attachments; only the isolated frame constructs
+book DOM. It receives no credentials or provider paths. Conservative additional
+bounds are 100,000 XML nodes, 128 levels, one million characters per section,
+512 KiB per stylesheet, and 64 MiB of assets for the visible section. Dependency
+licenses ship at `/books-reader-notices.txt`; Foliate is pinned to reviewed
+commit `78914aef4466eb960965702401634c2cb348e9b1`.
+
 The Books browse/detail/settings views and original-download queue are available
 in the preview. Inventory filters do not promise browser codec compatibility.
 For a large selection, **Prepare all downloads** issues individual links in

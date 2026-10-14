@@ -131,3 +131,79 @@ export function parseCatalog(value: unknown): CatalogPage {
   if (limit < 1 || limit > 100) throw invalidResponse();
   return { items: list(raw.items, limit).map(parseBookSummary), page: integer(raw.page), limit, total: integer(raw.total) };
 }
+
+export interface ReaderDescriptor {
+  readerId: string;
+  state: 'preparing' | 'ready' | 'download-only';
+  contentVersion: string;
+  policyVersion: 'epub-scroll-v1';
+  resources: Array<{ resourceId: string; mediaType: string; size: number }>;
+  spine: string[];
+  toc: Array<{ title: string; resourceId: string; fragment?: string }>;
+  reason?: string;
+}
+export function parseReader(value: unknown): ReaderDescriptor {
+  const raw = record(value);
+  if (!['preparing', 'ready', 'download-only'].includes(String(raw.state)) || raw.policyVersion !== 'epub-scroll-v1') throw invalidResponse();
+  const resources = list(raw.resources).map(value => {
+    const resource = record(value);
+    const resourceId = id(resource.resourceId);
+    const size = integer(resource.size);
+    if (!/^[a-f0-9]{64}$/.test(resourceId) || size > 32 * 1024 * 1024) throw invalidResponse();
+    return { resourceId, size, mediaType: text(resource.mediaType, 100) };
+  });
+  const ids = new Set(resources.map(resource => resource.resourceId));
+  const spine = list(raw.spine).map(id);
+  if (ids.size !== resources.length || spine.some(id => !ids.has(id)) || (raw.state === 'ready' && !spine.length)) throw invalidResponse();
+  return {
+    readerId: id(raw.readerId), state: raw.state as ReaderDescriptor['state'],
+    contentVersion: id(raw.contentVersion), policyVersion: raw.policyVersion, resources, spine,
+    toc: list(raw.toc).map(value => {
+      const entry = record(value);
+      const resourceId = id(entry.resourceId);
+      if (!spine.includes(resourceId)) throw invalidResponse();
+      return { resourceId, title: text(entry.title, 500), ...(entry.fragment === undefined ? {} : { fragment: text(entry.fragment, 1000) }) };
+    }),
+    ...(raw.reason === undefined ? {} : { reason: text(raw.reason, 500) }),
+  };
+}
+
+export type EbookLocator =
+  { kind: 'epub'; resourceId: string; textOffset: number; fraction: number; policyVersion: string } |
+  { kind: 'pdf'; page: number; offset: number };
+export interface AudioLocator { kind: 'audio'; trackId: string; localSeconds: number; globalSeconds: number }
+export interface Progress {
+  key: BookKey & { userId: string; mode: 'ebook' | 'audio'; editionId: string };
+  contentVersion: string; locator: EbookLocator | AudioLocator; revision: number;
+  writerId: string; epoch: number; sequence: number; updatedAt: number; completed: boolean;
+}
+export interface ProgressWrite {
+  op: 'claim' | 'save'; contentVersion: string; expectedRevision: number;
+  writerId: string; epoch?: number; sequence: number; locator: EbookLocator | AudioLocator; completed?: boolean;
+}
+export function parseLocator(value: unknown): EbookLocator | AudioLocator {
+  const raw = record(value);
+  if (raw.kind === 'epub') {
+    const fraction = finite(raw.fraction); const textOffset = integer(raw.textOffset);
+    if (fraction > 1 || textOffset > 1024 * 1024 || raw.policyVersion !== 'epub-scroll-v1') throw invalidResponse();
+    return { kind: 'epub', resourceId: id(raw.resourceId), textOffset, fraction, policyVersion: raw.policyVersion };
+  }
+  if (raw.kind === 'pdf') {
+    const page = integer(raw.page); const offset = finite(raw.offset);
+    if (page < 1 || page > 5000 || offset > 1) throw invalidResponse();
+    return { kind: 'pdf', page, offset };
+  }
+  if (raw.kind === 'audio') return { kind: 'audio', trackId: id(raw.trackId), localSeconds: finite(raw.localSeconds), globalSeconds: finite(raw.globalSeconds) };
+  throw invalidResponse();
+}
+export function parseProgress(value: unknown): Progress {
+  const raw = record(value); const key = record(raw.key);
+  if (key.mode !== 'ebook' && key.mode !== 'audio') throw invalidResponse();
+  return {
+    key: { providerInstanceId: id(key.providerInstanceId), libraryId: id(key.libraryId), itemId: id(key.itemId),
+      userId: id(key.userId), mode: key.mode, editionId: id(key.editionId) },
+    contentVersion: id(raw.contentVersion), locator: parseLocator(raw.locator), revision: integer(raw.revision),
+    writerId: id(raw.writerId), epoch: integer(raw.epoch), sequence: integer(raw.sequence),
+    updatedAt: integer(raw.updatedAt), completed: flag(raw.completed),
+  };
+}

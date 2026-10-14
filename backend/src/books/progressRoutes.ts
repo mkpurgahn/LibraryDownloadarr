@@ -6,6 +6,10 @@ import { BooksCatalog } from './catalog';
 import { BooksError, invalidInput, notFound, opaqueSegment } from './limits';
 import { audioEdition, ProgressKey, ProgressWrite, progressLocator, progressWrite } from './progressTypes';
 import { bookHandler } from './routes';
+import { EpubPreparation } from './epub/prepare';
+import { epubContentVersion } from './epub/manifest';
+import { AuthRequest } from '../middleware/auth';
+import { BooksPrincipal } from './mediaAuth';
 
 function currentEdition(item: BookItem, mode: 'ebook' | 'audio', editionId: string) {
   if (mode === 'audio') {
@@ -13,7 +17,7 @@ function currentEdition(item: BookItem, mode: 'ebook' | 'audio', editionId: stri
     return edition?.editionId === editionId ? edition : undefined;
   }
   const file = item.files.find(file => file.fileId === editionId && file.role === 'ebook' && file.available);
-  return file ? { editionId, contentVersion: file.contentVersion } : undefined;
+  return file ? { editionId, contentVersion: file.extension === 'epub' ? epubContentVersion(file.contentVersion) : file.contentVersion } : undefined;
 }
 
 export async function validateProgressLocator(item: BookItem, editionId: string, write: ProgressWrite): Promise<boolean> {
@@ -34,7 +38,10 @@ export async function validateProgressLocator(item: BookItem, editionId: string,
     Math.abs(track.startOffset + locator.localSeconds - locator.globalSeconds) <= 0.001);
 }
 
-export function createBooksProgressRouter(db: DatabaseService, catalog: BooksCatalog): Router {
+export function createBooksProgressRouter(
+  db: DatabaseService, catalog: BooksCatalog, preparation?: EpubPreparation,
+  principal?: (req: AuthRequest) => BooksPrincipal
+): Router {
   const router = Router();
   router.get('/items/:itemId/progress/:mode', bookHandler(async (req, res, signal) => {
     if (!req.user) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
@@ -76,7 +83,13 @@ export function createBooksProgressRouter(db: DatabaseService, catalog: BooksCat
     if (!edition || edition.contentVersion !== write.contentVersion) {
       return res.status(409).json({ code: 'BOOK_VERSION_CHANGED', error: 'The original changed; choose a new position', canonical: current ?? null });
     }
-    if (!await validateProgressLocator(item, editionId, write)) {
+    const original = item.files.find(file => file.fileId === editionId);
+    const valid = write.locator.kind === 'epub' && original?.extension === 'epub' && preparation && principal
+      ? await preparation.validateLocator(principal(req), {
+        itemId: item.itemId, fileId: editionId, contentVersion: original.contentVersion,
+      }, write.locator, signal)
+      : await validateProgressLocator(item, editionId, write);
+    if (!valid) {
       throw new BooksError(422, 'BOOK_PROGRESS_LOCATION_UNSUPPORTED', 'Cannot save this position for the current original');
     }
     if (catalog.current().config.configGeneration !== configGeneration) throw new BooksError(409, 'BOOKS_CONFIGURATION_CHANGED');

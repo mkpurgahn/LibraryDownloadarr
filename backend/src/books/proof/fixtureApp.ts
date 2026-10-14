@@ -69,6 +69,8 @@ export async function startFixtureApp(
       db.deleteSessionsForUser(user.id);
       return { label, bearer: db.createSession(user.id).token };
     });
+    const firstUser = db.getSessionByToken(users[0].bearer)!;
+    users.push({ label: 'a-second-device', bearer: db.createSession(firstUser.userId).token });
     const previous = db.books.readConfig();
     if (!previous || previous.origin !== absOrigin || previous.libraryId !== libraryId) {
       db.books.setConfig({

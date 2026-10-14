@@ -11,7 +11,7 @@ import { BookCover } from './BooksPage';
 
 const fileSize = (bytes: number) => bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
-export const BookDetail: React.FC<{ readerPending?: boolean }> = ({ readerPending = false }) => {
+export const BookDetail: React.FC = () => {
   const { itemId } = useParams<{ itemId: string }>();
   const menu = useMobileMenu();
   const sessionRevision = useAuthStore(state => state.sessionRevision);
@@ -82,8 +82,8 @@ export const BookDetail: React.FC<{ readerPending?: boolean }> = ({ readerPendin
                   {!item.listen.available && <p className="mt-2 text-xs text-gray-400">{item.listen.reason}</p>}
                 </div>
               </div>
-              {(notice || readerPending) && <p role="status" className="mt-6 rounded-lg bg-primary-500/10 p-4 text-sm text-primary-200">
-                {readerPending ? 'Reader preparation is not enabled in this preview yet. Download the original below.' : notice}
+              {notice && <p role="status" className="mt-6 rounded-lg bg-primary-500/10 p-4 text-sm text-primary-200">
+                {notice}
               </p>}
               <section className="mt-8" aria-label="Original files">
                 <div className="flex flex-wrap items-center justify-between gap-3">

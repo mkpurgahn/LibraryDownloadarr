@@ -10,6 +10,8 @@ import { BooksRelay } from './relay';
 import { BooksTickets, bookTarget } from './tickets';
 import { PlexService, plexService } from '../services/plexService';
 import { createBooksProgressRouter } from './progressRoutes';
+import { EpubPreparation } from './epub/prepare';
+import { createEpubRouter } from './epub/routes';
 
 export function booksError(error: unknown, res: Response): void {
   if (res.headersSent) { res.destroy(); return; }
@@ -37,7 +39,7 @@ export function bookHandler(
   };
 }
 
-export function createBooksRouter(db: DatabaseService, dependencies: { plex?: PlexService } = {}): Router {
+export function createBooksRouter(db: DatabaseService, dependencies: { plex?: PlexService; preparation?: EpubPreparation } = {}): Router {
   const router = Router();
   const catalog = new BooksCatalog(db.books);
   const plex = dependencies.plex ?? plexService;
@@ -45,9 +47,11 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
   const streams = new BookStreams();
   const relay = new BooksRelay(db, catalog, streams, plex);
   const tickets = new BooksTickets(db, relay);
+  const preparation = dependencies.preparation ?? new EpubPreparation(db, catalog, relay, plex);
   const principals = new WeakMap<AuthRequest, BooksPrincipal>();
   const reads = new WindowBudget(120, 60000);
   const mutations = new WindowBudget(20, 60000);
+  const positions = new WindowBudget(120, 60000);
   db.onSessionRevoked(id => { db.books.revokeBooksSession(id); streams.revokeSession(id); });
   db.books.onConfigChanged(() => streams.invalidateGeneration());
   router.use((_req, res, next) => {
@@ -64,10 +68,11 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
   }));
   router.use((req: AuthRequest, res, next) => {
     const mutating = !['GET', 'HEAD'].includes(req.method);
-    const force = req.path.startsWith('/downloads/') || req.path.endsWith('/content') || req.path === '/download-tickets';
+    const force = req.path.startsWith('/downloads/') || req.path.endsWith('/content') || req.path === '/download-tickets' ||
+      req.path.startsWith('/readers/') || req.path.endsWith('/reader');
     void (mutating ? auth.requireBooksMutation(req, false, force) : auth.authenticateBooks(req, force)).then(principal => {
       catalog.current();
-      (mutating ? mutations : reads).take(principal.userId);
+      (mutating ? (/\/progress\/(ebook|audio)$/.test(req.path) ? positions : mutations) : reads).take(principal.userId);
       principals.set(req, principal);
       const user = db.getPlexUserById(principal.userId)!;
       req.user = { id: user.id, username: user.username, plexId: user.plexId, isAdmin: false };
@@ -78,6 +83,7 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
     const principal = principals.get(req)!;
     auth.clear(res, principal);
     streams.revokeSession(principal.sessionId);
+    preparation.revokeSession(principal.sessionId);
     return res.status(204).end();
   }));
   router.post('/download-tickets', bookHandler(async (req, res, signal) => {
@@ -107,7 +113,8 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
     const { body, mime } = await catalog.cover(req.user!.id, req.params.itemId, signal);
     return res.type(mime).send(body);
   }));
-  router.use(createBooksProgressRouter(db, catalog));
+  router.use(createEpubRouter(preparation, req => principals.get(req)!));
+  router.use(createBooksProgressRouter(db, catalog, preparation, req => principals.get(req)!));
   router.use((_req, res) => res.status(404).json({ error: 'Book not found', code: 'BOOK_NOT_FOUND' }));
   return router;
 }

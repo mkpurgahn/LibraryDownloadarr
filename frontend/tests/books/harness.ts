@@ -22,12 +22,14 @@ type Provider = {
   token: string;
   libraryId: string;
   setUnavailable(value: boolean): void;
+  replaceEpub(): Promise<void>;
   stop(): Promise<void>;
 };
 export type BooksApp = App & {
   live: boolean;
   certificatePin: string;
   setUnavailable(value: boolean): void;
+  replaceEpub(): Promise<void>;
 };
 
 async function syntheticProvider(): Promise<Provider> {
@@ -70,6 +72,16 @@ async function syntheticProvider(): Promise<Provider> {
     makeItem('unsupported', 'Download-only Archive', ['azw3']),
     makeItem('collection', 'One Hundred and One Tracks', Array.from({ length: 101 }, () => 'mp3')),
   ];
+  const { buildEpubFixture, fixtureChapter } = await import('../../../backend/dist/books/proof/epubFixture.js');
+  const hostile = '<script>window.bookScriptExecuted = true;</script>' +
+    '<form action="https://fixture.invalid/blocked"><input name="private"/></form>' +
+    '<iframe src="https://fixture.invalid/blocked"></iframe>' +
+    '<svg xmlns="http://www.w3.org/2000/svg" onload="window.bookScriptExecuted = true;"><script>window.bookScriptExecuted = true;</script><foreignObject>Excluded</foreignObject></svg>' +
+    '<style>@import "https://fixture.invalid/blocked"; p { background-image: u\\72l("https://fixture.invalid/blocked"); }</style>' +
+    '<a href="https://fixture.invalid/blocked" onclick="window.bookScriptExecuted = true;">External reference</a>';
+  const ebook = await buildEpubFixture({ first: fixtureChapter('First section', 100).replace('</body>', `${hostile}</body>`), long: true });
+  files.set('dual:dual-0', ebook);
+  items[0].libraryFiles[0].metadata.size = ebook.length;
   const server = http.createServer((req, res) => {
     if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(403).end(); return; }
     if (unavailable) { res.writeHead(503).end(); return; }
@@ -119,6 +131,12 @@ async function syntheticProvider(): Promise<Provider> {
   return {
     origin: `http://127.0.0.1:${address.port}`, token, libraryId,
     setUnavailable(value) { unavailable = value; },
+    async replaceEpub() {
+      const replacement = await buildEpubFixture({ first: fixtureChapter('Revised first section', 10) });
+      files.set('dual:dual-0', replacement);
+      items[0].libraryFiles[0].metadata.size = replacement.length;
+      items[0].libraryFiles[0].metadata.mtimeMs += 1000;
+    },
     async stop() {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -176,6 +194,10 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean }>({
         setUnavailable(value) {
           if (!provider) throw new Error('Live fixture outages are not mutated by browser tests');
           provider.setUnavailable(value);
+        },
+        async replaceEpub() {
+          if (!provider) throw new Error('Live provider originals cannot be replaced by consumer tests');
+          await provider.replaceEpub();
         },
       };
       await use(fixture);

@@ -15,6 +15,7 @@ import { DownloadProvider } from './contexts/DownloadContext';
 import { DownloadManager } from './components/DownloadManager';
 import { BooksPage } from './books/BooksPage';
 import { BookDetail } from './books/BookDetail';
+const ReaderPage = React.lazy(() => import('./books/ReaderPage').then(module => ({ default: module.ReaderPage })));
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { token, user } = useAuthStore();
@@ -97,7 +98,7 @@ const App: React.FC = () => {
           <Route path="/login" element={<Login />} />
           <Route path="/books" element={<ProtectedRoute><BooksPage /></ProtectedRoute>} />
           <Route path="/books/items/:itemId" element={<ProtectedRoute><BookDetail /></ProtectedRoute>} />
-          <Route path="/books/items/:itemId/read/:fileId" element={<ProtectedRoute><BookDetail readerPending /></ProtectedRoute>} />
+          <Route path="/books/items/:itemId/read/:fileId" element={<ProtectedRoute><React.Suspense fallback={<p role="status" className="p-6">Opening reader...</p>}><ReaderPage /></React.Suspense></ProtectedRoute>} />
           <Route
             path="/"
             element={

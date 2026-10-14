@@ -2,10 +2,11 @@ import { useAuthStore, SESSION_CHANGED_EVENT } from '../stores/authStore';
 import {
   BookItem, BooksLibrary, BookTarget, BookTicketResult, BooksSettingsState, CatalogQuery,
   record, id, text, flag, integer, list, parseBookItem, parseBookSummary, parseCatalog, invalidResponse,
+  parseReader, ProgressWrite,
 } from './types';
 
 export class BooksApiError extends Error {
-  constructor(public readonly status: number, public readonly code: string, message: string) {
+  constructor(public readonly status: number, public readonly code: string, message: string, public readonly canonical?: unknown) {
     super(message); this.name = 'BooksApiError';
   }
 }
@@ -24,7 +25,7 @@ function clearBooksSession(): void {
 }
 window.addEventListener(SESSION_CHANGED_EVENT, clearBooksSession);
 
-async function request(path: string, options: RequestInit = {}, signal?: AbortSignal): Promise<unknown> {
+async function request(path: string, options: RequestInit = {}, signal?: AbortSignal, binaryBytes?: number): Promise<unknown> {
   const token = useAuthStore.getState().token;
   if (!token) throw new BooksApiError(401, 'BOOKS_SESSION_REQUIRED', 'Sign in to LibraryDownloadarr to open Books.');
   const controller = new AbortController();
@@ -40,13 +41,21 @@ async function request(path: string, options: RequestInit = {}, signal?: AbortSi
     });
     if (token !== useAuthStore.getState().token || controller.signal.aborted) throw new DOMException('Session changed', 'AbortError');
     if (response.status === 204) return undefined;
+    if (response.ok && binaryBytes !== undefined) {
+      if (Number(response.headers.get('content-length')) !== binaryBytes ||
+          response.headers.get('content-type') !== 'application/octet-stream') throw invalidResponse();
+      const bytes = await response.arrayBuffer();
+      if (token !== useAuthStore.getState().token || controller.signal.aborted) throw new DOMException('Session changed', 'AbortError');
+      if (bytes.byteLength !== binaryBytes) throw invalidResponse();
+      return bytes;
+    }
     const value: unknown = await response.json();
     if (token !== useAuthStore.getState().token || controller.signal.aborted) throw new DOMException('Session changed', 'AbortError');
     if (!response.ok) {
       const error = record(value);
       throw new BooksApiError(
         response.status, typeof error.code === 'string' ? error.code : 'BOOKS_UNAVAILABLE',
-        typeof error.error === 'string' ? error.error : 'Books is temporarily unavailable. Plex remains available.'
+        typeof error.error === 'string' ? error.error : 'Books is temporarily unavailable. Plex remains available.', error.canonical
       );
     }
     return value;
@@ -76,15 +85,16 @@ async function mediaSession(signal?: AbortSignal): Promise<void> {
   } finally { if (exchange?.promise === promise) exchange = undefined; }
 }
 
-async function booksRequest(path: string, options: RequestInit = {}, signal?: AbortSignal): Promise<unknown> {
+async function booksRequest(path: string, options: RequestInit = {}, signal?: AbortSignal, binaryBytes?: number): Promise<unknown> {
   const token = useAuthStore.getState().token;
   await mediaSession(signal);
-  try { return await request(`/api/books${path}`, options, signal); }
+  if (token !== useAuthStore.getState().token) throw new DOMException('Session changed', 'AbortError');
+  try { return await request(`/api/books${path}`, options, signal, binaryBytes); }
   catch (error) {
     if (error instanceof BooksApiError && (error.status === 401 || error.code === 'BOOKS_IDENTITY_MISMATCH')) {
       bridge = undefined;
       await mediaSession(signal);
-      return request(`/api/books${path}`, options, signal);
+      return request(`/api/books${path}`, options, signal, binaryBytes);
     }
     if (error instanceof BooksApiError && error.code === 'PLEX_ACCESS_REVOKED' && token === useAuthStore.getState().token) {
       useAuthStore.getState().setToken(null);
@@ -153,6 +163,25 @@ export const booksApi = {
       result.target.itemId !== targets[index].itemId || result.target.fileId !== targets[index].fileId ||
       result.target.contentVersion !== targets[index].contentVersion)) throw invalidResponse();
     return results;
+  },
+  async prepareReader(target: BookTarget, signal?: AbortSignal) {
+    return parseReader(await booksRequest(`/items/${id(target.itemId)}/reader`, {
+      method: 'POST', body: JSON.stringify({ fileId: target.fileId, contentVersion: target.contentVersion }),
+    }, signal));
+  },
+  async releaseReader(readerId: string) { await booksRequest(`/readers/${id(readerId)}`, { method: 'DELETE' }); },
+  async readerResource(readerId: string, resourceId: string, size: number, signal: AbortSignal): Promise<ArrayBuffer> {
+    const bytes = await booksRequest(`/readers/${id(readerId)}/resources/${id(resourceId)}`, {}, signal, size);
+    if (!(bytes instanceof ArrayBuffer)) throw invalidResponse();
+    return bytes;
+  },
+  async loadProgress(itemId: string, mode: 'ebook' | 'audio', editionId: string, signal: AbortSignal) {
+    return booksRequest(`/items/${id(itemId)}/progress/${mode}?${new URLSearchParams({ editionId: id(editionId) })}`, {}, signal);
+  },
+  async saveProgress(itemId: string, mode: 'ebook' | 'audio', editionId: string, write: ProgressWrite, signal: AbortSignal) {
+    return booksRequest(`/items/${id(itemId)}/progress/${mode}`, {
+      method: 'PUT', keepalive: true, body: JSON.stringify({ editionId, ...write }),
+    }, signal);
   },
   async settings(signal?: AbortSignal) { return settings(await request('/api/settings/books', {}, signal)); },
   async saveSettings(value: {

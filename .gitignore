@@ -14,3 +14,4 @@ logs/
 .superpowers/
 .test-data/
 artifacts/books/
+frontend/.reader-build/

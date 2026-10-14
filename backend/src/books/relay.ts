@@ -1,5 +1,5 @@
 import { IncomingMessage } from 'node:http';
-import { Transform } from 'node:stream';
+import { Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Request, Response } from 'express';
 import { config } from '../config';
@@ -77,6 +77,29 @@ export class BooksRelay {
       if (!mime || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(mime)) throw new BooksError(502, 'ABS_FILE_TYPE_UNAVAILABLE');
       return { ...resolved, representation, resumable, mime, client: current.client };
     } finally { head.destroy(); }
+  }
+  async copyOriginal(principal: BooksPrincipal, target: BookTarget, destination: Writable, signal: AbortSignal, limit: number): Promise<void> {
+    const checked = await this.inspect(principal, target, signal);
+    if (checked.file.size > limit) throw new BooksError(413, 'EPUB_TOO_LARGE', 'Cannot read safely here; download original.');
+    const upstream = await checked.client.openFile(target.itemId, checked.ino, { method: 'GET', attachment: false, signal });
+    try {
+      const response = inspectHeaders(upstream);
+      if (response.size !== checked.file.size || !sameRepresentation(response, checked.representation)) {
+        this.db.books.observeRepresentation(checked.file, response);
+        throw new BooksError(409, 'BOOK_VERSION_CHANGED');
+      }
+      this.currentSession(principal);
+      if (this.catalog.current().config.configGeneration !== checked.configGeneration) throw new BooksError(409, 'BOOKS_CONFIGURATION_CHANGED');
+      let received = 0;
+      const bounded = new Transform({
+        transform(chunk: Buffer, _encoding, done) {
+          received += chunk.length;
+          done(received > checked.file.size || received > limit ? new BooksError(413, 'EPUB_TOO_LARGE') : null, chunk);
+        },
+        flush(done) { done(received === checked.file.size ? null : new BooksError(502, 'ABS_FILE_INCOMPLETE')); },
+      });
+      await pipeline(upstream, bounded, destination, { signal });
+    } finally { upstream.destroy(); destination.destroy(); }
   }
   async relayOriginal(
     req: Request, res: Response, principal: BooksPrincipal, target: BookTarget, disposition: 'inline' | 'attachment'
