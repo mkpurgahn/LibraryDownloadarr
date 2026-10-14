@@ -26,7 +26,7 @@ export const ComicReader: React.FC<{
   const image = useRef<HTMLImageElement>();
   const manifest = useRef(descriptor);
   const anchor = useRef<ComicLocator>(initial);
-  const restoring = useRef(false);
+  const restoring = useRef<{ top: number; left: number }>();
   const queue = useRef<Promise<void>>(Promise.resolve());
   const active = useRef<AbortController>();
   const timer = useRef<number>();
@@ -35,11 +35,18 @@ export const ComicReader: React.FC<{
   const total = descriptor.spine.length;
 
   const save = () => {
-    if (!blocked.current && image.current?.naturalWidth) void progress.save(anchor.current);
+    if (!blocked.current && image.current?.naturalWidth) {
+      position(true);
+      void progress.save(anchor.current);
+    }
   };
-  const position = () => {
+  const position = (explicit = false) => {
     const element = viewport.current;
-    if (!element || !image.current?.naturalWidth || restoring.current) return;
+    if (!element || !image.current?.naturalWidth) return;
+    const restored = restoring.current;
+    if (!explicit && restored && Math.abs(element.scrollTop - restored.top) < 1 &&
+        Math.abs(element.scrollLeft - restored.left) < 1) return;
+    restoring.current = undefined;
     const vertical = element.scrollHeight - element.clientHeight;
     const horizontal = element.scrollWidth - element.clientWidth;
     anchor.current = { ...anchor.current,
@@ -51,6 +58,7 @@ export const ComicReader: React.FC<{
   useEffect(() => {
     const element = viewport.current!;
     const observer = new ResizeObserver(() => {
+      if (restoring.current) position();
       setViewportSize({ width: element.clientWidth, height: element.clientHeight });
     });
     observer.observe(element);
@@ -167,13 +175,11 @@ export const ComicReader: React.FC<{
     if (!element || !current || !resource || !viewportSize.width) return;
     const scale = fit === 'width' ? viewportSize.width / resource.width :
       fit === 'page' ? Math.min(viewportSize.width / resource.width, viewportSize.height / resource.height) : zoom / 100;
-    restoring.current = true;
     current.style.width = `${Math.max(1, Math.floor(resource.width * scale))}px`;
     current.style.height = 'auto';
     element.scrollTop = anchor.current.offset * Math.max(0, element.scrollHeight - element.clientHeight);
     element.scrollLeft = anchor.current.horizontal * Math.max(0, element.scrollWidth - element.clientWidth);
-    const frame = requestAnimationFrame(() => { restoring.current = false; });
-    return () => cancelAnimationFrame(frame);
+    restoring.current = { top: element.scrollTop, left: element.scrollLeft };
   }, [resource, fit, zoom, viewportSize]);
 
   const go = (next: number) => {
@@ -210,13 +216,13 @@ export const ComicReader: React.FC<{
     <div className="flex flex-wrap items-end gap-2 text-sm">
       <label className="flex-1">Page fit
         <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={fit}
-          onChange={event => { position(); setFit(event.target.value as Fit); }}>
+          onChange={event => { position(true); setFit(event.target.value as Fit); }}>
           <option value="page">Fit page</option><option value="width">Fit width</option><option value="manual">Manual zoom</option>
         </select>
       </label>
       <label>Zoom
         <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={zoom}
-          onChange={event => { position(); setFit('manual'); setZoom(Number(event.target.value)); }}>
+          onChange={event => { position(true); setFit('manual'); setZoom(Number(event.target.value)); }}>
           {[50, 75, 100, 125, 150, 200, 300].map(value => <option key={value} value={value}>{value}%</option>)}
         </select>
       </label>

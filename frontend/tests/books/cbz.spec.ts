@@ -13,7 +13,13 @@ async function expectPanel(page: Page, position: number, panel: number, chapter 
   await expect.poll(() => image.evaluate(async element => {
     const image = element as HTMLImageElement;
     if (!image.complete || !image.naturalWidth) return 'not decoded';
-    const data = await (await fetch(image.src)).arrayBuffer();
+    const source = image.src;
+    let data: ArrayBuffer;
+    try { data = await (await fetch(source)).arrayBuffer(); }
+    catch (error) {
+      if (!image.isConnected || image.src !== source) return 'image replaced during explicit resume';
+      throw error;
+    }
     return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', data)), byte => byte.toString(16).padStart(2, '0')).join('');
   })).toBe(expected);
 }
