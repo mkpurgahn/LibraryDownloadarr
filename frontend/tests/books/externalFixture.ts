@@ -98,7 +98,7 @@ export async function loadExternalFixture(root: string): Promise<BooksApp> {
     origin: url, instanceId: id(raw.instanceId), users, binding, candidate, fileMap, live: true,
     certificatePin: createHash('sha256').update(new X509Certificate(ca).publicKey.export({ format: 'der', type: 'spki' })).digest('base64'),
     setUnavailable: blocked, setPdf: blocked, advanceReaderTime: blocked,
-    setAudio: async () => blocked(), replaceEpub: async () => blocked(), restart: async () => blocked(),
+    setAudio: async () => blocked(), replaceEpub: async () => blocked(), setCbz: async () => blocked(), restart: async () => blocked(),
     readerCache: async () => blocked(), stop: async () => blocked(),
   };
 }

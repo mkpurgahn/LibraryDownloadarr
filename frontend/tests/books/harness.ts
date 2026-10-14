@@ -29,6 +29,7 @@ type Provider = {
   libraryId: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
+  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized'): Promise<void>;
   setPdf(mode: PdfFixtureMode): void;
   setAudio(mode: AudioFixtureMode): Promise<void>;
   stop(): Promise<void>;
@@ -41,13 +42,14 @@ export type BooksApp = App & {
   certificatePin: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
+  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized'): Promise<void>;
   setPdf(mode: PdfFixtureMode): void;
   setAudio(mode: AudioFixtureMode): Promise<void>;
   advanceReaderTime(milliseconds: number): void;
   restart(): Promise<void>;
 };
 
-async function syntheticProvider(longNodeEpub = false): Promise<Provider> {
+async function syntheticProvider(longNodeEpub = false, cbzFixtures = false): Promise<Provider> {
   const token = randomUUID();
   let unavailable = false;
   const files = new Map<string, Buffer>();
@@ -87,6 +89,28 @@ async function syntheticProvider(longNodeEpub = false): Promise<Provider> {
     makeItem('unsupported', 'Download-only Archive', ['azw3']),
     makeItem('collection', 'One Hundred and One Tracks', Array.from({ length: 101 }, () => 'mp3')),
   ];
+  const { buildCbzFixture, comicPanel } = await import('../../../backend/dist/books/proof/cbzFixture.js');
+  const manga = cbzFixtures ? makeItem('manga', 'The Paper Observatory', ['cbz', 'cbz']) : undefined;
+  if (manga) {
+    manga.libraryFiles[0].metadata.filename = 'Observatory - chapter A.cbz';
+    manga.libraryFiles[1].metadata.filename = 'Observatory - chapter B.cbz';
+    items.push(manga);
+  }
+  const setCbz: Provider['setCbz'] = async mode => {
+    if (!manga) throw new Error('CBZ fixtures are not enabled');
+    for (let chapter = 1; chapter <= 2; chapter++) {
+      const entries = [10, 2, 1].map(number => ({
+        name: `Pages/${number}.png`,
+        data: mode === 'corrupt' && number === 2 ? Buffer.from('Damaged generated page') :
+          comicPanel(mode === 'replacement' ? number + 1 : number, chapter),
+      }));
+      const bytes = await buildCbzFixture(entries);
+      files.set(`manga:manga-${chapter - 1}`, bytes);
+      manga.libraryFiles[chapter - 1].metadata.size = mode === 'oversized' ? 100 * 1024 * 1024 + 1 : bytes.length;
+      manga.libraryFiles[chapter - 1].metadata.mtimeMs += 1000;
+    }
+  };
+  if (manga) await setCbz('valid');
   const { buildEpubFixture, fixtureChapter } = await import('../../../backend/dist/books/proof/epubFixture.js');
   const hostile = '<script>window.bookScriptExecuted = true;</script>' +
     '<form action="https://fixture.invalid/blocked"><input name="private"/></form>' +
@@ -164,6 +188,7 @@ async function syntheticProvider(longNodeEpub = false): Promise<Provider> {
   if (!address || typeof address === 'string') throw new Error('Synthetic ABS listener unavailable');
   return {
     origin: `http://127.0.0.1:${address.port}`, token, libraryId,
+    setCbz,
     setUnavailable(value) { unavailable = value; },
     async replaceEpub() {
       const replacement = await buildEpubFixture({ first: fixtureChapter('Revised first section', 10) });
@@ -228,14 +253,15 @@ async function verifiedFixtureTls(origin: string, cert: Buffer): Promise<void> {
   });
 }
 
-export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean; reverseProxy: boolean; canonicalOrigin: boolean }>({
+export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean; reverseProxy: boolean; canonicalOrigin: boolean; cbzFixtures: boolean }>({
+  cbzFixtures: [false, { option: true }],
   liveProvider: [false, { option: true }],
   controlledReaderClock: [false, { option: true }],
   externalApp: [false, { option: true }],
   longNodeEpub: [false, { option: true }],
   reverseProxy: [false, { option: true }],
   canonicalOrigin: [true, { option: true }],
-  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub, reverseProxy, canonicalOrigin }, use, testInfo) => {
+  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub, reverseProxy, canonicalOrigin, cbzFixtures }, use, testInfo) => {
     if (externalApp) {
       const fixture = await loadExternalFixture(repoRoot);
       await use(fixture);
@@ -263,7 +289,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
     let clockOffset = 0;
     const readerNow = () => Date.now() + clockOffset;
     try {
-      if (!liveProvider) provider = await syntheticProvider(longNodeEpub);
+      if (!liveProvider) provider = await syntheticProvider(longNodeEpub, cbzFixtures);
       const absOrigin = provider?.origin ?? process.env.BOOKS_TEST_ABS_ORIGIN;
       const selectedLibrary = provider?.libraryId ?? process.env.BOOKS_PROOF_LIBRARY_ID;
       if (!absOrigin || !selectedLibrary) throw new Error('Isolated ABS fixture inputs are required');
@@ -292,6 +318,10 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
         async replaceEpub() {
           if (!provider) throw new Error('Live provider originals cannot be replaced by consumer tests');
           await provider.replaceEpub();
+        },
+        async setCbz(mode) {
+          if (!provider) throw new Error('Live provider originals cannot be replaced by consumer tests');
+          await provider.setCbz(mode);
         },
         setPdf(mode) {
           if (!provider) throw new Error('Live provider originals cannot be replaced by consumer tests');
