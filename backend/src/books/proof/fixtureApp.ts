@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import https from 'node:https';
+import http from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { createApp } from '../../index';
@@ -19,6 +20,7 @@ export interface FixtureAppOptions {
   listenOnContainerInterface?: boolean;
   previousUsers?: Array<{ label: string; bearer: string }>;
   readerNow?: () => number;
+  reverseProxy?: { publicOrigin: boolean };
 }
 export interface FixtureApplication {
   origin: string;
@@ -129,13 +131,33 @@ export async function startFixtureApp(
       ? new EpubPreparation(db, catalog, new BooksRelay(db, catalog, new BookStreams(), plex), plex, options.readerNow)
       : undefined;
     const app = createApp(db, burnManager, { plex, publicPath, booksPreparation });
-    const server = https.createServer({ cert, key }, app);
+    const priorOrigin = config.server.publicOrigin;
+    const upstream = options.reverseProxy ? http.createServer(app) : undefined;
+    if (upstream) {
+      app.set('trust proxy', 1);
+      await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    }
+    const server = https.createServer({ cert, key }, upstream ? (req, res) => {
+      const upstreamAddress = upstream.address();
+      if (!upstreamAddress || typeof upstreamAddress === 'string') { res.writeHead(502).end(); return; }
+      const forwarded = http.request({
+        host: '127.0.0.1', port: upstreamAddress.port, method: req.method, path: req.url,
+        headers: { ...req.headers, 'x-forwarded-proto': 'http', 'x-forwarded-host': req.headers.host },
+      }, response => {
+        res.writeHead(response.statusCode ?? 502, response.headers);
+        response.pipe(res);
+      });
+      forwarded.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+      res.once('close', () => { if (!res.writableFinished) forwarded.destroy(); });
+      req.pipe(forwarded);
+    } : app);
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(options.port ?? 0, options.listenOnContainerInterface ? '0.0.0.0' : '127.0.0.1', resolve);
     });
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Fixture listener unavailable');
+    if (options.reverseProxy?.publicOrigin) Object.assign(config.server, { publicOrigin: `https://127.0.0.1:${address.port}` });
     let stopped = false;
     return {
       origin: `https://127.0.0.1:${address.port}`, instanceId: randomUUID(),
@@ -182,6 +204,11 @@ export async function startFixtureApp(
         db.close();
         server.closeAllConnections();
         await new Promise<void>(resolve => server.close(() => resolve()));
+        if (upstream) {
+          upstream.closeAllConnections();
+          await new Promise<void>(resolve => upstream.close(() => resolve()));
+          Object.assign(config.server, { publicOrigin: priorOrigin });
+        }
       },
     };
   } catch (error) { db.close(); throw error; }

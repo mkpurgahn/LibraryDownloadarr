@@ -377,6 +377,7 @@ Customize your deployment with environment variables:
 |----------|-------------|---------|---------|
 | `PORT` | Application port | `5069` | `3000` |
 | `TRUST_PROXY_HOPS` | Exact number of trusted reverse-proxy hops; keep `0` for direct deployments | `0` | `1` for Nginx Proxy Manager |
+| `APP_PUBLIC_ORIGIN` | Canonical HTTPS portal origin for same-origin Books mutations behind TLS-terminating proxy chains; never the separate download hostname | request-derived origin | `https://downloads.example.com` |
 | `PLEX_POLL_RATE_LIMIT` | Plex PIN authentication checks allowed per 15 minutes | `75` | `75` |
 | `LOG_LEVEL` | Logging verbosity | `info` | `debug`, `warn`, `error` |
 | `DATABASE_PATH` | SQLite database location | `/app/data/librarydownloadarr.db` | `/data/db.sqlite` |
@@ -448,6 +449,17 @@ Nginx Proxy Manager with upstream `librarydownloadarr:5069`. It sets
 `express-rate-limit` safely use the forwarded client address.
 Never enable proxy trust on a directly exposed deployment, because clients
 could spoof forwarding headers.
+
+If TLS terminates before the last proxy (for example, Cloudflare Tunnel reaching
+Nginx Proxy Manager over HTTP), that proxy may overwrite `X-Forwarded-Proto` with
+`http`. Set `APP_PUBLIC_ORIGIN` to the exact HTTPS origin users open, such as
+`https://downloads.example.com`. Books otherwise rejects its media-session
+bootstrap with `Same-origin request required`. The value must be one HTTPS
+origin with no credentials, path, query or fragment. It pins the allowed Origin;
+it does not enable CORS, trust arbitrary forwarded headers, change proxy-hop
+trust, or relax bearer, membership, Fetch Metadata or Secure-cookie checks.
+Leave it unset for direct deployments or proxies that preserve the public
+scheme correctly. Do not use `DOWNLOAD_PUBLIC_ORIGIN` for this value.
 
 #### Nginx Example
 

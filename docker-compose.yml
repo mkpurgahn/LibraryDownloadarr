@@ -14,6 +14,8 @@ services:
       - LOG_LEVEL=debug
       # One trusted hop for Nginx Proxy Manager. Use 0 when exposing the app directly.
       - TRUST_PROXY_HOPS=1
+      # Canonical HTTPS portal origin when an inner proxy reports HTTP after TLS termination.
+      - APP_PUBLIC_ORIGIN=${APP_PUBLIC_ORIGIN:-}
       - PLEX_POLL_RATE_LIMIT=75
       # Database path (persisted to volume)
       - DATABASE_PATH=/app/data/librarydownloadarr.db

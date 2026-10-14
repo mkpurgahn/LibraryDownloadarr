@@ -18,7 +18,7 @@
   }
 
   .btn-primary {
-    @apply btn bg-gradient-to-r from-primary-500 to-secondary-500 text-white hover:from-primary-600 hover:to-secondary-600 focus:ring-primary-500;
+    @apply btn bg-primary-700 text-white hover:bg-primary-600 active:bg-primary-800 focus:ring-primary-300 disabled:bg-dark-50 disabled:text-gray-300 disabled:cursor-not-allowed;
   }
 
   .btn-secondary {

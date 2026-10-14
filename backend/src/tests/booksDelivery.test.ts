@@ -196,6 +196,43 @@ test('every_content_route_rechecks_identity', async () => {
   } finally { await f.close(); }
 });
 
+test('canonical_origin_ignores_forged_forwarding_headers_and_preserves_direct_guard', async () => {
+  const original = config.server.publicOrigin;
+  const membershipTtl = config.plex.membershipTtlMs;
+  const f = await fixture();
+  const publicOrigin = 'https://portal.fixture.invalid';
+  try {
+    config.server.publicOrigin = '';
+    const post = (origin: string, extra: Record<string, string> = {}) => f.get('/api/books/media-session', {
+      method: 'POST', headers: { ...f.auth(), Origin: origin, ...extra },
+    });
+    assert.equal((await post(f.origin)).status, 200);
+    assert.equal((await post(publicOrigin, {
+      'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'portal.fixture.invalid',
+    })).status, 403, 'Unconfigured direct server must not trust forwarded headers');
+    config.server.publicOrigin = publicOrigin;
+    assert.equal((await post(f.origin)).status, 403, 'Configured canonical origin does not add an internal origin alias');
+    for (const foreign of ['https://foreign.invalid', 'http://portal.fixture.invalid', 'https://portal.fixture.invalid:8443']) {
+      assert.equal((await post(foreign, {
+        'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': new URL(foreign).host,
+        Forwarded: `proto=https;host=${new URL(foreign).host}`,
+      })).status, 403);
+    }
+    const allowed = await post(publicOrigin, { 'X-Forwarded-Proto': 'http', 'Sec-Fetch-Site': 'same-origin' });
+    assert.equal(allowed.status, 200);
+    assert.match(allowed.headers.get('set-cookie')!, /;\s*Secure/);
+    f.plex.denied = true;
+    config.plex.membershipTtlMs = 0;
+    const denied = await post(publicOrigin);
+    assert.equal(denied.status, 403, 'Canonical origin cannot bypass revoked membership');
+    assert.equal(denied.headers.get('set-cookie'), null);
+  } finally {
+    config.server.publicOrigin = original;
+    config.plex.membershipTtlMs = membershipTtl;
+    await f.close();
+  }
+});
+
 for (const spelling of ['canonical', 'uppercase', 'trailing-slash'] as const) {
   for (const failure of ['denied', 'unavailable'] as const) {
     test(`accepted_transfer_aliases_recheck_membership_${spelling}_${failure}`, async () => {

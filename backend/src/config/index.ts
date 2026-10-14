@@ -45,6 +45,7 @@ export const config = {
   server: {
     port: intFromEnv('PORT', 5069),
     trustProxyHops: Math.min(10, intFromEnv('TRUST_PROXY_HOPS', 0)),
+    publicOrigin: originFromEnv('APP_PUBLIC_ORIGIN'),
   },
   plex: {
     clientIdentifier: 'librarydownloadarr',

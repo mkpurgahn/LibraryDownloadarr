@@ -98,7 +98,7 @@ export const BooksPage: React.FC = () => {
               <button className="btn-secondary min-h-11" onClick={() => { setInput(''); setSearch(''); }}>Clear search</button>
             </div>}
             {error && <div role="alert" className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-red-200">
-              <p>{error}</p><p className="mt-1 text-sm">Plex libraries remain separate from Books.</p>
+              <p>{error}</p>
               <button className="btn-secondary mt-3 min-h-11" onClick={() => setRefresh(value => value + 1)}>Retry Books</button>
             </div>}
             {loading ? <p role="status" className="py-12 text-center text-gray-400">Loading Books...</p> :

@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { Request } from 'express';
 import { CatalogQuery } from './types';
+import { config } from '../config';
 
 export const SELECTED_LIBRARY_ID = '163ac435-50a9-4f56-96d0-276edf9303c1';
 export const BOOKS_LIMITS = {
@@ -51,7 +52,8 @@ export function providerOrigin(value: string): URL {
 }
 
 export function sameOrigin(req: Request): void {
-  const expected = `${req.protocol}://${req.get('host')}`;
+  // An inner HTTP proxy can overwrite the public TLS scheme; pin it explicitly rather than trusting more headers.
+  const expected = config.server.publicOrigin || `${req.protocol}://${req.get('host')}`;
   if (!req.headers.origin || req.headers.origin !== expected ||
       (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin')) {
     throw new BooksError(403, 'SAME_ORIGIN_REQUIRED', 'Same-origin request required');

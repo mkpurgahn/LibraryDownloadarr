@@ -228,12 +228,14 @@ async function verifiedFixtureTls(origin: string, cert: Buffer): Promise<void> {
   });
 }
 
-export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean }>({
+export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean; reverseProxy: boolean; canonicalOrigin: boolean }>({
   liveProvider: [false, { option: true }],
   controlledReaderClock: [false, { option: true }],
   externalApp: [false, { option: true }],
   longNodeEpub: [false, { option: true }],
-  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub }, use, testInfo) => {
+  reverseProxy: [false, { option: true }],
+  canonicalOrigin: [true, { option: true }],
+  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub, reverseProxy, canonicalOrigin }, use, testInfo) => {
     if (externalApp) {
       const fixture = await loadExternalFixture(repoRoot);
       await use(fixture);
@@ -275,7 +277,10 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
       }
       else delete process.env.BOOKS_PROOF_ABS_TOKEN;
       const backend = await import('../../../backend/dist/books/proof/fixtureApp.js');
-      app = await backend.startFixtureApp(root, absOrigin, selectedLibrary, controlledReaderClock ? { readerNow } : {});
+      app = await backend.startFixtureApp(root, absOrigin, selectedLibrary, {
+        ...(controlledReaderClock ? { readerNow } : {}),
+        ...(reverseProxy ? { reverseProxy: { publicOrigin: canonicalOrigin } } : {}),
+      });
       await verifiedFixtureTls(app.origin, await fs.readFile(certFile));
       const fixture: BooksApp = {
         ...app, live: liveProvider,
@@ -310,6 +315,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
           clockOffset = 0;
           app = await backend.startFixtureApp(root, absOrigin, selectedLibrary, {
             port, previousUsers, ...(controlledReaderClock ? { readerNow } : {}),
+            ...(reverseProxy ? { reverseProxy: { publicOrigin: canonicalOrigin } } : {}),
           });
           fixture.origin = app.origin; fixture.users = app.users; fixture.instanceId = app.instanceId;
           await verifiedFixtureTls(app.origin, await fs.readFile(certFile));
