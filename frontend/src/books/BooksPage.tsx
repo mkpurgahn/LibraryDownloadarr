@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
@@ -35,7 +35,7 @@ export const BooksPage: React.FC = () => {
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const heading = useRef<HTMLHeadingElement>(null);
-  useEffect(() => { heading.current?.focus(); }, [sessionRevision]);
+  useLayoutEffect(() => { heading.current?.focus(); }, [sessionRevision]);
 
   useEffect(() => {
     const controller = new AbortController();

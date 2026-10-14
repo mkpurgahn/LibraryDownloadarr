@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
@@ -23,7 +23,7 @@ export const BookDetail: React.FC<{ readerPending?: boolean }> = ({ readerPendin
   const [starting, setStarting] = useState(false);
   const [shown, setShown] = useState(50);
   const heading = useRef<HTMLHeadingElement>(null);
-  useEffect(() => { heading.current?.focus(); }, [item?.itemId]);
+  useLayoutEffect(() => { heading.current?.focus(); }, [item?.itemId]);
   useEffect(() => {
     const controller = new AbortController();
     setItem(undefined); setError(''); setNotice(''); setShown(50);
