@@ -47,7 +47,7 @@ export type BooksApp = App & {
   restart(): Promise<void>;
 };
 
-async function syntheticProvider(): Promise<Provider> {
+async function syntheticProvider(longNodeEpub = false): Promise<Provider> {
   const token = randomUUID();
   let unavailable = false;
   const files = new Map<string, Buffer>();
@@ -94,7 +94,14 @@ async function syntheticProvider(): Promise<Provider> {
     '<svg xmlns="http://www.w3.org/2000/svg" onload="window.bookScriptExecuted = true;"><script>window.bookScriptExecuted = true;</script><foreignObject>Excluded</foreignObject></svg>' +
     '<style>@import "https://fixture.invalid/blocked"; p { background-image: u\\72l("https://fixture.invalid/blocked"); }</style>' +
     '<a href="https://fixture.invalid/blocked" onclick="window.bookScriptExecuted = true;">External reference</a>';
-  const ebook = await buildEpubFixture({ first: fixtureChapter('First section', 100).replace('</body>', `${hostile}</body>`), long: true });
+  const longProse = Array.from({ length: 600 }, (_, index) =>
+    `Token${String(index).padStart(5, '0')} A quiet reader follows the story through the library. `).join('');
+  const ebook = await buildEpubFixture({
+    first: longNodeEpub
+      ? `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>${longProse}</p></body></html>`
+      : fixtureChapter('First section', 100).replace('</body>', `${hostile}</body>`),
+    long: true,
+  });
   files.set('dual:dual-0', ebook);
   items[0].libraryFiles[0].metadata.size = ebook.length;
   const pdf = buildPdfFixture();
@@ -221,11 +228,12 @@ async function verifiedFixtureTls(origin: string, cert: Buffer): Promise<void> {
   });
 }
 
-export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean }>({
+export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean }>({
   liveProvider: [false, { option: true }],
   controlledReaderClock: [false, { option: true }],
   externalApp: [false, { option: true }],
-  app: async ({ liveProvider, controlledReaderClock, externalApp }, use, testInfo) => {
+  longNodeEpub: [false, { option: true }],
+  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub }, use, testInfo) => {
     if (externalApp) {
       const fixture = await loadExternalFixture(repoRoot);
       await use(fixture);
@@ -253,7 +261,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
     let clockOffset = 0;
     const readerNow = () => Date.now() + clockOffset;
     try {
-      if (!liveProvider) provider = await syntheticProvider();
+      if (!liveProvider) provider = await syntheticProvider(longNodeEpub);
       const absOrigin = provider?.origin ?? process.env.BOOKS_TEST_ABS_ORIGIN;
       const selectedLibrary = provider?.libraryId ?? process.env.BOOKS_PROOF_LIBRARY_ID;
       if (!absOrigin || !selectedLibrary) throw new Error('Isolated ABS fixture inputs are required');

@@ -46,13 +46,18 @@ export const ReaderPage: React.FC = () => {
       unsubscribe = progress.subscribe(setState);
       const saved = await progress.load();
       if (controller.signal.aborted) return;
-      setClient(progress);
       if (!saved && progress.compatible) {
-        await progress.claim(reader
-          ? { kind: 'epub', resourceId: reader.spine[0], textOffset: 0, fraction: 0, policyVersion: reader.policyVersion }
-          : { kind: 'pdf', page: 1, offset: 0 }, 0);
+        try {
+          await progress.claim(reader
+            ? { kind: 'epub', resourceId: reader.spine[0], textOffset: 0, fraction: 0, policyVersion: reader.policyVersion }
+            : { kind: 'pdf', page: 1, offset: 0 }, 0);
+        } catch (error) {
+          if (!controller.signal.aborted && (progress.current || !progress.compatible)) setClient(progress);
+          throw error;
+        }
         if (!controller.signal.aborted) setStarted(true);
       }
+      if (!controller.signal.aborted) setClient(progress);
     })().catch(error => { if (!aborted(error) && !controller.signal.aborted) setError(booksErrorMessage(error)); });
     return () => {
       controller.abort(); unsubscribe?.();

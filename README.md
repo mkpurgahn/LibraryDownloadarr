@@ -49,17 +49,24 @@ credential or provider origin. Use HTTPS, or an explicitly approved private HTTP
 origin. Redirects are rejected. Catalog failures do not invalidate Plex login.
 Configuration changes invalidate Books identities and caches. Catalog and cover
 responses are private/no-store; files use item-scoped opaque identities rather
-than provider paths.
+than provider paths. Missing optional descriptions or names use placeholders;
+invalid chapters fall back to tracks, and invalid timelines disable listening
+without hiding independently valid ebooks or original downloads.
 
 Original Books delivery uses same-origin, session-bound per-file tickets and a
 Books-only `HttpOnly; Secure; SameSite=Strict` media cookie. The cookie cannot
 authorize mutations or other API groups. GET and HEAD recheck membership and
 the current item/file manifest. Logout, configuration changes, and shutdown
 cancel Books streams without changing Plex's download transport.
+Fresh membership checks belong to the transfer and reader handlers, including
+accepted case and trailing-slash aliases.
 
 Original bytes support single bounded, open, and suffix ranges with truthful
 HEAD/206/416 headers and If-Range restart behavior. Upstream weak ETags stay
 weak; Books never use the Plex segmented accelerator or direct download origin.
+A nonmatching If-Range restarts a well-formed single range with full 200,
+even when the old offset exceeds the current size; a matching unsatisfiable
+range and unsupported multipart ranges still return 416.
 Missing safe validators/range support is explicitly fresh-download-only.
 Changed representations invalidate the old ticket. Native browser downloads
 must be reported as started, not as proven complete. Capacity is two Books file
@@ -76,6 +83,8 @@ history instead of silently reusing a stale page, section, or track position.
 History responses show the latest 100 records; older versions remain stored.
 EPUB positions require a current prepared spine and bounded text offset; file
 and sanitizer-policy changes make older locations incompatible.
+Pending progress requests cannot read or commit after their session is revoked
+or expires, even if a provider response arrives later.
 
 The EPUB preview has native contents, previous/next sections, scrolling, font
 size, and private resume. A second device must explicitly claim the saved
@@ -83,6 +92,9 @@ position; conflicts offer **Resume saved position** or **Continue here**.
 Positions save every ten seconds and on navigation/visibility changes when
 possible. Network failures show an unsaved state; browser-close delivery is
 best effort.
+First-open preparation includes the initial writer claim; saved-position choices
+appear only when a stored or conflicting position exists. EPUB text anchors
+retain positions within long paragraphs across font changes and reader reopen.
 
 Original MP3/M4B playback uses one native audio element that remains active
 across in-app navigation. Tracks follow ABS's included order, not filenames;
@@ -144,7 +156,9 @@ For a large selection, **Prepare all downloads** issues individual links in
 batches of at most 100 and starts the first available file; the remaining files
 have explicit **Save file** actions. This avoids silently exceeding stream limits
 when native browser completion cannot be observed. Expired links can be renewed
-per file. Native transfers use the server's attachment headers, including UTF-8
+per file. A valid manual Save changes only that row to **Started**, never Complete;
+expired or cancelled handoffs remain ready for renewal or another attempt.
+Native transfers use the server's attachment headers, including UTF-8
 filenames, rather than relying on the HTML `download` attribute.
 
 Books queue rows/tickets and in-memory protected views are cleared on user or

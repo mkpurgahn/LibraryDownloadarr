@@ -22,6 +22,7 @@ let ready = false;
 let disposed = false;
 let documentGeneration = 0;
 let assetBytes = 0;
+let restoredAnchor: { resourceId: string; textOffset: number; scrollTop: number } | undefined;
 const cfiDocument = document.implementation.createHTMLDocument('Reader section');
 const blobs = new Map<string, string>();
 const requests = new Map<number, { resolve(value: ArrayBuffer): void; reject(error: Error): void }>();
@@ -68,17 +69,32 @@ function nodes(): Text[] {
 }
 function location(): EbookLocator {
   const top = viewport.getBoundingClientRect().top;
+  const resourceId = descriptor.spine[section];
+  const fraction = viewport.scrollTop / Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+  if (restoredAnchor?.resourceId === resourceId && Math.abs(restoredAnchor.scrollTop - viewport.scrollTop) < 1) {
+    return { kind: 'epub', resourceId, textOffset: restoredAnchor.textOffset, fraction, policyVersion: READER_POLICY };
+  }
+  restoredAnchor = undefined;
   let offset = 0;
   for (const node of nodes()) {
     const range = document.createRange(); range.selectNodeContents(node);
-    if (range.getBoundingClientRect().bottom >= top) {
+    if (range.getBoundingClientRect().bottom > top) {
+      // Find a fully visible line; restoring a partly clipped line drifts on each reflow.
+      let low = 0; let high = node.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        range.setStart(node, middle);
+        range.setEnd(node, middle + 1);
+        if (range.getBoundingClientRect().top >= top - 1) high = middle;
+        else low = middle + 1;
+      }
+      offset += low;
       break;
     }
     offset += node.length;
   }
   return {
-    kind: 'epub', resourceId: descriptor.spine[section], textOffset: offset,
-    fraction: viewport.scrollTop / Math.max(1, viewport.scrollHeight - viewport.clientHeight), policyVersion: READER_POLICY,
+    kind: 'epub', resourceId, textOffset: offset, fraction, policyVersion: READER_POLICY,
   };
 }
 function report(save = false): void { if (ready && !navigating && !disposed) send('location', { locator: location(), save }); }
@@ -96,6 +112,8 @@ function restore(locator: EbookLocator): void {
       const range = document.createRange();
       range.setStart(node, restored.startOffset); range.setEnd(node, Math.min(node.length, restored.startOffset + 1));
       viewport.scrollTop += range.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
+      // Preserve the exact logical anchor until scrolling, rather than round to a new line on every reflow.
+      restoredAnchor = { resourceId: locator.resourceId, textOffset: locator.textOffset, scrollTop: viewport.scrollTop };
       return;
     }
     remaining -= node.length;
@@ -110,6 +128,7 @@ async function navigate(index: number, saved?: EbookLocator, fragment?: string):
   let phase = 'resource';
   try {
     for (const url of blobs.values()) URL.revokeObjectURL(url);
+    restoredAnchor = undefined;
     blobs.clear(); assetBytes = 0; shadow.replaceChildren();
     const text = new TextDecoder('utf-8', { fatal: true }).decode(await resource(descriptor.spine[index]));
     phase = 'sanitization';

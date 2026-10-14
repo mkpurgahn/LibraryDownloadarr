@@ -121,7 +121,35 @@ test('prepared_original_has_an_explicit_native_save_action', async ({ page, app 
   const file = await download;
   expect(file.suggestedFilename()).toBe('A Tale in Two Formats 2.pdf');
   await file.saveAs(info.outputPath('explicit-original.bin'));
+  const rows = page.getByRole('complementary', { name: 'Download activity' }).locator('section');
+  await expect(rows.nth(1).getByText('Started', { exact: true })).toBeVisible();
+  await expect(rows.nth(2).getByText('Ready to save', { exact: true })).toBeVisible();
+  await expect(rows.nth(3).getByText('Ready to save', { exact: true })).toBeVisible();
+  await expect(page.getByText('Started', { exact: true })).toHaveCount(2);
+  await expect(page.getByText('Complete', { exact: true })).toHaveCount(0);
+  await capture(page, 'manual-original-started', info);
 });
+
+for (const prevention of ['expired', 'prevented'] as const) {
+  test(`manual_save_${prevention}_does_not_mark_started`, async ({ page, app }, info) => {
+    await signIn(page, app);
+    await page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true }).click();
+    const first = await originalDownload(page, () => page.getByRole('button', { name: 'Prepare all downloads' }).click(), info);
+    await first.saveAs(info.outputPath('first-original.bin'));
+    const row = page.getByRole('complementary', { name: 'Download activity' }).locator('section').nth(1);
+    await expect(row.getByText('Ready to save', { exact: true })).toBeVisible();
+    if (prevention === 'expired') await page.clock.setFixedTime(new Date(Date.now() + 16 * 60 * 1000));
+    else await page.evaluate(() => {
+      document.addEventListener('click', event => {
+        if (event.target instanceof Element && event.target.closest('a')?.textContent?.trim() === 'Save file') event.preventDefault();
+      });
+    });
+    await row.getByRole('link', { name: 'Save file', exact: true }).click();
+    if (prevention === 'expired') await expect(row.getByText('This link expired. Renew it before saving.')).toBeVisible();
+    await expect(row.getByText('Ready to save', { exact: true })).toBeVisible();
+    await expect(page.getByText('Started', { exact: true })).toHaveCount(1);
+  });
+}
 
 test('user_change_clears_book_state', async ({ page, context, app }, info) => {
   await signIn(page, app);

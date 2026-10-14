@@ -3,8 +3,8 @@ import { useDownloads } from '../contexts/DownloadContext';
 import { BookQueueItem } from '../books/downloads';
 import { booksErrorMessage } from '../books/api';
 
-function BookDownloadRow({ item, dismiss, retry }: {
-  item: BookQueueItem; dismiss: () => void; retry: () => Promise<void>;
+function BookDownloadRow({ item, dismiss, retry, started }: {
+  item: BookQueueItem; dismiss: () => void; retry: () => Promise<void>; started: (url: string) => void;
 }) {
   const [retrying, setRetrying] = React.useState(false);
   const [notice, setNotice] = React.useState('');
@@ -34,7 +34,11 @@ function BookDownloadRow({ item, dismiss, retry }: {
           onClick={event => {
             if (!item.expiresAt || item.expiresAt <= Date.now()) {
               event.preventDefault(); setNotice('This link expired. Renew it before saving.');
+              return;
             }
+            const nativeEvent = event.nativeEvent;
+            const url = item.manualUrl!;
+            window.setTimeout(() => { if (!nativeEvent.defaultPrevented) started(url); }, 0);
           }}>
           Save file
         </a>
@@ -81,6 +85,7 @@ export const DownloadManager: React.FC = () => {
     pauseParallelDownload,
     resumeParallelDownload,
     retryBookDownload,
+    markBookDownloadStarted,
   } = useDownloads();
 
   if (downloads.length === 0) return null;
@@ -93,7 +98,7 @@ export const DownloadManager: React.FC = () => {
       {downloads.map((download) => {
         if (download.source === 'abs') {
           return <BookDownloadRow key={download.id} item={download} dismiss={() => removeDownload(download.id)}
-            retry={() => retryBookDownload(download.id)} />;
+            retry={() => retryBookDownload(download.id)} started={url => markBookDownloadStarted(download.id, url)} />;
         }
         const isPreparing = download.status === 'queued' || download.status === 'preparing';
         const isParallelActive =

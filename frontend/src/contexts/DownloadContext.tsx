@@ -63,6 +63,7 @@ interface DownloadContextType {
   downloads: QueueDownload[];
   startBookDownloads: (targets: BookDownloadTarget[]) => Promise<{ started: number; failed: number }>;
   retryBookDownload: (id: string) => Promise<void>;
+  markBookDownloadStarted: (id: string, url: string) => void;
   startOriginalDownload: (
     ratingKey: string,
     partKey: string,
@@ -344,6 +345,11 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
     const item = bookDownloads.find(item => item.id === id);
     if (!item) throw new Error('This Books download is no longer in the queue.');
     await startBookDownloads([item]);
+  };
+  const markBookDownloadStarted = (id: string, url: string) => {
+    setBookDownloads(current => current.map(item =>
+      item.id === id && item.manualUrl === url && item.expiresAt && item.expiresAt > Date.now()
+        ? { ...item, status: 'started', error: undefined } : item));
   };
 
   const activeJobKey = useMemo(
@@ -1074,6 +1080,7 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
         downloads: [...downloads.map(download => ({ ...download, source: 'plex' as const })), ...bookDownloads],
         startBookDownloads,
         retryBookDownload,
+        markBookDownloadStarted,
         startOriginalDownload,
         startPreferredDownloads,
         startBurnJob,
