@@ -37,6 +37,8 @@ export async function runArchiveWorker(
   });
   return new Promise((resolve, reject) => {
     let settled = false;
+    let cancellation: 'abort' | 'timeout' | undefined;
+    let cancellationTimer: NodeJS.Timeout | undefined;
     const unsupported = (): ArchiveResult => ({
       state: 'download-only', resources: [], spine: [], toc: [],
       reason: format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON,
@@ -46,18 +48,29 @@ export async function runArchiveWorker(
     const finish = (value: ArchiveResult, error?: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(timer); clearTimeout(watchdog); clearTimeout(cancellationTimer);
       signal.removeEventListener('abort', abort);
       void worker.terminate().then(() => {
         if (error) reject(error); else resolve(value);
       }, reject);
     };
-    const abort = () => finish(unsupported(), new DOMException('Preparation cancelled', 'AbortError'));
-    const timer = setTimeout(() => finish({ ...unsupported(), failureCode: 'WORKER_TIMEOUT' }), EPUB_LIMITS.timeoutMs);
+    const cancelledError = () => cancellation === 'abort' ? new DOMException('Preparation cancelled', 'AbortError') : undefined;
+    const cancelledResult = () => ({ ...unsupported(), failureCode: 'WORKER_TIMEOUT' as const });
+    const cancel = (reason: 'abort' | 'timeout') => {
+      if (settled) return;
+      if (cancellation) { if (reason === 'abort') cancellation = reason; return; }
+      cancellation = reason;
+      worker.postMessage({ type: 'cancel' });
+      cancellationTimer = setTimeout(() => finish(cancelledResult(), cancelledError()), 1000);
+    };
+    const abort = () => cancel('abort');
+    // Cooperate first so in-flight file handles close; an unresponsive worker still has the original hard deadline.
+    const timer = setTimeout(() => cancel('timeout'), EPUB_LIMITS.timeoutMs - 1000);
+    const watchdog = setTimeout(() => finish(cancelledResult(), cancelledError()), EPUB_LIMITS.timeoutMs);
     signal.addEventListener('abort', abort, { once: true });
-    worker.once('message', (value: ArchiveResult) => finish(value));
-    worker.once('error', () => finish(unsupported()));
-    worker.once('exit', () => { if (!settled) finish(unsupported()); });
+    worker.once('message', (value: ArchiveResult) => finish(cancellation === 'timeout' ? cancelledResult() : value, cancelledError()));
+    worker.once('error', () => finish(unsupported(), cancelledError()));
+    worker.once('exit', () => { if (!settled) finish(unsupported(), cancelledError()); });
     if (signal.aborted) abort();
   });
 }
@@ -245,7 +258,7 @@ export class EpubPreparation {
       return this.describe(principal, entry);
     } finally {
       operation.close();
-      try { await fs.rm(work, { recursive: true, force: true }); }
+      try { await fs.rm(work, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); }
       finally { preparing = false; }
     }
   }

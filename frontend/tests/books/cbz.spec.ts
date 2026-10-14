@@ -58,6 +58,7 @@ test('CBZ same-input detail and real numbered pages', async ({ page, app }, info
 test('CBZ originals keep independent private progress across handles cache and backend restart', async ({ page, app }, info) => {
   await signIn(page, app);
   await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await expect(page.getByLabel('Ebook original').locator('option')).toHaveCount(2);
   const options = await page.getByLabel('Ebook original').locator('option').evaluateAll(elements =>
     elements.map(element => (element as HTMLOptionElement).value));
   await page.getByRole('link', { name: 'Read', exact: true }).click();
@@ -145,6 +146,7 @@ test('CBZ within-page position survives zoom reflow reopen and explicit writer t
   await expectPanel(page, 1, 1);
   const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
   await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('200');
+  await expect.poll(() => page.getByRole('img', { name: 'Comic page 1 of 3', exact: true }).evaluate(element => element.getBoundingClientRect().width)).toBe(960);
   await viewport.evaluate(element => { element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.6; });
   await expect.poll(() => viewport.evaluate(element => element.scrollTop / (element.scrollHeight - element.clientHeight))).toBeGreaterThan(0.55);
   await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('300');
@@ -198,7 +200,9 @@ test('CBZ replaced originals retain incompatible history and failed saves retry 
   await expectPanel(page, 1, 2);
 });
 
-test('CBZ touch turning and page bounds preserve semantic page order', async ({ page, app }) => {
+test.describe('touch-enabled comic reader', () => {
+  test.use({ hasTouch: true });
+  test('CBZ touch turning and page bounds preserve semantic page order', async ({ page, app }) => {
   await signIn(page, app);
   await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
   await page.getByRole('link', { name: 'Read', exact: true }).click();
@@ -219,4 +223,5 @@ test('CBZ touch turning and page bounds preserve semantic page order', async ({ 
   for (const box of await page.locator('button, select, input').all()) {
     expect((await box.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   }
+  });
 });

@@ -164,14 +164,15 @@ used to fetch remote pages; unexpected other files fail explicitly.
 
 Pinned sharp 0.34.5 validates CBZ rasters inside the worker, with libvips
 concurrency explicitly set to **one** (including musl/Alpine) and its operation
-cache disabled. Pages are decoded serially; the browser acquires only its
+cache disabled and a one-second native decode deadline per page. Pages are decoded serially; the browser acquires only its
 current page, cancels abandoned turns and releases object URLs on navigation,
 session/configuration changes and close. Its decoded-pixel counter describes
 the single application-owned image, not browser RSS or compositor memory.
 The worker's 256 MiB tracked heap/external budget and V8 heap limits **do not**
 bound native libvips allocations or whole-process RSS. Sampled process-RSS
 evidence is reported separately, not as a hard memory guarantee. The external
-30-second watchdog cancels preparation and waits for worker termination before
+30-second hard watchdog first requests cooperative cancellation (up to one
+second for file-handle cleanup), then waits for worker termination before
 releasing its slot and cleaning temporary files. A sub-limit archive can still
 be download-only on a constrained runtime. Reader handles renew on demand;
 stable original/policy-bound progress survives handle/cache expiry and restart.

@@ -129,10 +129,10 @@ function rewriteCss(value: string, from: string, resources: Map<string, Prepared
   return css.generate(tree);
 }
 
-async function processArchive(source: string, output: string, format: ArchiveFormat): Promise<ArchiveResult> {
+async function processArchive(source: string, output: string, format: ArchiveFormat, signal: AbortSignal): Promise<ArchiveResult> {
   const started = performance.now();
   const stat = await fs.stat(source);
-  const budget = new ArchiveBudget(stat.size);
+  const budget = new ArchiveBudget(stat.size, signal);
   const entries = new Map<string, StoredEntry>();
   const foldedNames = new Set<string>();
   let file: FileHandle | undefined;
@@ -305,7 +305,9 @@ if (parentPort) {
   if (!input || typeof input !== 'object' || !('source' in input) || !('output' in input) ||
       typeof input.source !== 'string' || typeof input.output !== 'string') throw new Error('Invalid worker input');
   const format = 'format' in input && input.format === 'cbz' ? 'cbz' : 'epub';
-  void processArchive(input.source, input.output, format).then(
+  const controller = new AbortController();
+  parentPort.on('message', message => { if (message?.type === 'cancel') controller.abort(); });
+  void processArchive(input.source, input.output, format, controller.signal).then(
     result => parentPort!.postMessage(result),
     () => parentPort!.postMessage({
       state: 'download-only', resources: [], spine: [], toc: [], reason: format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON,

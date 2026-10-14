@@ -76,11 +76,12 @@ export class ArchiveBudget {
   peakTrackedBytes = 0;
   peakProcessRssBytes = 0;
   private entryBytes = 0;
-  constructor(private readonly compressedBytes: number) {
+  constructor(private readonly compressedBytes: number, private readonly signal?: AbortSignal) {
     if (!Number.isSafeInteger(compressedBytes) || compressedBytes <= 0) throw new UnsafeEpub('Invalid archive size');
     if (compressedBytes > EPUB_LIMITS.compressedBytes) throw new BooksError(413, 'EPUB_TOO_LARGE', DOWNLOAD_ONLY_REASON);
   }
   beginEntry(): void {
+    this.signal?.throwIfAborted();
     if (this.entries >= EPUB_LIMITS.entries) throw new UnsafeEpub('Too many archive entries');
     this.entries += 1; this.entryBytes = 0;
   }
@@ -94,6 +95,7 @@ export class ArchiveBudget {
     this.checkMemory();
   }
   checkMemory(additionalBytes = 0): void {
+    this.signal?.throwIfAborted();
     const memory = process.memoryUsage();
     this.peakProcessRssBytes = Math.max(this.peakProcessRssBytes, memory.rss);
     const accounted = memory.heapUsed + memory.external + additionalBytes;

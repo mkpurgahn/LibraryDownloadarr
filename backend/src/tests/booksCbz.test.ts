@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { Worker } from 'node:worker_threads';
+import { MessageChannel, Worker } from 'node:worker_threads';
 import test, { after } from 'node:test';
 import sharp from 'sharp';
 import { runArchiveWorker } from '../books/epub/prepare';
@@ -178,7 +178,57 @@ test('CBZ real preparation cancellation terminates the worker before cleanup and
     assert.equal(exited, true);
     assert.ok(performance.now() - start < 5000);
     evidence.push({ case: 'real-cbz-worker-abort', exited, elapsedMs: performance.now() - start });
-  } finally { clearTimeout(timer); await fs.rm(root, { recursive: true, force: true }); }
+  } finally { clearTimeout(timer); await fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); }
+  await prepare(await buildCbzFixture(), async result => { assert.equal(result.state, 'ready'); });
+});
+
+test('CBZ cooperatively cancels after observing an active native raster decode', async () => {
+  const root = path.resolve('.test-data', 'books-cbz-native-cancel', randomUUID());
+  await fs.mkdir(root, { recursive: true });
+  const source = path.join(root, 'original.cbz'); const output = path.join(root, 'pages');
+  const panel = await sharp({ create: { width: 4000, height: 4000, channels: 3, background: '#dedac1' } }).png().toBuffer();
+  await fs.writeFile(source, await buildCbzFixture([1, 2, 3].map(index => ({ name: `${index}.png`, data: panel }))));
+  const phase = new MessageChannel();
+  const controller = new AbortController();
+  let nativeProcessCount = 0;
+  let exited = false;
+  let observedAt = 0;
+  phase.port1.once('message', (count: number) => {
+    nativeProcessCount = count; observedAt = performance.now(); controller.abort();
+  });
+  try {
+    await assert.rejects(runArchiveWorker(source, output, controller.signal, () => {
+      const worker = new Worker(`
+        const { workerData } = require('node:worker_threads');
+        const sharp = require(${JSON.stringify(require.resolve('sharp'))});
+        const original = sharp.prototype.toBuffer;
+        sharp.prototype.toBuffer = function(...args) {
+          const result = original.apply(this, args);
+          const sample = setInterval(() => {
+            const count = sharp.counters().process;
+            if (count > 0) { clearInterval(sample); workerData.phase.postMessage(count); }
+          }, 1);
+          result.finally(() => clearInterval(sample)).catch(() => {});
+          return result;
+        };
+        require(${JSON.stringify(path.resolve('dist', 'books', 'epub', 'worker.js'))});
+      `, {
+        eval: true, workerData: { source, output, format: 'cbz', phase: phase.port2 }, transferList: [phase.port2],
+        env: {}, resourceLimits: { maxOldGenerationSizeMb: 128, maxYoungGenerationSizeMb: 16, stackSizeMb: 4 },
+      });
+      worker.once('exit', () => { exited = true; });
+      return worker;
+    }, 'cbz'), { name: 'AbortError' });
+    assert.ok(nativeProcessCount > 0);
+    assert.equal(exited, true);
+    assert.ok(performance.now() - observedAt < 5000);
+    evidence.push({ case: 'observed-native-decode-abort', nativeProcessCount, exited,
+      afterSignalMs: performance.now() - observedAt,
+      scope: 'Representative PNG with native process counter observed before abort; not a universal native execution deadline.' });
+  } finally {
+    phase.port1.close(); phase.port2.close();
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
   await prepare(await buildCbzFixture(), async result => { assert.equal(result.state, 'ready'); });
 });
 

@@ -81,7 +81,7 @@ export async function prepareComic(entries: Map<string, StoredEntry>, output: st
     const bytes = await fs.readFile(filename);
     if (expected.format === 'png') requireStaticPng(bytes);
     if (expected.format === 'webp') requireStaticWebp(bytes);
-    const image = sharp(bytes, { limitInputPixels: CBZ_LIMITS.pixels, failOn: 'warning', sequentialRead: true });
+    const image = sharp(bytes, { limitInputPixels: CBZ_LIMITS.pixels, failOn: 'warning', sequentialRead: true }).timeout({ seconds: 1 });
     try {
       const metadata = await image.metadata();
       const { width, height } = metadata;

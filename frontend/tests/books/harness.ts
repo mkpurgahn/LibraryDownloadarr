@@ -367,7 +367,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
       await fs.rm(root, { recursive: true, force: true });
     }
   },
-  context: async ({ browser, browserName, app, viewport, serviceWorkers, launchOptions }, use, testInfo) => {
+  context: async ({ browser, browserName, app, viewport, serviceWorkers, launchOptions, hasTouch }, use, testInfo) => {
     const ownedBrowser = serviceWorkers === 'allow' && browserName === 'chromium'
       ? await chromium.launch({
         ...launchOptions, headless: true,
@@ -376,7 +376,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
     let context: BrowserContext | undefined;
     try {
       context = await (ownedBrowser ?? browser).newContext({
-        baseURL: app.origin, viewport, acceptDownloads: true, serviceWorkers,
+        baseURL: app.origin, viewport, acceptDownloads: true, serviceWorkers, hasTouch,
         // These contexts contain only the CA-verified, generated loopback fixture.
         ignoreHTTPSErrors: !ownedBrowser,
       });
