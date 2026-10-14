@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { test, expect, signIn, capture, originalDownload } from './harness';
 
 test.use({ cbzFixtures: true, controlledReaderClock: true, reverseProxy: true });
@@ -22,6 +22,12 @@ async function expectPanel(page: Page, position: number, panel: number, chapter 
     }
     return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', data)), byte => byte.toString(16).padStart(2, '0')).join('');
   })).toBe(expected);
+}
+
+async function expectFraction(viewport: Locator, axis: 'vertical' | 'horizontal', fraction: number) {
+  await expect.poll(() => viewport.evaluate((element, axis) => axis === 'vertical'
+    ? element.scrollTop / (element.scrollHeight - element.clientHeight)
+    : element.scrollLeft / (element.scrollWidth - element.clientWidth), axis)).toBeCloseTo(fraction, 2);
 }
 
 test('CBZ same-input detail and real numbered pages', async ({ page, app }, info) => {
@@ -154,15 +160,22 @@ test('CBZ within-page position survives zoom reflow reopen and explicit writer t
   await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('200');
   await expect.poll(() => page.getByRole('img', { name: 'Comic page 1 of 3', exact: true }).evaluate(element => element.getBoundingClientRect().width)).toBe(960);
   await viewport.evaluate(element => { element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.6; });
-  await expect.poll(() => viewport.evaluate(element => element.scrollTop / (element.scrollHeight - element.clientHeight))).toBeGreaterThan(0.55);
+  await expectFraction(viewport, 'vertical', 0.6);
   await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('300');
-  await expect.poll(() => viewport.evaluate(element => element.scrollTop / (element.scrollHeight - element.clientHeight))).toBeGreaterThan(0.55);
+  await expectFraction(viewport, 'vertical', 0.6);
   await page.getByRole('link', { name: 'Back to book' }).click();
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
   await expectPanel(page, 1, 1);
+  const zoomSaved = page.waitForResponse(response => {
+    if (!response.url().endsWith('/progress/ebook') || response.request().method() !== 'PUT' || response.status() !== 200) return false;
+    const write = response.request().postDataJSON();
+    return write.op === 'save' && write.locator.kind === 'cbz' && write.locator.page === 1 &&
+      Math.abs(write.locator.offset - 0.6) < 0.005;
+  });
   await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('200');
-  await expect.poll(() => viewport.evaluate(element => element.scrollTop / (element.scrollHeight - element.clientHeight))).toBeGreaterThan(0.55);
+  await expectFraction(viewport, 'vertical', 0.6);
+  await zoomSaved;
   const context = await browser.newContext({ baseURL: app.origin, ignoreHTTPSErrors: true, viewport: page.viewportSize() });
   await context.route('**/*', route => new URL(route.request().url()).origin === app.origin ? route.continue() : route.abort());
   try {
@@ -179,6 +192,108 @@ test('CBZ within-page position survives zoom reflow reopen and explicit writer t
     await expect(page.getByText('Position saved', { exact: true })).toBeVisible();
     await capture(page, 'cbz-explicit-takeover', info);
   } finally { await context.close(); }
+});
+
+for (const axis of ['vertical', 'horizontal'] as const) {
+  test(`CBZ ${axis} bookmark survives viewport growth clamping and saved reopen`, async ({ page, app }, info) => {
+    await signIn(page, app);
+    await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+    await page.getByRole('link', { name: 'Read', exact: true }).click();
+    await expectPanel(page, 1, 1);
+    const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
+    const zoom = page.getByRole('combobox', { name: 'Zoom', exact: true });
+    await zoom.selectOption('300');
+    await expect.poll(() => page.getByRole('img', { name: 'Comic page 1 of 3', exact: true })
+      .evaluate(element => element.getBoundingClientRect().width)).toBe(1440);
+    await viewport.evaluate((element, axis) => {
+      if (axis === 'vertical') element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.6;
+      else element.scrollLeft = (element.scrollWidth - element.clientWidth) * 0.6;
+    }, axis);
+    await expectFraction(viewport, axis, 0.6);
+    await page.getByRole('link', { name: 'Back to book' }).click();
+    await page.getByRole('link', { name: 'Read', exact: true }).click();
+    await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+    await expectPanel(page, 1, 1);
+    await zoom.selectOption('300');
+    await expectFraction(viewport, axis, 0.6);
+    const before = await viewport.evaluate(element => ({
+      top: element.scrollTop, left: element.scrollLeft,
+      height: element.scrollHeight, width: element.scrollWidth,
+    }));
+    const size = page.viewportSize()!;
+    await page.setViewportSize(axis === 'vertical' ? { ...size, height: 1900 } : { ...size, width: 1370 });
+    const after = await viewport.evaluate(element => ({
+      vertical: element.scrollHeight - element.clientHeight,
+      horizontal: element.scrollWidth - element.clientWidth,
+    }));
+    expect(axis === 'vertical' ? before.top : before.left).toBeGreaterThan(after[axis]);
+    expect(after[axis]).toBeGreaterThan(0);
+    await expectFraction(viewport, axis, 0.6);
+    await capture(page, `cbz-${axis}-clamp-preserved`, info);
+    await page.getByRole('link', { name: 'Back to book' }).click();
+    await page.getByRole('link', { name: 'Read', exact: true }).click();
+    await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+    await expectPanel(page, 1, 1);
+    await zoom.selectOption('300');
+    await expectFraction(viewport, axis, 0.6);
+  });
+}
+
+test('CBZ fast real scrolling is captured before resize and saved reopen', async ({ page, app }) => {
+  await signIn(page, app);
+  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await expectPanel(page, 1, 1);
+  const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
+  await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('300');
+  await expect.poll(() => page.getByRole('img', { name: 'Comic page 1 of 3', exact: true })
+    .evaluate(element => element.getBoundingClientRect().width)).toBe(1440);
+  await viewport.hover();
+  await page.mouse.wheel(0, 360);
+  await expect.poll(() => viewport.evaluate(element => element.scrollTop)).toBeCloseTo(360, 0);
+  const fraction = await viewport.evaluate(element => element.scrollTop / (element.scrollHeight - element.clientHeight));
+  expect(fraction).toBeGreaterThan(0.05);
+  expect(fraction).toBeLessThan(0.9);
+  await page.setViewportSize({ ...page.viewportSize()!, height: 1000 });
+  await expectFraction(viewport, 'vertical', fraction);
+  await page.getByRole('link', { name: 'Back to book' }).click();
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+  await expectPanel(page, 1, 1);
+  await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('300');
+  await expectFraction(viewport, 'vertical', fraction);
+});
+
+test('CBZ movement in the restoration frame survives resize and page transition', async ({ page, app }) => {
+  await signIn(page, app);
+  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await expectPanel(page, 1, 1);
+  const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
+  await viewport.evaluate(element => {
+    const image = element.querySelector('img')!;
+    const observer = new MutationObserver(() => {
+      if (image.getBoundingClientRect().width !== 1440) return;
+      observer.disconnect();
+      element.addEventListener('scroll', () => { element.setAttribute('data-fast-scroll-observed', 'true'); }, { once: true });
+      element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.6;
+    });
+    observer.observe(image, { attributes: true, attributeFilter: ['style'] });
+  });
+  await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('300');
+  await expect(viewport).toHaveAttribute('data-fast-scroll-observed', 'true');
+  await page.setViewportSize({ ...page.viewportSize()!, height: 1000 });
+  await expectFraction(viewport, 'vertical', 0.6);
+  await page.getByRole('link', { name: 'Back to book' }).click();
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+  await expectPanel(page, 1, 1);
+  await page.getByRole('combobox', { name: 'Zoom', exact: true }).selectOption('300');
+  await expectFraction(viewport, 'vertical', 0.6);
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await expectPanel(page, 2, 2);
+  await expectFraction(viewport, 'vertical', 0);
+  await expectFraction(viewport, 'horizontal', 1);
 });
 
 test('CBZ replaced originals retain incompatible history and failed saves retry without losing a rewind', async ({ page, app }) => {

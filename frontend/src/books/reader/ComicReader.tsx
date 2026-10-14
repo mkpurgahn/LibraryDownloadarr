@@ -26,7 +26,10 @@ export const ComicReader: React.FC<{
   const image = useRef<HTMLImageElement>();
   const manifest = useRef(descriptor);
   const anchor = useRef<ComicLocator>(initial);
-  const restoring = useRef<{ top: number; left: number }>();
+  const snapshot = useRef<{
+    image: HTMLImageElement; top: number; left: number;
+    width: number; height: number; scrollWidth: number; scrollHeight: number;
+  }>();
   const queue = useRef<Promise<void>>(Promise.resolve());
   const active = useRef<AbortController>();
   const timer = useRef<number>();
@@ -36,29 +39,30 @@ export const ComicReader: React.FC<{
 
   const save = () => {
     if (!blocked.current && image.current?.naturalWidth) {
-      position(true);
+      position();
       void progress.save(anchor.current);
     }
   };
-  const position = (explicit = false) => {
+  const position = () => {
     const element = viewport.current;
-    if (!element || !image.current?.naturalWidth) return;
-    const restored = restoring.current;
-    if (!explicit && restored && Math.abs(element.scrollTop - restored.top) < 1 &&
-        Math.abs(element.scrollLeft - restored.left) < 1) return;
-    restoring.current = undefined;
+    const previous = snapshot.current;
+    if (!element || !image.current?.naturalWidth || previous?.image !== image.current) return;
+    // A changed layout can clamp offsets before either scroll or ResizeObserver fires.
+    if (element.clientWidth !== previous.width || element.clientHeight !== previous.height ||
+        element.scrollWidth !== previous.scrollWidth || element.scrollHeight !== previous.scrollHeight) return;
     const vertical = element.scrollHeight - element.clientHeight;
     const horizontal = element.scrollWidth - element.clientWidth;
     anchor.current = { ...anchor.current,
-      offset: vertical > 0 ? clamp(element.scrollTop / vertical) : anchor.current.offset,
-      horizontal: horizontal > 0 ? clamp(element.scrollLeft / horizontal) : anchor.current.horizontal };
+      offset: vertical > 0 && element.scrollTop !== previous.top ? clamp(element.scrollTop / vertical) : anchor.current.offset,
+      horizontal: horizontal > 0 && element.scrollLeft !== previous.left ? clamp(element.scrollLeft / horizontal) : anchor.current.horizontal };
+    snapshot.current = { ...previous, top: element.scrollTop, left: element.scrollLeft };
     progress.location = anchor.current;
   };
 
   useEffect(() => {
     const element = viewport.current!;
     const observer = new ResizeObserver(() => {
-      if (restoring.current) position();
+      position();
       setViewportSize({ width: element.clientWidth, height: element.clientHeight });
     });
     observer.observe(element);
@@ -173,13 +177,18 @@ export const ComicReader: React.FC<{
     const element = viewport.current;
     const current = image.current;
     if (!element || !current || !resource || !viewportSize.width) return;
+    position();
     const scale = fit === 'width' ? viewportSize.width / resource.width :
       fit === 'page' ? Math.min(viewportSize.width / resource.width, viewportSize.height / resource.height) : zoom / 100;
     current.style.width = `${Math.max(1, Math.floor(resource.width * scale))}px`;
     current.style.height = 'auto';
     element.scrollTop = anchor.current.offset * Math.max(0, element.scrollHeight - element.clientHeight);
     element.scrollLeft = anchor.current.horizontal * Math.max(0, element.scrollWidth - element.clientWidth);
-    restoring.current = { top: element.scrollTop, left: element.scrollLeft };
+    snapshot.current = {
+      image: current, top: element.scrollTop, left: element.scrollLeft,
+      width: element.clientWidth, height: element.clientHeight,
+      scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight,
+    };
   }, [resource, fit, zoom, viewportSize]);
 
   const go = (next: number) => {
@@ -216,13 +225,13 @@ export const ComicReader: React.FC<{
     <div className="flex flex-wrap items-end gap-2 text-sm">
       <label className="flex-1">Page fit
         <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={fit}
-          onChange={event => { position(true); setFit(event.target.value as Fit); }}>
+          onChange={event => { position(); setFit(event.target.value as Fit); }}>
           <option value="page">Fit page</option><option value="width">Fit width</option><option value="manual">Manual zoom</option>
         </select>
       </label>
       <label>Zoom
         <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={zoom}
-          onChange={event => { position(true); setFit('manual'); setZoom(Number(event.target.value)); }}>
+          onChange={event => { position(); setFit('manual'); setZoom(Number(event.target.value)); }}>
           {[50, 75, 100, 125, 150, 200, 300].map(value => <option key={value} value={value}>{value}%</option>)}
         </select>
       </label>

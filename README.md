@@ -114,7 +114,8 @@ right-to-left and has an explicit left-to-right toggle. Direction changes
 navigation, not the semantic page order. The selected original's filename is
 shown in the reader; separate chapter files never borrow another file's pages
 or saved position. Vertical and horizontal within-page fractions survive zoom,
-reflow and reopening when scrolling is available. Existing writer claims,
+viewport resizing (including automatic scroll clamping), and reopening when
+scrolling is available. Existing writer claims,
 conflicts, intentional rewind and retry semantics apply. History from another
 currently present ebook original does not make a new chapter incompatible;
 history from removed originals is still retained and surfaced explicitly.
