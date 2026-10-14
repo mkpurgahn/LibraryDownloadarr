@@ -499,6 +499,7 @@ LibraryDownloadarr uses Plex authentication after a one-time local bootstrap:
    - Users click "Sign in with Plex"
    - Redirected to Plex.tv for authorization
    - LibraryDownloadarr verifies user has access to your configured Plex server
+   - After authorization, the verified user and application token are activated together; the original app opens without needing a reload after closing the Plex popup
    - User's Plex permissions are automatically enforced
    - Only the exact Plex server owner can access settings, logs, and global download history
 

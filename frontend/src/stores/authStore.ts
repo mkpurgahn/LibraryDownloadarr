@@ -8,6 +8,7 @@ interface AuthState {
   isLoading: boolean;
   error: string | null;
   sessionRevision: number;
+  setSession: (user: User, token: string) => void;
   setUser: (user: User | null) => void;
   setToken: (token: string | null) => void;
   logout: () => Promise<void>;
@@ -27,6 +28,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isLoading: false,
   error: null,
   sessionRevision: 0,
+
+  setSession: (user, token) => {
+    localStorage.setItem('token', token);
+    set(state => ({ user, token, error: null, sessionRevision: state.sessionRevision + 1 }));
+    notifySessionChange();
+  },
 
   setUser: (user) => set(state => ({
     user,

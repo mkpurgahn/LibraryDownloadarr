@@ -8,7 +8,7 @@ export const Login: React.FC = () => {
   const [error, setError] = useState('');
   const [isPlexLoading, setIsPlexLoading] = useState(false);
   const navigate = useNavigate();
-  const { setUser, setToken, token, user } = useAuthStore();
+  const { setSession, token, user } = useAuthStore();
 
   // Redirect to home if already logged in
   useEffect(() => {
@@ -49,8 +49,7 @@ export const Login: React.FC = () => {
         try {
           const response = await api.authenticatePlexPin(pin.id);
           clearInterval(pollInterval);
-          setUser(response.user);
-          setToken(response.token);
+          setSession(response.user, response.token);
           setIsPlexLoading(false);
           navigate('/');
         } catch (err: any) {

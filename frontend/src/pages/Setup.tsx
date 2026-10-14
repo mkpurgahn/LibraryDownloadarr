@@ -10,7 +10,7 @@ export const Setup: React.FC = () => {
   });
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const { setUser, setToken } = useAuthStore();
+  const { setSession } = useAuthStore();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,8 +19,7 @@ export const Setup: React.FC = () => {
 
     try {
       const response = await api.setup(formData);
-      setUser(response.user);
-      setToken(response.token);
+      setSession(response.user, response.token);
       // Reload the app to trigger the setup check again
       window.location.href = '/';
     } catch (err: any) {
