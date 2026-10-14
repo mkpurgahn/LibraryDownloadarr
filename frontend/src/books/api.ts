@@ -16,6 +16,8 @@ const pending = new Set<AbortController>();
 let bridge: { token: string; expiresAt: number } | undefined;
 let exchange: { token: string; promise: Promise<void> } | undefined;
 let generation = 0;
+export const BOOKS_CHANGED_EVENT = 'librarydownloadarr:books-changed';
+const booksChannel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('librarydownloadarr-books') : undefined;
 
 function clearBooksSession(): void {
   generation += 1;
@@ -24,6 +26,14 @@ function clearBooksSession(): void {
   pending.clear();
 }
 window.addEventListener(SESSION_CHANGED_EVENT, clearBooksSession);
+function invalidateBooks(broadcast = false): void {
+  clearBooksSession();
+  window.dispatchEvent(new Event(BOOKS_CHANGED_EVENT));
+  if (broadcast) booksChannel?.postMessage({ type: 'configuration-changed' });
+}
+if (booksChannel) booksChannel.onmessage = event => {
+  if (event.data?.type === 'configuration-changed') invalidateBooks();
+};
 
 type ResponseDecoder = (response: Response) => Promise<unknown>;
 async function request(path: string, options: RequestInit = {}, signal?: AbortSignal, decode?: ResponseDecoder): Promise<unknown> {
@@ -92,9 +102,14 @@ async function booksRequest(path: string, options: RequestInit = {}, signal?: Ab
   if (token !== useAuthStore.getState().token) throw new DOMException('Session changed', 'AbortError');
   try { return await request(`/api/books${path}`, options, signal, decode); }
   catch (error) {
+    if (error instanceof BooksApiError && ['BOOKS_DISABLED', 'BOOKS_CONFIGURATION_CHANGED'].includes(error.code)) invalidateBooks();
     if (error instanceof BooksApiError && (error.status === 401 || error.code === 'BOOKS_IDENTITY_MISMATCH')) {
       bridge = undefined;
-      await mediaSession(signal);
+      try { await mediaSession(signal); }
+      catch (renewalError) {
+        if (renewalError instanceof BooksApiError && ['BOOKS_DISABLED', 'BOOKS_CONFIGURATION_CHANGED'].includes(renewalError.code)) invalidateBooks();
+        throw renewalError;
+      }
       return request(`/api/books${path}`, options, signal, decode);
     }
     if (error instanceof BooksApiError && error.code === 'PLEX_ACCESS_REVOKED' && token === useAuthStore.getState().token) {
@@ -231,7 +246,7 @@ export const booksApi = {
     serverBindingProofId: string; restrictedPrincipalConfirmed: boolean;
   }, signal?: AbortSignal) {
     const result = settings(await request('/api/settings/books', { method: 'PUT', body: JSON.stringify(value) }, signal));
-    clearBooksSession();
+    invalidateBooks(true);
     return result;
   },
   async verifySettings(signal?: AbortSignal) {

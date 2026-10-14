@@ -10,13 +10,17 @@ import { fileURLToPath } from 'node:url';
 import { TLSSocket } from 'node:tls';
 import { Readable } from 'node:stream';
 import { buildPdfFixture, PdfFixtureMode } from './pdfFixture';
+import { audioFixtures, AudioFixtureMode } from './audioFixture';
+import { loadExternalFixture, ExternalBinding, ExternalCandidate, ExternalFileMap } from './externalFixture';
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 process.chdir(repoRoot);
 const libraryId = '163ac435-50a9-4f56-96d0-276edf9303c1';
 type App = {
   origin: string;
+  instanceId: string;
   users: Array<{ label: string; bearer: string }>;
+  readerCache(): Promise<Array<{ id: string; createdAt: number }>>;
   stop(): Promise<void>;
 };
 type Provider = {
@@ -26,14 +30,21 @@ type Provider = {
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
   setPdf(mode: PdfFixtureMode): void;
+  setAudio(mode: AudioFixtureMode): Promise<void>;
   stop(): Promise<void>;
 };
 export type BooksApp = App & {
+  binding?: ExternalBinding;
+  candidate?: ExternalCandidate;
+  fileMap?: ExternalFileMap[];
   live: boolean;
   certificatePin: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
   setPdf(mode: PdfFixtureMode): void;
+  setAudio(mode: AudioFixtureMode): Promise<void>;
+  advanceReaderTime(milliseconds: number): void;
+  restart(): Promise<void>;
 };
 
 async function syntheticProvider(): Promise<Provider> {
@@ -67,7 +78,7 @@ async function syntheticProvider(): Promise<Provider> {
         ebookFile: manifest.find(file => file.fileType === 'ebook') ?? null,
         audioFiles: audio.map(file => ({ ...file, duration: 5, mimeType: 'audio/mpeg' })),
         tracks: audio.map((file, index) => ({ ...file, duration: 5, startOffset: index * 5 })),
-        numTracks: audio.length, numAudioFiles: audio.length, chapters: [],
+        numTracks: audio.length, numAudioFiles: audio.length, chapters: new Array<{ id: number; title: string; start: number; end: number }>(),
       },
     };
   };
@@ -118,7 +129,7 @@ async function syntheticProvider(): Promise<Provider> {
     const file = item.libraryFiles.find(file => file.ino === match[2]);
     if (!data || !file) { res.writeHead(404).end(); return; }
     const total = file.metadata.size;
-    res.setHeader('Content-Type', file.fileType === 'audio' ? 'audio/mpeg' : file.metadata.ext === '.pdf' ? 'application/pdf' : 'application/octet-stream');
+    res.setHeader('Content-Type', file.fileType === 'audio' ? (file.metadata.ext === '.m4b' ? 'audio/mp4' : 'audio/mpeg') : file.metadata.ext === '.pdf' ? 'application/pdf' : 'application/octet-stream');
     res.setHeader('ETag', `"${createHash('sha256').update(data).update(String(total)).digest('hex')}"`);
     res.setHeader('Last-Modified', 'Tue, 14 Nov 2023 22:13:20 GMT');
     res.setHeader('Accept-Ranges', 'bytes');
@@ -160,6 +171,38 @@ async function syntheticProvider(): Promise<Provider> {
       items[0].libraryFiles[1].metadata.size = mode === 'oversized' ? 512 * 1024 * 1024 + 1 : replacement.length;
       items[0].libraryFiles[1].metadata.mtimeMs += 1000;
     },
+    async setAudio(mode) {
+      const fixture = await audioFixtures(repoRoot);
+      const samples = mode === 'm4b' ? [fixture.m4b] : mode === 'broken-middle'
+        ? [fixture.mp3[0], { ...fixture.mp3[1], bytes: Buffer.from('Owned corrupt middle-track fixture') }, fixture.mp3[0]] : fixture.mp3;
+      const original = items[0].libraryFiles.filter(file => file.fileType === 'ebook');
+      const ext = mode === 'm4b' ? 'm4b' : 'mp3';
+      const audio = samples.map((sample, index) => {
+        const ino = `dual-${index + 2}`;
+        files.set(`dual:${ino}`, sample.bytes);
+        return {
+          ino, fileType: 'audio', metadata: {
+            filename: `${index === 0 ? '99 First' : index === 1 ? '01 Second' : '00 After error'}.${ext}`,
+            ext: `.${ext}`, size: sample.bytes.length, mtimeMs: Date.now(), ctimeMs: Date.now(),
+            path: `/books/dual/${index + 2}.${ext}`, relPath: `${index + 2}.${ext}`,
+          },
+        };
+      });
+      items[0].libraryFiles = [...original, ...audio];
+      items[0].media.audioFiles = audio.map((file, index) => ({ ...file, duration: samples[index].duration, mimeType: ext === 'm4b' ? 'audio/mp4' : 'audio/mpeg' }));
+      let offset = 0;
+      items[0].media.tracks = audio.map((file, index) => {
+        const track = { ...file, duration: samples[index].duration, startOffset: offset };
+        offset += track.duration; return track;
+      });
+      items[0].media.numTracks = audio.length; items[0].media.numAudioFiles = audio.length;
+      items[0].media.chapters = mode === 'invalid-chapters' ? [
+        { id: 1, title: 'Invalid chapter', start: -1, end: offset + 1 },
+      ] : [
+        { id: 1, title: 'Opening', start: 0, end: Math.min(2, offset) },
+        { id: 2, title: 'Across the boundary', start: Math.min(2, offset), end: offset },
+      ];
+    },
     async stop() {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -178,9 +221,22 @@ async function verifiedFixtureTls(origin: string, cert: Buffer): Promise<void> {
   });
 }
 
-export const test = base.extend<{ app: BooksApp; liveProvider: boolean }>({
+export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean }>({
   liveProvider: [false, { option: true }],
-  app: async ({ liveProvider }, use, testInfo) => {
+  controlledReaderClock: [false, { option: true }],
+  externalApp: [false, { option: true }],
+  app: async ({ liveProvider, controlledReaderClock, externalApp }, use, testInfo) => {
+    if (externalApp) {
+      const fixture = await loadExternalFixture(repoRoot);
+      await use(fixture);
+      await fs.writeFile(testInfo.outputPath('run.json'), JSON.stringify({
+        harnessSource: await sourceIdentity(), candidate: fixture.candidate, binding: fixture.binding,
+        instanceId: fixture.instanceId, browser: testInfo.project.name,
+        provider: 'external-isolated-candidate', status: testInfo.status, expectedStatus: testInfo.expectedStatus,
+        observedAt: new Date().toISOString(), tls: 'explicit-fixture-CA-verified-before-browser-context',
+      }, null, 2));
+      return;
+    }
     const root = path.join(repoRoot, '.test-data', 'books', 'apps', randomUUID());
     await fs.mkdir(root, { recursive: true });
     const certFile = path.join(root, 'cert.pem');
@@ -194,6 +250,8 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean }>({
       'BOOKS_PROOF_TLS_KEY_FILE', 'BOOKS_PROOF_SERVER_BINDING', 'BOOKS_TEST_FRONTEND_DIST'] as const;
     const previous = keys.map(key => [key, process.env[key]] as const);
     let app: App | undefined;
+    let clockOffset = 0;
+    const readerNow = () => Date.now() + clockOffset;
     try {
       if (!liveProvider) provider = await syntheticProvider();
       const absOrigin = provider?.origin ?? process.env.BOOKS_TEST_ABS_ORIGIN;
@@ -209,7 +267,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean }>({
       }
       else delete process.env.BOOKS_PROOF_ABS_TOKEN;
       const backend = await import('../../../backend/dist/books/proof/fixtureApp.js');
-      app = await backend.startFixtureApp(root, absOrigin, selectedLibrary);
+      app = await backend.startFixtureApp(root, absOrigin, selectedLibrary, controlledReaderClock ? { readerNow } : {});
       await verifiedFixtureTls(app.origin, await fs.readFile(certFile));
       const fixture: BooksApp = {
         ...app, live: liveProvider,
@@ -226,12 +284,33 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean }>({
           if (!provider) throw new Error('Live provider originals cannot be replaced by consumer tests');
           provider.setPdf(mode);
         },
+        async setAudio(mode) {
+          if (!provider) throw new Error('Live provider originals cannot be replaced by consumer tests');
+          await provider.setAudio(mode);
+        },
+        advanceReaderTime(milliseconds) {
+          if (!controlledReaderClock || !Number.isSafeInteger(milliseconds) || milliseconds < 0 ||
+              clockOffset + milliseconds > 48 * 60 * 60 * 1000) throw new Error('Controlled reader clock unavailable or outside its fixture bound');
+          clockOffset += milliseconds;
+        },
+        readerCache: () => app!.readerCache(),
+        async restart() {
+          const previous = app!;
+          const previousUsers = previous.users;
+          const port = Number(new URL(previous.origin).port);
+          await previous.stop();
+          clockOffset = 0;
+          app = await backend.startFixtureApp(root, absOrigin, selectedLibrary, {
+            port, previousUsers, ...(controlledReaderClock ? { readerNow } : {}),
+          });
+          fixture.origin = app.origin; fixture.users = app.users; fixture.instanceId = app.instanceId;
+          await verifiedFixtureTls(app.origin, await fs.readFile(certFile));
+        },
       };
       await use(fixture);
-      const git = await promisify(execFile)('git', ['rev-parse', 'HEAD'], { cwd: repoRoot });
-      const status = await promisify(execFile)('git', ['status', '--porcelain'], { cwd: repoRoot });
+      const identity = await sourceIdentity();
       await fs.writeFile(testInfo.outputPath('run.json'), JSON.stringify({
-        baseRevision: git.stdout.trim(), workingTreeDirty: Boolean(status.stdout.trim()),
+        ...identity,
         builtIndexSha256: createHash('sha256').update(await fs.readFile(path.join(repoRoot, 'frontend', 'dist', 'index.html'))).digest('hex'),
         provider: liveProvider ? 'isolated-ABS-2.30.0' : 'synthetic-ABS-contract',
         browser: testInfo.project.name, status: testInfo.status, expectedStatus: testInfo.expectedStatus,
@@ -271,6 +350,19 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean }>({
   },
 });
 export { expect };
+
+async function sourceIdentity() {
+  const revision = process.env.BOOKS_TEST_SOURCE_REVISION;
+  if (revision) {
+    const archive = process.env.BOOKS_TEST_SOURCE_ARCHIVE_SHA256;
+    if (!/^[a-f0-9]{40}$/.test(revision) || !archive || !/^[a-f0-9]{64}$/.test(archive) ||
+        !['true', 'false'].includes(process.env.BOOKS_TEST_SOURCE_DIRTY ?? '')) throw new Error('Incomplete isolated source snapshot identity');
+    return { baseRevision: revision, workingTreeDirty: process.env.BOOKS_TEST_SOURCE_DIRTY === 'true', sourceArchiveSha256: archive };
+  }
+  const git = await promisify(execFile)('git', ['rev-parse', 'HEAD'], { cwd: repoRoot });
+  const status = await promisify(execFile)('git', ['status', '--porcelain'], { cwd: repoRoot });
+  return { baseRevision: git.stdout.trim(), workingTreeDirty: Boolean(status.stdout.trim()) };
+}
 
 export async function signIn(page: Page, app: BooksApp, index = 0): Promise<void> {
   await page.goto(`${app.origin}/manifest.json`);

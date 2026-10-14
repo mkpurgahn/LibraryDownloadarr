@@ -5,9 +5,10 @@ import { Sidebar } from '../components/Sidebar';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 import { useDownloads } from '../contexts/DownloadContext';
 import { useAuthStore } from '../stores/authStore';
-import { booksApi, aborted, booksErrorMessage } from './api';
+import { booksApi, aborted, booksErrorMessage, BOOKS_CHANGED_EVENT } from './api';
 import { BookFile, BookItem, READ_LIMITS } from './types';
 import { BookCover } from './BooksPage';
+import { useBookAudio } from './AudioProvider';
 
 const fileSize = (bytes: number) => bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
@@ -16,6 +17,7 @@ export const BookDetail: React.FC = () => {
   const menu = useMobileMenu();
   const sessionRevision = useAuthStore(state => state.sessionRevision);
   const { startBookDownloads } = useDownloads();
+  const audio = useBookAudio();
   const [item, setItem] = useState<BookItem>();
   const [ebook, setEbook] = useState('');
   const [error, setError] = useState('');
@@ -26,12 +28,16 @@ export const BookDetail: React.FC = () => {
   useLayoutEffect(() => { heading.current?.focus(); }, [item?.itemId]);
   useEffect(() => {
     const controller = new AbortController();
+    const changed = () => {
+      controller.abort(); setItem(undefined); setError('Books configuration changed. Reopen Books to load the current library.');
+    };
+    window.addEventListener(BOOKS_CHANGED_EVENT, changed);
     setItem(undefined); setError(''); setNotice(''); setShown(50);
     if (itemId) void booksApi.item(itemId, controller.signal).then(value => {
       if (controller.signal.aborted) return;
       setItem(value); setEbook(value.files.find(file => file.role === 'ebook' && file.available)?.fileId ?? '');
     }).catch(error => { if (!aborted(error)) setError(booksErrorMessage(error)); });
-    return () => controller.abort();
+    return () => { controller.abort(); window.removeEventListener(BOOKS_CHANGED_EVENT, changed); };
   }, [itemId, sessionRevision]);
   const download = async (files: BookFile[]) => {
     if (!item) return;
@@ -78,7 +84,7 @@ export const BookDetail: React.FC = () => {
                     {readable ? <Link tabIndex={0} className="btn-primary min-h-11" to={`/books/items/${item.itemId}/read/${ebook}`}>Read</Link> :
                       <button className="btn-secondary min-h-11" disabled>Read</button>}
                     <button className="btn-primary min-h-11" disabled={!item.listen.available}
-                      onClick={() => setNotice('The native player is not enabled in this preview yet. Original tracks remain available below.')}>Listen</button>
+                      onClick={() => void audio.open(item)}>Listen</button>
                   </div>
                   {!readable && <p className="mt-2 text-xs text-gray-400">{oversized ? 'This original exceeds the in-app reader size limit; download it below.' : item.read.reason || 'This ebook is download-only.'}</p>}
                   {!item.listen.available && <p className="mt-2 text-xs text-gray-400">{item.listen.reason}</p>}

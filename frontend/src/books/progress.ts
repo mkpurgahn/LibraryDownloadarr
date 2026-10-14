@@ -1,4 +1,4 @@
-import { BooksApiError, booksApi, aborted } from './api';
+import { BooksApiError, booksApi, aborted, BOOKS_CHANGED_EVENT } from './api';
 import { AudioLocator, BookKey, EbookLocator, Progress, ProgressWrite, flag, record, parseProgress } from './types';
 import { SESSION_CHANGED_EVENT, useAuthStore } from '../stores/authStore';
 
@@ -19,7 +19,10 @@ export class ProgressClient {
   constructor(
     private readonly key: BookKey, private readonly mode: 'ebook' | 'audio',
     private readonly editionId: string, private readonly contentVersion: string
-  ) { window.addEventListener(SESSION_CHANGED_EVENT, this.changed); }
+  ) {
+    window.addEventListener(SESSION_CHANGED_EVENT, this.changed);
+    window.addEventListener(BOOKS_CHANGED_EVENT, this.changed);
+  }
   get revision(): number { return this.canonical?.revision ?? 0; }
   get current(): Progress | undefined { return this.canonical; }
   subscribe(listener: (state: SaveState) => void): () => void {
@@ -97,6 +100,7 @@ export class ProgressClient {
   }
   dispose(): void {
     window.removeEventListener(SESSION_CHANGED_EVENT, this.changed);
+    window.removeEventListener(BOOKS_CHANGED_EVENT, this.changed);
     this.controller.abort(); this.listeners.clear(); this.pending = undefined; this.location = undefined; this.canonical = undefined;
   }
 }

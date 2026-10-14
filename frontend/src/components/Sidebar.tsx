@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import { Library } from '../types';
 import { useAuthStore } from '../stores/authStore';
-import { booksApi, BooksApiError, aborted } from '../books/api';
+import { booksApi, BooksApiError, aborted, BOOKS_CHANGED_EVENT } from '../books/api';
 import {
   DocumentIcon,
   FilmIcon,
@@ -34,14 +34,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
 
   useEffect(() => {
     const controller = new AbortController();
-    setBooksVisible(false);
-    void booksApi.libraries(controller.signal).then(libraries => setBooksVisible(libraries.length > 0))
-      .catch(error => {
-        if (aborted(error)) return;
-        setBooksVisible(!(error instanceof BooksApiError &&
-          ['BOOKS_DISABLED', 'PLEX_ACCESS_REQUIRED', 'BOOKS_SESSION_REQUIRED'].includes(error.code)));
-      });
-    return () => controller.abort();
+    const refresh = () => {
+      setBooksVisible(false);
+      void booksApi.libraries(controller.signal).then(libraries => setBooksVisible(libraries.length > 0))
+        .catch(error => {
+          if (aborted(error)) return;
+          setBooksVisible(!(error instanceof BooksApiError &&
+            ['BOOKS_DISABLED', 'PLEX_ACCESS_REQUIRED', 'BOOKS_SESSION_REQUIRED'].includes(error.code)));
+        });
+    };
+    refresh(); window.addEventListener(BOOKS_CHANGED_EVENT, refresh);
+    return () => { controller.abort(); window.removeEventListener(BOOKS_CHANGED_EVENT, refresh); };
   }, [sessionRevision]);
 
   const loadLibraries = async () => {
@@ -75,7 +78,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
       {/* Sidebar */}
       <aside
         className={`
-          fixed md:static inset-y-0 left-0 z-50
+          fixed md:static inset-y-0 left-0 z-50 md:z-auto
           w-64 bg-dark-100 border-r border-dark-50
           transform transition-transform duration-300 ease-in-out
           ${isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}

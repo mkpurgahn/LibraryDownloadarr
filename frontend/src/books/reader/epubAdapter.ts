@@ -1,5 +1,5 @@
 import shell from '../../../.reader-build/shell.html?raw';
-import { booksApi, aborted } from '../api';
+import { booksApi, aborted, BOOKS_CHANGED_EVENT } from '../api';
 import { ReaderDescriptor, parseLocator, record } from '../types';
 import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
@@ -68,8 +68,11 @@ export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDesc
     window.removeEventListener('pagehide', save);
     document.removeEventListener('visibilitychange', visibility);
     window.removeEventListener(SESSION_CHANGED_EVENT, dispose);
+    window.removeEventListener(BOOKS_CHANGED_EVENT, changed);
     frame.removeAttribute('srcdoc'); frame.src = 'about:blank';
   };
+  const changed = () => { error('Books configuration changed. Reopen Books to continue.'); dispose(); };
   window.addEventListener(SESSION_CHANGED_EVENT, dispose);
+  window.addEventListener(BOOKS_CHANGED_EVENT, changed);
   return dispose;
 }

@@ -28,6 +28,7 @@ import {
   BookDownloadTarget, BookQueueItem, DownloadSource, startBookDownloads as startNativeBookDownloads,
 } from '../books/downloads';
 import { SESSION_CHANGED_EVENT } from '../stores/authStore';
+import { BOOKS_CHANGED_EVENT } from '../books/api';
 
 export type DownloadStatus =
   | BurnJobStatus
@@ -316,8 +317,10 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
       setBookDownloads([]);
     };
     window.addEventListener(SESSION_CHANGED_EVENT, clearBooks);
+    window.addEventListener(BOOKS_CHANGED_EVENT, clearBooks);
     return () => {
       window.removeEventListener(SESSION_CHANGED_EVENT, clearBooks);
+      window.removeEventListener(BOOKS_CHANGED_EVENT, clearBooks);
       for (const controller of bookControllersRef.current) controller.abort();
       bookControllersRef.current.clear();
     };

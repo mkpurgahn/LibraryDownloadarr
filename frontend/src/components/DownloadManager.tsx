@@ -88,7 +88,7 @@ export const DownloadManager: React.FC = () => {
   return (
     <aside
       aria-label="Download activity"
-      className="fixed inset-x-3 bottom-3 z-50 max-h-[70vh] space-y-2 overflow-y-auto md:inset-x-auto md:bottom-auto md:right-6 md:top-20 md:w-[23rem]"
+      className="fixed inset-x-3 bottom-[calc(0.75rem+var(--books-player-height,0px))] z-50 max-h-[calc(70vh-var(--books-player-height,0px))] space-y-2 overflow-y-auto md:inset-x-auto md:bottom-auto md:right-6 md:top-20 md:max-h-[min(70vh,calc(100vh_-_var(--books-player-height,0px)_-_6rem))] md:w-[23rem]"
     >
       {downloads.map((download) => {
         if (download.source === 'abs') {

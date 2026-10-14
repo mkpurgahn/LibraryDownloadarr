@@ -5,7 +5,7 @@ import { Sidebar } from '../components/Sidebar';
 import { DocumentIcon } from '../components/Icons';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 import { useAuthStore } from '../stores/authStore';
-import { booksApi, aborted, booksErrorMessage } from './api';
+import { booksApi, aborted, booksErrorMessage, BOOKS_CHANGED_EVENT } from './api';
 import { BookSummary, CatalogQuery } from './types';
 
 export function BookCover({ itemId, title }: { itemId: string; title: string }) {
@@ -36,6 +36,11 @@ export const BooksPage: React.FC = () => {
   const [refresh, setRefresh] = useState(0);
   const heading = useRef<HTMLHeadingElement>(null);
   useLayoutEffect(() => { heading.current?.focus(); }, [sessionRevision]);
+  useEffect(() => {
+    const changed = () => setRefresh(value => value + 1);
+    window.addEventListener(BOOKS_CHANGED_EVENT, changed);
+    return () => window.removeEventListener(BOOKS_CHANGED_EVENT, changed);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();

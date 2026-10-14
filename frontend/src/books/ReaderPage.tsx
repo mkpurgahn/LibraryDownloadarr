@@ -108,7 +108,7 @@ export const ReaderPage: React.FC = () => {
       window.requestAnimationFrame(() => setStarted(true));
     } catch (error) { if (!aborted(error)) setError(booksErrorMessage(error)); }
   };
-  return <main className="flex h-[100dvh] flex-col bg-dark p-3" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))', paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+  return <main className="flex flex-col bg-dark p-3" style={{ height: 'calc(100dvh - var(--books-player-height, 0px))', paddingTop: 'max(0.75rem, env(safe-area-inset-top))', paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
     <header className="flex flex-wrap items-center justify-between gap-3 pb-2">
       <Link tabIndex={0} className="inline-flex min-h-11 items-center text-primary-300" to={`/books/items/${itemId}`}>Back to book</Link>
       <h1 ref={heading} tabIndex={-1} className="min-w-0 text-lg font-semibold outline-none">{item?.title ?? 'Book reader'}</h1>

@@ -82,7 +82,23 @@ size, and private resume. A second device must explicitly claim the saved
 position; conflicts offer **Resume saved position** or **Continue here**.
 Positions save every ten seconds and on navigation/visibility changes when
 possible. Network failures show an unsaved state; browser-close delivery is
-best effort. Audio playback remains under development.
+best effort.
+
+Original MP3/M4B playback uses one native audio element that remains active
+across in-app navigation. Tracks follow ABS's included order, not filenames;
+valid chapters, global seeking, pause/resume and 0.5-2x speed are available.
+Only the current audiobook advances automatically, stopping at its final
+track. Playback or timing failures stop instead of skipping a broken track or
+starting a transcode. Browser codec checks are hints: actual decode failure
+offers the original download, and rejected autoplay offers **Tap to resume**.
+Gapless transitions and uninterrupted mobile background playback are not promised.
+
+Listening positions have the same private writer/rewind/version semantics as
+reading. Explicit Close stops media immediately and waits for its last save;
+abrupt browser shutdown remains best effort. Books configuration changes clear
+Books players/readers/ready links across the current browser's tabs without
+clearing Plex authentication or Plex jobs. Existing downloaded bytes cannot be
+revoked.
 
 EPUB archives are processed in a cancellable worker, never in the main request
 thread: 100 MiB compressed, 512 MiB expanded, 10,000 entries, 32 MiB per entry,
@@ -153,6 +169,23 @@ The fixture helper has no test-login route and refuses non-isolated providers.
 Headless browser tests first verify their generated fixture CA. Browser-local
 test trust is confined to that loopback fixture (Chromium service-worker tests
 pin its exact public key); no operating-system trust settings are changed.
+
+External candidate tests use explicit `BOOKS_TEST_URL` (isolated HTTPS),
+`BOOKS_TEST_CA_FILE` and owner-only `BOOKS_TEST_SESSION_FILE` inputs. The fixture
+CLI writes synthetic application sessions and a private item/ino-to-LDA mapping,
+not a public identity endpoint. The harness verifies the actual principal,
+binding and built index before using it, and does not mutate an externally
+owned fixture. `BOOKS_FIXTURE_MANIFEST` supplies the versioned consumer handoff;
+`BOOKS_STREAMED_DELIVERY_PROOF` can link separately saved large-file evidence.
+Large proof downloads use bounded streaming and hashes read back from disk,
+not whole-audiobook buffers.
+
+Pinned Windows Playwright WebKit currently rejects both generated MP3 and AAC
+even in a transport-free codec probe. Its honest unsupported/download fallback
+is checked there; positive decode/seek/resume runs on the version-matched Linux
+WebKit image. These are distinct labeled results, not physical Safari/iOS
+certification. Source backing, retained reader-cache accounting and unmeasured
+browser/engine overhead must not be conflated in resource reports.
 
 Use Node 20 for fixture tests, matching the application's native SQLite runtime.
 Run `npm run test:books` in `frontend` after the backend/frontend builds. The

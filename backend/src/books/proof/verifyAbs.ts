@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -8,6 +9,8 @@ import { boundedQuery, providerOrigin } from '../limits';
 import https from 'node:https';
 import { IncomingHttpHeaders } from 'node:http';
 import { BookItem } from '../types';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 export interface ConsumerFixtureManifest {
   schemaVersion: 1;
@@ -122,23 +125,88 @@ async function fixtureRequest(
   });
 }
 
+export async function streamFixtureDownload(
+  url: URL, ca: Buffer, destination: string,
+  options: { expectedBytes: number; headers?: Record<string, string>; append?: boolean }
+): Promise<{ status: number; headers: IncomingHttpHeaders; receivedBytes: number; savedBytes: number; sha256: string; peakChunkBytes: number }> {
+  const root = await fs.realpath(process.cwd());
+  const parent = path.relative(root, await fs.realpath(path.dirname(destination)));
+  if (parent.startsWith('..') || path.isAbsolute(parent) || url.protocol !== 'https:' || url.username || url.password ||
+      !Number.isSafeInteger(options.expectedBytes) || options.expectedBytes < 0 || options.expectedBytes > 1024 * 1024 * 1024) {
+    throw new Error('Streamed proof request is outside its declared bounds');
+  }
+  let prefixBytes = 0;
+  if (options.append) {
+    const stat = await fs.lstat(destination);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Resume proof requires an owned regular prefix file');
+    prefixBytes = stat.size;
+  }
+  const file = await fs.open(destination, options.append ? 'a' : 'wx', 0o600);
+  let receivedBytes = 0; let peakChunkBytes = 0;
+  try {
+    const response = await new Promise<{ status: number; headers: IncomingHttpHeaders }>((resolve, reject) => {
+      const req = https.get(url, { ca, headers: options.headers }, response => {
+        clearTimeout(connect);
+        void (async () => {
+          const status = response.statusCode ?? 0;
+          if (![200, 206].includes(status) || Number(response.headers['content-length']) !== options.expectedBytes ||
+              (response.headers['content-encoding'] && response.headers['content-encoding'] !== 'identity') ||
+              (options.append && (status !== 206 ||
+                response.headers['content-range'] !== `bytes ${prefixBytes}-${prefixBytes + options.expectedBytes - 1}/${prefixBytes + options.expectedBytes}`))) {
+            throw new Error('Unexpected streamed original representation');
+          }
+          const meter = new Transform({
+            highWaterMark: 65536,
+            transform(chunk: Buffer, _encoding, done) {
+              receivedBytes += chunk.length; peakChunkBytes = Math.max(peakChunkBytes, chunk.length);
+              done(receivedBytes > options.expectedBytes ? new Error('Streamed proof byte bound exceeded') : null, chunk);
+            },
+            flush(done) { done(receivedBytes === options.expectedBytes ? null : new Error('Streamed original was incomplete')); },
+          });
+          const output = file.createWriteStream({ autoClose: false, highWaterMark: 65536 });
+          try { await pipeline(response, meter, output); } finally { output.destroy(); }
+          resolve({ status, headers: response.headers });
+        })().catch(error => { response.destroy(); reject(error); });
+      });
+      const connect = setTimeout(() => req.destroy(new Error('Streamed proof connection deadline')), 10000);
+      req.setTimeout(60000, () => req.destroy(new Error('Streamed proof idle deadline')));
+      req.once('error', error => { clearTimeout(connect); reject(error); });
+    });
+    await file.close();
+    const hash = createHash('sha256');
+    for await (const bytes of createReadStream(destination, { highWaterMark: 65536 })) hash.update(bytes);
+    return { ...response, receivedBytes, savedBytes: (await fs.stat(destination)).size, sha256: hash.digest('hex'), peakChunkBytes };
+  } finally { await file.close(); }
+}
+
 async function verifyDelivery(manifest: NormalizedFixture, origin: string, out: string) {
   if (manifest.libraryId !== process.env.BOOKS_PROOF_LIBRARY_ID ||
       manifest.serverBindingProofId !== process.env.BOOKS_PROOF_SERVER_BINDING) throw new Error('Fixture binding mismatch');
+  const plannedSourceBytes = manifest.files.reduce((sum, file) => sum + file.size, 0);
+  if (plannedSourceBytes > 2 * 1024 * 1024 * 1024) throw new Error('Fixture source set exceeds the explicit 2 GiB proof budget');
   const { startFixtureApp } = await import('./fixtureApp');
   const root = path.join(process.cwd(), '.test-data', 'books', manifest.runId);
   const app = await startFixtureApp(root, origin, manifest.libraryId);
   const ca = await fs.readFile(process.env.BOOKS_PROOF_TLS_CERT_FILE!);
-  const auth = { Authorization: `Bearer ${app.users[0].bearer}`, Origin: app.origin };
-  const get = (pathname: string, options: Parameters<typeof fixtureRequest>[2] = {}) =>
-    fixtureRequest(new URL(pathname, app.origin), ca, options);
+  const url = (pathname: string) => {
+    const target = new URL(pathname, app.origin);
+    if (target.origin !== app.origin || !pathname.startsWith('/api/')) throw new Error('Fixture request changed origin');
+    return target;
+  };
+  const get = (pathname: string, options: Parameters<typeof fixtureRequest>[2] = {}) => fixtureRequest(url(pathname), ca, options);
   const results = [];
   try {
-    const bridge = await get('/api/books/media-session', { method: 'POST', headers: auth });
-    if (bridge.status !== 200) throw new Error('Fixture media-session exchange failed');
-    const cookie = bridge.headers['set-cookie']?.find(value => value.startsWith('__Secure-lda_books='))?.split(';')[0];
-    if (!cookie) throw new Error('Fixture Secure cookie absent');
+    const subjects = [];
+    for (const user of app.users.slice(0, 3)) {
+      const auth = { Authorization: `Bearer ${user.bearer}`, Origin: app.origin };
+      const bridge = await get('/api/books/media-session', { method: 'POST', headers: auth });
+      if (bridge.status !== 200) throw new Error('Fixture media-session exchange failed');
+      const cookie = bridge.headers['set-cookie']?.find(value => value.startsWith('__Secure-lda_books='))?.split(';')[0];
+      if (!cookie) throw new Error('Fixture Secure cookie absent');
+      subjects.push({ auth, cookie });
+    }
     for (const [index, expected] of manifest.files.entries()) {
+      const { auth, cookie } = subjects[index % subjects.length];
       const detailResponse = await get(`/api/books/items/${expected.absItemId}`, { headers: auth });
       if (detailResponse.status !== 200) throw new Error('Fixture item unavailable');
       const item = JSON.parse(detailResponse.bytes.toString()) as BookItem;
@@ -157,41 +225,57 @@ async function verifyDelivery(manifest: NormalizedFixture, origin: string, out: 
         body: JSON.stringify({ targets: [{ itemId: item.itemId, fileId: file.fileId, contentVersion: file.contentVersion }] }),
       });
       const ticket = (JSON.parse(issue.bytes.toString()) as { results: Array<{ ticket?: { url: string } }> }).results[0].ticket;
-      if (!ticket) throw new Error('Fixture original ticket unavailable');
+      if (!ticket || !/^\/api\/books\/downloads\/[A-Za-z0-9_-]+$/.test(ticket.url)) throw new Error('Fixture original ticket unavailable');
       const head = await get(ticket.url, { method: 'HEAD', headers: { Cookie: cookie } });
-      const full = await get(ticket.url, { headers: { Cookie: cookie } });
+      const fullPath = path.join(out, `download-${index}-full.bin`);
+      const resumedPath = path.join(out, `download-${index}.bin`);
+      const full = await streamFixtureDownload(url(ticket.url), ca, fullPath, { expectedBytes: expected.size, headers: { Cookie: cookie } });
       const cut = Math.max(1, Math.min(8192, Math.floor(expected.size / 2)));
       const prefix = await get(ticket.url, { headers: { Cookie: cookie }, prefixBytes: cut });
       const validator = head.headers.etag?.startsWith('W/') ? head.headers['last-modified'] : head.headers.etag ?? head.headers['last-modified'];
-      const resumed = await get(ticket.url, { headers: { Cookie: cookie, Range: `bytes=${prefix.bytes.length}-`, ...(validator ? { 'If-Range': validator } : {}) } });
+      await fs.writeFile(resumedPath, prefix.bytes, { flag: 'wx', mode: 0o600 });
+      const resumed = await streamFixtureDownload(url(ticket.url), ca, resumedPath, {
+        expectedBytes: expected.size - prefix.bytes.length, append: true,
+        headers: { Cookie: cookie, Range: `bytes=${prefix.bytes.length}-`, ...(validator ? { 'If-Range': validator } : {}) },
+      });
       const bounded = await get(ticket.url, { headers: { Cookie: cookie, Range: 'bytes=2-5' } });
       const suffix = await get(ticket.url, { headers: { Cookie: cookie, Range: 'bytes=-3' } });
       const invalid = await get(ticket.url, { headers: { Cookie: cookie, Range: `bytes=${expected.size + 1}-` } });
-      const mismatch = await get(ticket.url, { headers: { Cookie: cookie, Range: 'bytes=2-', 'If-Range': '"not-the-original"' } });
-      const other = await get(ticket.url, { headers: { Authorization: `Bearer ${app.users[1].bearer}` } });
-      const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
-      const combined = Buffer.concat([prefix.bytes, resumed.bytes]);
+      const mismatch = await get(ticket.url, {
+        headers: { Cookie: cookie, Range: 'bytes=2-', 'If-Range': '"not-the-original"' }, prefixBytes: cut,
+      });
+      const other = await get(ticket.url, { headers: subjects[(index + 1) % subjects.length].auth });
+      const saved = await fs.open(fullPath, 'r');
+      const first = Buffer.alloc(4); const last = Buffer.alloc(3); const beginning = Buffer.alloc(cut);
+      try {
+        await saved.read(first, 0, 4, 2); await saved.read(last, 0, 3, expected.size - 3);
+        await saved.read(beginning, 0, cut, 0);
+      } finally { await saved.close(); }
       const pass = head.status === 200 && head.bytes.length === 0 && Number(head.headers['content-length']) === expected.size &&
-        full.status === 200 && hash(full.bytes) === expected.sha256 &&
-        resumed.status === 206 && hash(combined) === expected.sha256 &&
-        bounded.status === 206 && bounded.bytes.equals(full.bytes.subarray(2, 6)) &&
+        full.status === 200 && full.sha256 === expected.sha256 && full.savedBytes === expected.size &&
+        resumed.status === 206 && resumed.sha256 === expected.sha256 && resumed.savedBytes === expected.size &&
+        bounded.status === 206 && bounded.bytes.equals(first) &&
         bounded.headers['content-range'] === `bytes 2-5/${expected.size}` && bounded.headers['content-length'] === '4' &&
-        suffix.status === 206 && suffix.bytes.equals(full.bytes.subarray(-3)) &&
-        invalid.status === 416 && mismatch.status === 200 && hash(mismatch.bytes) === expected.sha256 && other.status === 404;
-      await fs.writeFile(path.join(out, `download-${index}.bin`), combined);
+        suffix.status === 206 && suffix.bytes.equals(last) &&
+        invalid.status === 416 && mismatch.status === 200 && mismatch.bytes.equals(beginning) &&
+        Number(mismatch.headers['content-length']) === expected.size && other.status === 404;
       results.push({
         itemId: item.itemId, fileId: file.fileId, consumerProviderInstanceId: item.providerInstanceId,
-        expectedSha256: expected.sha256, originalSha256: hash(full.bytes), resumedSha256: hash(combined),
+        expectedSha256: expected.sha256, originalSha256: full.sha256, resumedSha256: resumed.sha256,
         size: expected.size, etag: head.headers.etag, lastModified: head.headers['last-modified'],
         interrupted: prefix.interrupted, savedPrefixBytes: prefix.bytes.length,
         head: head.status, bounded: bounded.status, suffix: suffix.status, unsatisfiable: invalid.status,
-        ifRangeMismatch: mismatch.status, otherUser: other.status, verdict: pass ? 'pass' : 'fail',
+        ifRangeMismatch: mismatch.status, ifRangeMismatchProof: 'fresh-full-headers-and-saved-prefix',
+        peakChunkBytes: Math.max(full.peakChunkBytes, resumed.peakChunkBytes), savedFiles: [`download-${index}-full.bin`, `download-${index}.bin`],
+        otherUser: other.status, verdict: pass ? 'pass' : 'fail',
       });
     }
     return {
       schemaVersion: 1, runId: manifest.runId, serverBindingProofId: manifest.serverBindingProofId,
       sourceProviderInstanceId: manifest.providerInstanceId, absVersion: manifest.absVersion,
       runtime: { node: process.version }, files: results,
+      plannedSourceBytes, retainedDownloadBytes: plannedSourceBytes * 2,
+      streamBufferHighWaterMark: 65536,
       verdict: results.every(result => result.verdict === 'pass') && results.some(result => result.interrupted) ? 'pass' : 'blocked',
       observedAt: new Date().toISOString(),
     };

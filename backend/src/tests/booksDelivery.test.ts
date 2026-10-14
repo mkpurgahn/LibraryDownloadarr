@@ -13,12 +13,14 @@ import { createBooksRouter } from '../books/routes';
 import { BookStreams } from '../books/streams';
 import { BooksPrincipal } from '../books/mediaAuth';
 import { BookItem } from '../books/types';
-import { PlexServerAccessDeniedError, PlexService } from '../services/plexService';
+import { PlexServerAccessDeniedError, PlexService, PlexServerClient } from '../services/plexService';
 import { startFixtureApp } from '../books/proof/fixtureApp';
 import { config } from '../config';
 import { normalizeFixtureManifest } from '../books/proof/verifyAbs';
 import Database from 'better-sqlite3';
 import { createAuthRouter } from '../routes/auth';
+import { createLibrariesRouter } from '../routes/libraries';
+import { createMediaRouter } from '../routes/media';
 
 const oldEnabled = process.env.BOOKS_ENABLED;
 process.env.BOOKS_ENABLED = 'true';
@@ -28,6 +30,11 @@ class MembershipFixture extends PlexService {
   denied = false;
   unavailable = false;
   forceChecks = 0;
+  override createServerClient() {
+    return new class extends PlexServerClient {
+      override async getLibraries() { return []; }
+    }('http://127.0.0.1:1', 'fixture-server-token');
+  }
   override async validateExactServerMembership() {
     this.forceChecks += 1;
     if (this.unavailable) throw new Error('Fixture membership service unavailable');
@@ -95,6 +102,8 @@ async function fixture() {
   const upstream = await listening(abs);
   const db = new DatabaseService(path.join(root, 'fixture.db'), 'fixture-encryption-key-longer-than-thirty-two');
   db.setSetting('plex_machine_id', 'fixture-machine');
+  db.setSetting('plex_url', 'http://127.0.0.1:1');
+  db.setSetting('plex_token', 'fixture-owner-server');
   db.books.setConfig({
     enabled: true, providerInstanceId: '', configGeneration: 0, origin: upstream.origin,
     libraryId, serverBindingProofId: 'delivery-fixture',
@@ -110,6 +119,8 @@ async function fixture() {
   const app = express();
   app.use(express.json());
   app.use('/api/auth', createAuthRouter(db, plex));
+  app.use('/api/libraries', createLibrariesRouter(db, plex));
+  app.use('/api/media', createMediaRouter(db, { plex }));
   app.use('/api/books', createBooksRouter(db, { plex }));
   const local = await listening(app);
   const auth = (index = 0) => ({ Authorization: `Bearer ${sessions[index].token}` });
@@ -183,6 +194,29 @@ test('every_content_route_rechecks_identity', async () => {
     assert.equal((await f.get(f.content, { headers: { Cookie: cookie } })).status, 403);
     assert.equal(f.db.getSessionById(f.sessions[0].id), undefined);
   } finally { await f.close(); }
+});
+
+test('books_saturation_and_provider_failure_preserve_plex_routes', async () => {
+  const f = await fixture();
+  const controllers = [new AbortController(), new AbortController()];
+  try {
+    f.stall();
+    const responses = await Promise.all(controllers.map(controller =>
+      f.get(f.content, { headers: f.auth(), signal: controller.signal })));
+    const completed = responses.map(response => response.arrayBuffer().then(() => false, () => true));
+    assert.equal((await f.get(f.content, { headers: f.auth() })).status, 429);
+    assert.equal((await f.get('/api/libraries', { headers: f.auth() })).status, 200);
+    assert.equal((await f.get('/api/media/season/123/download', { headers: f.auth() })).status, 410);
+    controllers.forEach(controller => controller.abort());
+    assert.deepEqual(await Promise.all(completed), [true, true]);
+    f.deny();
+    assert.equal((await f.get('/api/books/items/item', { headers: f.auth() })).status, 502);
+    assert.equal((await f.get('/api/libraries', { headers: f.auth() })).status, 200);
+    assert.equal((await f.get('/api/auth/me', { headers: f.auth() })).status, 200);
+  } finally {
+    controllers.forEach(controller => controller.abort());
+    await f.close();
+  }
 });
 
 test('books_probe_does_not_invalidate_first_run_plex_setup', async () => {

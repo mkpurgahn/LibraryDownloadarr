@@ -15,6 +15,8 @@ import { DownloadProvider } from './contexts/DownloadContext';
 import { DownloadManager } from './components/DownloadManager';
 import { BooksPage } from './books/BooksPage';
 import { BookDetail } from './books/BookDetail';
+import { AudioProvider } from './books/AudioProvider';
+import { AudioPlayer } from './books/AudioPlayer';
 const ReaderPage = React.lazy(() => import('./books/ReaderPage').then(module => ({ default: module.ReaderPage })));
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -171,8 +173,11 @@ const App: React.FC = () => {
     <BrowserRouter>
       {token && user ? (
         <DownloadProvider key={user.id} userId={user.id}>
-          <DownloadManager />
-          {routes}
+          <AudioProvider>
+            <DownloadManager />
+            <AudioPlayer />
+            {routes}
+          </AudioProvider>
         </DownloadProvider>
       ) : routes}
     </BrowserRouter>

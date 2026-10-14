@@ -16,9 +16,11 @@ import { booksError, createBooksRouter } from './books/routes';
 import { createBooksSettingsRouter } from './books/settingsRoutes';
 import { PlexService, plexService } from './services/plexService';
 import { BooksError } from './books/limits';
+import type { EpubPreparation } from './books/epub/prepare';
 
 export const createApp = (
-  db: DatabaseService, burnManager: BurnManager, dependencies: { plex?: PlexService; publicPath?: string } = {}
+  db: DatabaseService, burnManager: BurnManager,
+  dependencies: { plex?: PlexService; publicPath?: string; booksPreparation?: EpubPreparation } = {}
 ): express.Express => {
   const app = express();
   const plex = dependencies.plex ?? plexService;
@@ -42,7 +44,7 @@ export const createApp = (
   app.use('/api/auth', createAuthRouter(db, plex));
   app.use('/api/libraries', createLibrariesRouter(db, plex));
   app.use('/api/media', createMediaRouter(db, { burnManager, plex }));
-  app.use('/api/books', createBooksRouter(db, { plex }));
+  app.use('/api/books', createBooksRouter(db, { plex, preparation: dependencies.booksPreparation }));
   app.use('/api/settings/books', createBooksSettingsRouter(db, plex));
   app.use('/api/settings', createSettingsRouter(db, plex));
   app.use('/api/logs', createLogsRouter(db, plex));

@@ -3,7 +3,7 @@ import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy, RenderTask
 import type { TextContent } from 'pdfjs-dist/types/src/display/api';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import assetJson from '../../../.reader-build/pdf-assets.json?raw';
-import { BooksApiError, booksApi, aborted } from '../api';
+import { BooksApiError, booksApi, aborted, BOOKS_CHANGED_EVENT } from '../api';
 import { BookTarget, EbookLocator, integer, list, record, text } from '../types';
 import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
@@ -114,13 +114,19 @@ export async function mountPdfReader(
     if (loading) void loading.destroy().catch(() => console.warn('PDF document cleanup could not finish after worker termination.'));
     signal.removeEventListener('abort', dispose);
     window.removeEventListener(SESSION_CHANGED_EVENT, dispose);
+    window.removeEventListener(BOOKS_CHANGED_EVENT, changed);
     document.removeEventListener('visibilitychange', saveOnHidden);
     window.removeEventListener('pagehide', save);
     if (activeReaders.get(container) === dispose) activeReaders.delete(container);
   }
   activeReaders.set(container, dispose);
+  const changed = () => {
+    container.dispatchEvent(new CustomEvent('reader-error', { detail: 'Books configuration changed. Reopen Books to continue.' }));
+    dispose();
+  };
   signal.addEventListener('abort', dispose, { once: true });
   window.addEventListener(SESSION_CHANGED_EVENT, dispose);
+  window.addEventListener(BOOKS_CHANGED_EVENT, changed);
   if (signal.aborted) dispose();
   const check = () => { if (disposed) throw new DOMException('PDF reader closed', 'AbortError'); };
   function cancellable<T>(promise: Promise<T>): Promise<T> {
