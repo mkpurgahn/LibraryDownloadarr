@@ -71,13 +71,16 @@ export class BooksProgressRepository {
       return { status: 'saved', value };
     }).immediate();
   }
-  history(key: Omit<ProgressKey, 'editionId'>): Progress[] {
+  history(key: Omit<ProgressKey, 'editionId'>, original?: { id: string; present: string[] }): Progress[] {
+    const where = original?.present.length
+      ? `${KEY} AND (edition_id = ? OR edition_id NOT IN (${original.present.map(() => '?').join(',')}))` : KEY;
+    const values = original?.present.length ? [...params(key), original.id, ...original.present] : params(key);
     const rows = this.db.prepare(`
-      SELECT progress_json, updated_at FROM books_progress WHERE ${KEY}
+      SELECT progress_json, updated_at FROM books_progress WHERE ${where}
       UNION ALL
-      SELECT progress_json, updated_at FROM books_progress_history WHERE ${KEY}
+      SELECT progress_json, updated_at FROM books_progress_history WHERE ${where}
       ORDER BY updated_at DESC LIMIT 100
-    `).all(...params(key), ...params(key)) as Array<{ progress_json: string }>;
+    `).all(...values, ...values) as Array<{ progress_json: string }>;
     return rows.map(row => JSON.parse(row.progress_json) as Progress);
   }
 }

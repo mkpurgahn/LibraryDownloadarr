@@ -2,6 +2,10 @@ import { BooksError } from '../limits';
 import { createHash } from 'node:crypto';
 
 export const EPUB_POLICY = 'epub-scroll-v1' as const;
+export const CBZ_POLICY = 'cbz-pages-v1' as const;
+export type ArchiveFormat = 'epub' | 'cbz';
+export const CBZ_LIMITS = { pages: 1000, pixels: 16000000, dimension: 8192 } as const;
+export const CBZ_DOWNLOAD_ONLY_REASON = 'This CBZ is corrupt, unsupported, or exceeds the safe reading limits; download the original.';
 export const EPUB_LIMITS = {
   compressedBytes: 100 * 1024 * 1024,
   expandedBytes: 512 * 1024 * 1024,
@@ -22,13 +26,15 @@ export const EPUB_LIMITS = {
 export const DOWNLOAD_ONLY_REASON = 'Cannot read safely here; download original.';
 export const epubContentVersion = (fileVersion: string): string =>
   createHash('sha256').update(`${EPUB_POLICY}:${fileVersion}`).digest('hex');
+export const cbzContentVersion = (fileVersion: string): string =>
+  createHash('sha256').update(`${CBZ_POLICY}:${fileVersion}`).digest('hex');
 
 export interface ReaderDescriptor {
   readerId: string;
   state: 'preparing' | 'ready' | 'download-only';
   contentVersion: string;
-  policyVersion: typeof EPUB_POLICY;
-  resources: Array<{ resourceId: string; mediaType: string; size: number }>;
+  policyVersion: typeof EPUB_POLICY | typeof CBZ_POLICY;
+  resources: Array<{ resourceId: string; mediaType: string; size: number; width?: number; height?: number }>;
   spine: string[];
   toc: Array<{ title: string; resourceId: string; fragment?: string }>;
   reason?: string;
@@ -38,6 +44,8 @@ export interface PreparedResource {
   mediaType: string;
   size: number;
   textLength?: number;
+  width?: number;
+  height?: number;
 }
 export interface ArchiveResult {
   state: 'ready' | 'download-only';
@@ -45,8 +53,9 @@ export interface ArchiveResult {
   spine: string[];
   toc: ReaderDescriptor['toc'];
   reason?: string;
-  failureCode?: 'UNSAFE_EPUB' | 'WORKER_FAILURE' | 'WORKER_TIMEOUT';
-  metrics: { entries: number; expandedBytes: number; peakTrackedBytes: number; elapsedMs: number };
+  failureCode?: 'UNSAFE_EPUB' | 'UNSAFE_CBZ' | 'WORKER_FAILURE' | 'WORKER_TIMEOUT';
+  metrics: { entries: number; expandedBytes: number; peakTrackedBytes: number; elapsedMs: number;
+    peakProcessRssBytes?: number; decoderConcurrency?: number; decoderCacheMemoryMiB?: number };
 }
 export class UnsafeEpub extends Error {
   constructor(reason: string) { super(reason); this.name = 'UnsafeEpub'; }
@@ -65,6 +74,7 @@ export class ArchiveBudget {
   expandedBytes = 0;
   entries = 0;
   peakTrackedBytes = 0;
+  peakProcessRssBytes = 0;
   private entryBytes = 0;
   constructor(private readonly compressedBytes: number) {
     if (!Number.isSafeInteger(compressedBytes) || compressedBytes <= 0) throw new UnsafeEpub('Invalid archive size');
@@ -85,6 +95,7 @@ export class ArchiveBudget {
   }
   checkMemory(additionalBytes = 0): void {
     const memory = process.memoryUsage();
+    this.peakProcessRssBytes = Math.max(this.peakProcessRssBytes, memory.rss);
     const accounted = memory.heapUsed + memory.external + additionalBytes;
     this.peakTrackedBytes = Math.max(this.peakTrackedBytes, accounted);
     if (accounted > EPUB_LIMITS.memoryBytes) throw new UnsafeEpub('Worker memory budget exceeded');

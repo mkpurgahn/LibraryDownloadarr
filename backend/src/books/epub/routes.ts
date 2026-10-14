@@ -15,7 +15,7 @@ export function createEpubRouter(
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) ||
         Object.keys(req.body).some(key => !['fileId', 'contentVersion'].includes(key))) throw invalidInput();
     const target = bookTarget({ itemId: req.params.itemId, fileId: req.body.fileId, contentVersion: req.body.contentVersion });
-    return res.json(await preparation.prepareEpub(principal(req), target, signal));
+    return res.json(await preparation.prepareReader(principal(req), target, signal));
   }));
   router.get('/readers/:readerId/resources/:resourceId', freshMembership, bookHandler(async (req, res, signal) => {
     if (Object.keys(req.query).length) throw invalidInput();

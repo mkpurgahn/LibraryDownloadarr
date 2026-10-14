@@ -6,8 +6,9 @@ import { Reader, Writer, ZipReader, configure } from '@zip.js/zip.js';
 import { SaxesParser } from 'saxes';
 import * as css from 'css-tree';
 import {
-  ArchiveBudget, ArchiveResult, DOWNLOAD_ONLY_REASON, EPUB_LIMITS, PreparedResource, UnsafeEpub, validateArchiveName,
+  ArchiveBudget, ArchiveFormat, ArchiveResult, CBZ_DOWNLOAD_ONLY_REASON, DOWNLOAD_ONLY_REASON, EPUB_LIMITS, PreparedResource, UnsafeEpub, validateArchiveName,
 } from './manifest';
+import type { StoredEntry } from './comic';
 
 interface XmlNode {
   name: string;
@@ -16,7 +17,6 @@ interface XmlNode {
   attributes: Record<string, string>;
   children: Array<XmlNode | string>;
 }
-interface StoredEntry { id: string; size: number }
 const OPF = 'http://www.idpf.org/2007/opf';
 const XHTML = 'http://www.w3.org/1999/xhtml';
 const resourceTypes = new Set([
@@ -129,16 +129,19 @@ function rewriteCss(value: string, from: string, resources: Map<string, Prepared
   return css.generate(tree);
 }
 
-async function processArchive(source: string, output: string): Promise<ArchiveResult> {
+async function processArchive(source: string, output: string, format: ArchiveFormat): Promise<ArchiveResult> {
   const started = performance.now();
   const stat = await fs.stat(source);
   const budget = new ArchiveBudget(stat.size);
   const entries = new Map<string, StoredEntry>();
+  const foldedNames = new Set<string>();
   let file: FileHandle | undefined;
   let zip: ZipReader<FileHandle> | undefined;
   const result = (): ArchiveResult => ({
-    state: 'download-only', resources: [], spine: [], toc: [], reason: DOWNLOAD_ONLY_REASON,
-    metrics: { entries: budget.entries, expandedBytes: budget.expandedBytes, peakTrackedBytes: budget.peakTrackedBytes, elapsedMs: performance.now() - started },
+    state: 'download-only', resources: [], spine: [], toc: [],
+    reason: format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON,
+    metrics: { entries: budget.entries, expandedBytes: budget.expandedBytes, peakTrackedBytes: budget.peakTrackedBytes,
+      peakProcessRssBytes: budget.peakProcessRssBytes, elapsedMs: performance.now() - started },
   });
   try {
     await fs.mkdir(output, { recursive: true, mode: 0o700 });
@@ -151,17 +154,26 @@ async function processArchive(source: string, output: string): Promise<ArchiveRe
     for await (const entry of zip.getEntriesGenerator()) {
       budget.beginEntry();
       const name = validateArchiveName(entry.filename);
-      if (entries.has(name) || entry.encrypted || entry.symlink ||
+      const folded = name.replace(/\/$/, '').toLowerCase();
+      if (entries.has(name) || (format === 'cbz' && foldedNames.has(folded)) || entry.encrypted || entry.symlink ||
           ((entry.externalFileAttributes >>> 16) & 0o170000) === 0o120000) throw new UnsafeEpub('Unsafe or encrypted archive entry');
+      foldedNames.add(folded);
       if (entry.uncompressedSize > EPUB_LIMITS.entryBytes) throw new UnsafeEpub('Expanded entry limit exceeded');
       const id = createHash('sha256').update(name).digest('hex');
-      if (entry.directory) { entries.set(name, { id, size: 0 }); continue; }
+      if (entry.directory) { entries.set(name, { id, size: 0, directory: true }); continue; }
       const destination = await fs.open(path.join(output, id), 'wx', 0o600);
       try {
         const writer = new DiskWriter(destination, budget);
         const size = await entry.getData(writer, { useWebWorkers: false, useCompressionStream: false, checkCrc32: true });
         entries.set(name, { id, size });
       } finally { await destination.close(); }
+    }
+    if (format === 'cbz') {
+      const { prepareComic, comicDecoderLimits } = await import('./comic');
+      const resources = await prepareComic(entries, output, budget);
+      return { ...result(), state: 'ready', reason: undefined, resources,
+        spine: resources.map(resource => resource.resourceId), toc: [],
+        metrics: { ...result().metrics, ...comicDecoderLimits() } };
     }
     if (entries.has('META-INF/encryption.xml')) throw new UnsafeEpub('Unsupported EPUB encryption');
     const readText = async (name: string, max = EPUB_LIMITS.entryBytes): Promise<string> => {
@@ -281,7 +293,7 @@ async function processArchive(source: string, output: string): Promise<ArchiveRe
     budget.checkMemory();
     return { ...result(), state: 'ready', reason: undefined, resources: [...resources.values()], spine, toc };
   } catch (error) {
-    return { ...result(), failureCode: error instanceof UnsafeEpub ? 'UNSAFE_EPUB' : 'WORKER_FAILURE' };
+    return { ...result(), failureCode: error instanceof UnsafeEpub ? (format === 'cbz' ? 'UNSAFE_CBZ' : 'UNSAFE_EPUB') : 'WORKER_FAILURE' };
   } finally {
     await zip?.close();
     await file?.close();
@@ -292,10 +304,11 @@ if (parentPort) {
   const input: unknown = workerData;
   if (!input || typeof input !== 'object' || !('source' in input) || !('output' in input) ||
       typeof input.source !== 'string' || typeof input.output !== 'string') throw new Error('Invalid worker input');
-  void processArchive(input.source, input.output).then(
+  const format = 'format' in input && input.format === 'cbz' ? 'cbz' : 'epub';
+  void processArchive(input.source, input.output, format).then(
     result => parentPort!.postMessage(result),
     () => parentPort!.postMessage({
-      state: 'download-only', resources: [], spine: [], toc: [], reason: DOWNLOAD_ONLY_REASON,
+      state: 'download-only', resources: [], spine: [], toc: [], reason: format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON,
       failureCode: 'WORKER_FAILURE',
       metrics: { entries: 0, expandedBytes: 0, peakTrackedBytes: 0, elapsedMs: 0 },
     } satisfies ArchiveResult)

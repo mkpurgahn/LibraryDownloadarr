@@ -34,7 +34,7 @@ const names = (value: unknown, fallback?: unknown): string[] => {
   return name ? [name] : [];
 };
 const MIME: Record<string, string> = {
-  epub: 'application/epub+zip', pdf: 'application/pdf',
+  epub: 'application/epub+zip', pdf: 'application/pdf', cbz: 'application/vnd.comicbook+zip',
   mp3: 'audio/mpeg', m4b: 'audio/mp4', m4a: 'audio/mp4', flac: 'audio/flac',
   ogg: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac',
 };
@@ -246,12 +246,12 @@ export class AbsClient {
       chapters.push({ id: String(chapter.id), title: text(chapter.title, 500), start: chapter.start, end: chapter.end });
       previous = chapter.end;
     }
-    const canRead = files.some(f => f.role === 'ebook' && f.available && ['epub', 'pdf'].includes(f.extension));
+    const canRead = files.some(f => f.role === 'ebook' && f.available && ['epub', 'pdf', 'cbz'].includes(f.extension));
     const canListen = tracks.length > 0 && tracks.every(t =>
       files.some(f => f.fileId === t.fileId && ['mp3', 'm4b'].includes(f.extension)));
     return {
       ...summary, files, tracks, chapters,
-      read: { available: canRead, ...(!canRead ? { reason: 'No supported available EPUB or PDF; download original' } : {}) },
+      read: { available: canRead, ...(!canRead ? { reason: 'No supported available EPUB, PDF, or CBZ; download original' } : {}) },
       listen: { available: canListen, ...(!canListen ? { reason: 'No supported complete audio timeline; download originals' } : {}) },
     };
   }

@@ -13,6 +13,7 @@ import { BooksRelay } from '../books/relay';
 import { BookStreams } from '../books/streams';
 import { EpubPreparation } from '../books/epub/prepare';
 import { buildEpubFixture } from '../books/proof/epubFixture';
+import { buildCbzFixture } from '../books/proof/cbzFixture';
 import { BookItem } from '../books/types';
 import { audioEdition, ProgressWrite } from '../books/progressTypes';
 import { ReaderDescriptor } from '../books/epub/manifest';
@@ -24,12 +25,12 @@ class Membership extends PlexService {
   }
 }
 
-async function fixture() {
+async function fixture(format: 'epub' | 'cbz' = 'epub') {
   const enabled = process.env.BOOKS_ENABLED;
   process.env.BOOKS_ENABLED = 'true';
   const root = path.resolve('.test-data', 'books-progress-revocation', randomUUID());
   await fs.mkdir(root, { recursive: true });
-  const bytes = await buildEpubFixture();
+  const bytes = format === 'cbz' ? await buildCbzFixture() : await buildEpubFixture();
   let hold: { phase: 'item' | 'head'; entered(): void; released: Promise<void> } | undefined;
   const libraryId = 'selected-library';
   const provider = express();
@@ -42,16 +43,16 @@ async function fixture() {
   });
   provider.get('/api/items/book', (_req, res) => res.json({
     id: 'book', libraryId, mediaType: 'book',
-    libraryFiles: ['pdf', 'epub', 'mp3'].map(ext => ({
+    libraryFiles: ['pdf', format, 'mp3'].map(ext => ({
       ino: ext, fileType: ext === 'mp3' ? 'audio' : 'ebook',
-      metadata: { filename: `Original.${ext}`, size: ext === 'epub' ? bytes.length : 10, mtimeMs: 1 },
+      metadata: { filename: `Original.${ext}`, size: ext === format ? bytes.length : 10, mtimeMs: 1 },
     })),
     media: {
       metadata: { title: 'Private fixture' }, ebookFile: { ino: 'pdf' },
       tracks: [{ ino: 'mp3', duration: 10, startOffset: 0 }], chapters: [],
     },
   }));
-  provider.get('/api/items/book/file/epub', (req, res) => {
+  provider.get(`/api/items/book/file/${format}`, (req, res) => {
     res.set({ 'Content-Length': String(bytes.length), 'Content-Type': 'application/epub+zip', ETag: '"original"' });
     res.status(200);
     if (req.method === 'HEAD') res.end(); else res.end(bytes);
@@ -91,7 +92,7 @@ async function fixture() {
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const book = await (await request('/api/books/items/book')).json() as BookItem;
-  const epub = book.files.find(file => file.extension === 'epub')!;
+  const epub = book.files.find(file => file.extension === format)!;
   const descriptor = await (await request('/api/books/items/book/reader', 'POST', {
     fileId: epub.fileId, contentVersion: epub.contentVersion,
   })).json() as ReaderDescriptor;
@@ -119,18 +120,19 @@ async function fixture() {
   };
 }
 
-for (const kind of ['pdf', 'audio', 'epub'] as const) {
+for (const kind of ['pdf', 'audio', 'epub', 'cbz'] as const) {
   for (const operation of ['GET', 'HEAD', 'claim', 'save'] as const) {
     for (const revocation of ['logout', 'user-revocation', 'expiry'] as const) {
       test(`held_progress_${kind}_${operation}_${revocation}_has_no_authority`, { timeout: 15000 }, async () => {
-        const f = await fixture();
+        const f = await fixture(kind === 'cbz' ? 'cbz' : 'epub');
         let release: (() => void) | undefined;
         try {
           const file = f.book.files.find(file => file.extension === kind)!;
           const edition = kind === 'audio' ? audioEdition(f.book)! : {
-            editionId: file.fileId, contentVersion: kind === 'epub' ? f.descriptor.contentVersion : file.contentVersion,
+            editionId: file.fileId, contentVersion: kind === 'epub' || kind === 'cbz' ? f.descriptor.contentVersion : file.contentVersion,
           };
           const locator: ProgressWrite['locator'] = kind === 'pdf' ? { kind, page: 3, offset: 0.25 } :
+            kind === 'cbz' ? { kind, page: 2, offset: 0.2, horizontal: 0.5, policyVersion: f.descriptor.policyVersion } :
             kind === 'audio' ? { kind, trackId: f.book.tracks[0].fileId, localSeconds: 5, globalSeconds: 5 } :
               { kind, resourceId: f.descriptor.spine[0], textOffset: 10, fraction: 0.2, policyVersion: f.descriptor.policyVersion };
           const url = `/api/books/items/book/progress/${kind === 'audio' ? 'audio' : 'ebook'}`;
@@ -170,16 +172,17 @@ for (const kind of ['pdf', 'audio', 'epub'] as const) {
   }
 }
 
-test('held_epub_locator_validation_revocation_cannot_commit', { timeout: 15000 }, async () => {
-  const f = await fixture();
+for (const kind of ['epub', 'cbz'] as const) test(`held_${kind}_locator_validation_revocation_cannot_commit`, { timeout: 15000 }, async () => {
+  const f = await fixture(kind);
   const pending = f.hold('head');
   try {
-    const file = f.book.files.find(file => file.extension === 'epub')!;
+    const file = f.book.files.find(file => file.extension === kind)!;
     const before = f.snapshot();
     const response = f.request('/api/books/items/book/progress/ebook', 'PUT', {
       editionId: file.fileId, contentVersion: f.descriptor.contentVersion,
       op: 'claim', writerId: 'device-one', sequence: 1, expectedRevision: 0,
-      locator: { kind: 'epub', resourceId: f.descriptor.spine[0], textOffset: 10, fraction: 0.2, policyVersion: f.descriptor.policyVersion },
+      locator: kind === 'cbz' ? { kind, page: 2, offset: 0, horizontal: 0, policyVersion: f.descriptor.policyVersion } :
+        { kind, resourceId: f.descriptor.spine[0], textOffset: 10, fraction: 0.2, policyVersion: f.descriptor.policyVersion },
     });
     await pending.waiting;
     f.db.deleteSession(f.sessions[0].token);

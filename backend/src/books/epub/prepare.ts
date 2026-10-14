@@ -5,7 +5,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { Worker } from 'node:worker_threads';
 import { BooksError, notFound, opaqueSegment } from '../limits';
-import { ArchiveResult, DOWNLOAD_ONLY_REASON, EPUB_LIMITS, EPUB_POLICY, ReaderDescriptor, epubContentVersion } from './manifest';
+import {
+  ArchiveFormat, ArchiveResult, CBZ_DOWNLOAD_ONLY_REASON, CBZ_POLICY, DOWNLOAD_ONLY_REASON, EPUB_LIMITS,
+  EPUB_POLICY, ReaderDescriptor, cbzContentVersion, epubContentVersion,
+} from './manifest';
 import { DatabaseService } from '../../models/database';
 import { BooksCatalog } from '../catalog';
 import { BooksRelay } from '../relay';
@@ -19,22 +22,24 @@ import { config } from '../../config';
 
 export async function runArchiveWorker(
   source: string, output: string, signal: AbortSignal,
-  factory?: () => Worker
+  factory?: () => Worker, format: ArchiveFormat = 'epub'
 ): Promise<ArchiveResult> {
   if (signal.aborted) throw new DOMException('Preparation cancelled', 'AbortError');
   if ((await fs.stat(source)).size > EPUB_LIMITS.compressedBytes) {
-    throw new BooksError(413, 'EPUB_TOO_LARGE', DOWNLOAD_ONLY_REASON);
+    throw new BooksError(413, format === 'cbz' ? 'CBZ_TOO_LARGE' : 'EPUB_TOO_LARGE',
+      format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON);
   }
   const started = performance.now();
   const worker = factory ? factory() : new Worker(path.join(__dirname, 'worker.js'), {
-    workerData: { source, output },
+    workerData: { source, output, format },
     env: {},
     resourceLimits: { maxOldGenerationSizeMb: 128, maxYoungGenerationSizeMb: 16, stackSizeMb: 4 },
   });
   return new Promise((resolve, reject) => {
     let settled = false;
     const unsupported = (): ArchiveResult => ({
-      state: 'download-only', resources: [], spine: [], toc: [], reason: DOWNLOAD_ONLY_REASON,
+      state: 'download-only', resources: [], spine: [], toc: [],
+      reason: format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON,
       failureCode: 'WORKER_FAILURE',
       metrics: { entries: 0, expandedBytes: 0, peakTrackedBytes: 0, elapsedMs: performance.now() - started },
     });
@@ -58,6 +63,7 @@ export async function runArchiveWorker(
 }
 
 interface CacheEntry {
+  format: ArchiveFormat;
   key: string;
   directory: string;
   target: BookTarget;
@@ -117,9 +123,10 @@ export class EpubPreparation {
       throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
     }
   }
-  private key(target: BookTarget): string {
+  private key(target: BookTarget, format: ArchiveFormat): string {
     return createHash('sha256').update(JSON.stringify([
-      this.catalog.current().config.configGeneration, target.itemId, target.fileId, target.contentVersion, EPUB_POLICY,
+      this.catalog.current().config.configGeneration, target.itemId, target.fileId, target.contentVersion,
+      format === 'cbz' ? CBZ_POLICY : EPUB_POLICY,
     ])).digest('hex');
   }
   private initialize(): Promise<void> {
@@ -186,18 +193,23 @@ export class EpubPreparation {
     const readerId = randomUUID();
     this.handles.set(readerId, { principal, entry, expiresAt: Math.min(principal.expiresAt, this.now() + EPUB_LIMITS.handleTtlMs) });
     return {
-      readerId, state: entry.result.state, contentVersion: epubContentVersion(entry.target.contentVersion),
-      policyVersion: EPUB_POLICY, resources: entry.result.resources.map(({ resourceId, mediaType, size }) => ({ resourceId, mediaType, size })),
+      readerId, state: entry.result.state,
+      contentVersion: entry.format === 'cbz' ? cbzContentVersion(entry.target.contentVersion) : epubContentVersion(entry.target.contentVersion),
+      policyVersion: entry.format === 'cbz' ? CBZ_POLICY : EPUB_POLICY,
+      resources: entry.result.resources.map(({ resourceId, mediaType, size, width, height }) =>
+        ({ resourceId, mediaType, size, ...(width && height ? { width, height } : {}) })),
       spine: entry.result.spine, toc: entry.result.toc, ...(entry.result.reason ? { reason: entry.result.reason } : {}),
     };
   }
-  async prepareEpub(principal: BooksPrincipal, target: BookTarget, signal: AbortSignal): Promise<ReaderDescriptor> {
+  async prepareReader(principal: BooksPrincipal, target: BookTarget, signal: AbortSignal): Promise<ReaderDescriptor> {
     this.session(principal);
     await this.initialize();
     const checked = await this.relay.inspect(principal, target, signal);
-    if (checked.file.extension !== 'epub' || checked.file.role !== 'ebook') throw new BooksError(422, 'BOOK_DOWNLOAD_ONLY', DOWNLOAD_ONLY_REASON);
-    if (checked.file.size > EPUB_LIMITS.compressedBytes) throw new BooksError(413, 'EPUB_TOO_LARGE', DOWNLOAD_ONLY_REASON);
-    const key = this.key(target);
+    const format = checked.file.extension;
+    if ((format !== 'epub' && format !== 'cbz') || checked.file.role !== 'ebook') throw new BooksError(422, 'BOOK_DOWNLOAD_ONLY', DOWNLOAD_ONLY_REASON);
+    if (checked.file.size > EPUB_LIMITS.compressedBytes) throw new BooksError(413, format === 'cbz' ? 'CBZ_TOO_LARGE' : 'EPUB_TOO_LARGE',
+      format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON);
+    const key = this.key(target, format);
     await this.prune(0);
     const cached = this.cache.get(key);
     if (cached) {
@@ -217,15 +229,15 @@ export class EpubPreparation {
       try {
         await this.relay.copyOriginal(principal, target, source.createWriteStream({ autoClose: false }), operation.signal, EPUB_LIMITS.compressedBytes);
       } finally { await source.close(); }
-      const result = await runArchiveWorker(original, path.join(work, 'resources'), operation.signal);
+      const result = await runArchiveWorker(original, path.join(work, 'resources'), operation.signal, undefined, format);
       if (operation.signal.aborted) throw new DOMException('Preparation cancelled', 'AbortError');
       this.session(principal);
       if (checked.configGeneration !== this.catalog.current().config.configGeneration) throw new BooksError(409, 'BOOKS_CONFIGURATION_CHANGED');
-      if (result.failureCode) logger.warn('Books EPUB is download-only', { code: result.failureCode, ...result.metrics });
-      else logger.info('Books EPUB preparation completed', { code: 'EPUB_PREPARED', ...result.metrics });
+      if (result.failureCode) logger.warn('Books archive is download-only', { format, code: result.failureCode, ...result.metrics });
+      else logger.info('Books archive preparation completed', { format, code: 'BOOK_ARCHIVE_PREPARED', ...result.metrics });
       if (result.state === 'ready') await fs.rename(path.join(work, 'resources'), destination);
       const entry: CacheEntry = {
-        key, directory: destination, target, generation: checked.configGeneration, result,
+        key, format, directory: destination, target, generation: checked.configGeneration, result,
         bytes: result.resources.reduce((sum, resource) => sum + resource.size, 0),
         createdAt: this.now(), usedAt: this.now(), readers: 0,
       };
@@ -274,10 +286,13 @@ export class EpubPreparation {
     this.handle(principal, readerId); this.handles.delete(readerId);
   }
   async validateLocator(principal: BooksPrincipal, target: BookTarget, locator: EbookLocator, signal: AbortSignal): Promise<boolean> {
-    if (locator.kind !== 'epub' || locator.policyVersion !== EPUB_POLICY) return false;
-    await this.relay.inspect(principal, target, signal);
-    const entry = this.cache.get(this.key(target));
+    if ((locator.kind !== 'epub' || locator.policyVersion !== EPUB_POLICY) &&
+        (locator.kind !== 'cbz' || locator.policyVersion !== CBZ_POLICY)) return false;
+    const checked = await this.relay.inspect(principal, target, signal);
+    if (checked.file.extension !== locator.kind) return false;
+    const entry = this.cache.get(this.key(target, locator.kind));
     if (!entry || entry.result.state !== 'ready' || entry.createdAt + EPUB_LIMITS.cacheTtlMs <= this.now()) return false;
+    if (locator.kind === 'cbz') return locator.page <= entry.result.spine.length;
     const resource = entry.result.resources.find(resource => resource.resourceId === locator.resourceId);
     return Boolean(resource && entry.result.spine.includes(resource.resourceId) &&
       resource.textLength !== undefined && locator.textOffset <= resource.textLength);

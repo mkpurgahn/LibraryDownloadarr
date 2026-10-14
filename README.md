@@ -107,6 +107,18 @@ First-open preparation includes the initial writer claim; saved-position choices
 appear only when a stored or conflicting position exists. EPUB text anchors
 retain positions within long paragraphs across font changes and reader reopen.
 
+CBZ manga originals use an image-page reader with previous/next, page jump,
+fit-page, fit-width, 50-300% manual zoom, arrow keys, and horizontal swipes
+(when the page is not horizontally scrollable). Reading direction defaults to
+right-to-left and has an explicit left-to-right toggle. Direction changes
+navigation, not the semantic page order. The selected original's filename is
+shown in the reader; separate chapter files never borrow another file's pages
+or saved position. Vertical and horizontal within-page fractions survive zoom,
+reflow and reopening when scrolling is available. Existing writer claims,
+conflicts, intentional rewind and retry semantics apply. History from another
+currently present ebook original does not make a new chapter incompatible;
+history from removed originals is still retained and surfaced explicitly.
+
 Original MP3/M4B playback uses one native audio element that remains active
 across in-app navigation. Tracks follow ABS's included order, not filenames;
 valid chapters, global seeking, pause/resume and 0.5-2x speed are available.
@@ -131,6 +143,38 @@ preparation runs at a time. The separate database-scoped cache is limited to
 30 minutes or with their application session. Restart may require preparation
 again, but does not erase durable progress. Unsafe/encrypted/fixed-layout books
 remain explicitly original-download-only.
+
+CBZ uses that **same** preparation slot, ZIP validation, worker watchdog,
+authenticated resource broker and 1 GiB cache, not another resource pool.
+The archive/entry/expansion/time limits above are unchanged. Additional CBZ
+limits are **1,000 pages**, **16,000,000 decoded pixels per page**, and
+**8,192 pixels per side**. Static JPEG, PNG and WebP are supported. Every page
+is fully decoded and checked before an archive becomes readable; one damaged,
+encrypted, unsupported or oversized page makes the whole CBZ download-only
+rather than silently skipping pages. CBR/RAR, GIF, APNG, animated WebP, SVG,
+HTML and nested archives are not supported. Originals are never modified.
+
+Page order compares NFC-normalized full archive paths case-insensitively,
+using locale-independent numeric runs (`1`, `2`, `10`). Equal numeric runs
+sort shorter zero padding first (`1`, `01`); remaining ties use code-unit order.
+Exact/NFC/case-folded duplicate paths are rejected. Only known non-page junk
+is ignored: the root `__MACOSX` tree, AppleDouble `._*` basenames, `.DS_Store`,
+`Thumbs.db`, `desktop.ini`, and `ComicInfo.xml`. Metadata is not executed or
+used to fetch remote pages; unexpected other files fail explicitly.
+
+Pinned sharp 0.34.5 validates CBZ rasters inside the worker, with libvips
+concurrency explicitly set to **one** (including musl/Alpine) and its operation
+cache disabled. Pages are decoded serially; the browser acquires only its
+current page, cancels abandoned turns and releases object URLs on navigation,
+session/configuration changes and close. Its decoded-pixel counter describes
+the single application-owned image, not browser RSS or compositor memory.
+The worker's 256 MiB tracked heap/external budget and V8 heap limits **do not**
+bound native libvips allocations or whole-process RSS. Sampled process-RSS
+evidence is reported separately, not as a hard memory guarantee. The external
+30-second watchdog cancels preparation and waits for worker termination before
+releasing its slot and cleaning temporary files. A sub-limit archive can still
+be download-only on a constrained runtime. Reader handles renew on demand;
+stable original/policy-bound progress survives handle/cache expiry and restart.
 
 The reader uses one opaque-origin sandbox, a self-contained hash-CSP script,
 DOMPurify sanitation and parsed CSS restrictions. Book payloads are served as

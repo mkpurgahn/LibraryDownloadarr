@@ -53,9 +53,9 @@ export const BookDetail: React.FC = () => {
     finally { setStarting(false); }
   };
   const selected = item?.files.find(file => file.fileId === ebook);
-  const oversized = selected && (selected.extension === 'epub' ? selected.size > READ_LIMITS.epub :
-    selected.extension === 'pdf' && selected.size > READ_LIMITS.pdf);
-  const readable = selected?.available && ['epub', 'pdf'].includes(selected.extension) && !oversized;
+  const oversized = selected && (selected.extension === 'cbz' ? selected.size > READ_LIMITS.cbz :
+    selected.extension === 'epub' ? selected.size > READ_LIMITS.epub : selected.extension === 'pdf' && selected.size > READ_LIMITS.pdf);
+  const readable = selected?.available && ['epub', 'pdf', 'cbz'].includes(selected.extension) && !oversized;
   return (
     <div className="min-h-screen flex flex-col">
       <Header onMenuClick={menu.toggleMobileMenu} />
@@ -86,7 +86,9 @@ export const BookDetail: React.FC = () => {
                     <button className="btn-primary min-h-11" disabled={!item.listen.available}
                       onClick={() => void audio.open(item)}>Listen</button>
                   </div>
-                  {!readable && <p className="mt-2 text-xs text-gray-400">{oversized ? 'This original exceeds the in-app reader size limit; download it below.' : item.read.reason || 'This ebook is download-only.'}</p>}
+                  {!readable && <p className="mt-2 text-xs text-gray-400">{oversized
+                    ? selected?.extension === 'cbz' ? 'This CBZ exceeds the 100 MiB archive limit; download the original below.' :
+                      'This original exceeds the in-app reader size limit; download it below.' : item.read.reason || 'This ebook is download-only.'}</p>}
                   {!item.listen.available && <p className="mt-2 text-xs text-gray-400">{item.listen.reason}</p>}
                 </div>
               </div>

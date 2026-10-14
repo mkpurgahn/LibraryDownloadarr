@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 import { BookItem, BookKey } from './types';
 import { invalidInput, opaqueSegment } from './limits';
+import { CBZ_LIMITS } from './epub/manifest';
 
 export type EbookLocator =
   { kind: 'epub'; resourceId: string; textOffset: number; fraction: number; policyVersion: string } |
+  { kind: 'cbz'; page: number; offset: number; horizontal: number; policyVersion: string } |
   { kind: 'pdf'; page: number; offset: number };
 export interface AudioLocator {
   kind: 'audio';
@@ -66,6 +68,13 @@ const integer = (value: unknown, min = 0): value is number =>
 export function progressLocator(input: unknown): EbookLocator | AudioLocator {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalidInput();
   const value = input as Record<string, unknown>;
+  if (value.kind === 'cbz') {
+    if (Object.keys(value).some(key => !['kind', 'page', 'offset', 'horizontal', 'policyVersion'].includes(key)) ||
+        !integer(value.page, 1) || value.page > CBZ_LIMITS.pages || !finite(value.offset, 0, 1) ||
+        !finite(value.horizontal, 0, 1)) throw invalidInput();
+    return { kind: 'cbz', page: value.page, offset: value.offset, horizontal: value.horizontal,
+      policyVersion: opaqueSegment(value.policyVersion) };
+  }
   if (value.kind === 'pdf') {
     if (Object.keys(value).some(key => !['kind', 'page', 'offset'].includes(key)) ||
         !integer(value.page, 1) || value.page > 5000 || !finite(value.offset, 0, 1)) throw invalidInput();

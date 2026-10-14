@@ -37,11 +37,21 @@ export function comicPanel(page: number, chapter = 1, width = 480, height = 720)
     rows[offset + 1] = base;
     rows[offset + 2] = Math.max(0, base - (chapter === 1 ? 25 : 0));
   }
+
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width); header.writeUInt32BE(height, 4);
   header[8] = 8; header[9] = 2;
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
     chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+export function animatedComicPanel(): Buffer {
+  const png = comicPanel(1);
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(1);
+  const frame = Buffer.alloc(26);
+  frame.writeUInt32BE(480, 4); frame.writeUInt32BE(720, 8);
+  frame.writeUInt16BE(1, 20); frame.writeUInt16BE(10, 22);
+  return Buffer.concat([png.subarray(0, 33), chunk('acTL', animation), chunk('fcTL', frame), png.subarray(33)]);
 }
 
 export async function buildCbzFixture(entries: Array<{ name: string; data: Uint8Array; password?: string }> = [

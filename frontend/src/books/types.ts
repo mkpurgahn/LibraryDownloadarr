@@ -30,7 +30,8 @@ export interface BookItem extends BookKey {
 }
 export type BookSummary = Omit<BookItem, 'files' | 'tracks' | 'chapters'> & { hasEbook: boolean; audioTrackCount: number };
 export interface BookTarget { itemId: string; fileId: string; contentVersion: string }
-export const READ_LIMITS = { epub: 100 * 1024 * 1024, pdf: 512 * 1024 * 1024 } as const;
+export const READ_LIMITS = { epub: 100 * 1024 * 1024, pdf: 512 * 1024 * 1024, cbz: 100 * 1024 * 1024 } as const;
+export const COMIC_LIMITS = { pages: 1000, pixels: 16000000, dimension: 8192, entryBytes: 32 * 1024 * 1024 } as const;
 export interface BookTicketResult {
   target: BookTarget;
   ticket?: { url: string; expiresAt: number; filename: string; size: number; resumable: boolean };
@@ -133,19 +134,29 @@ export function parseCatalog(value: unknown): CatalogPage {
   return { items: list(raw.items, limit).map(parseBookSummary), page: integer(raw.page), limit, total: integer(raw.total) };
 }
 
-export interface ReaderDescriptor {
+interface ReaderManifest {
   readerId: string;
   state: 'preparing' | 'ready' | 'download-only';
   contentVersion: string;
-  policyVersion: 'epub-scroll-v1';
-  resources: Array<{ resourceId: string; mediaType: string; size: number }>;
   spine: string[];
   toc: Array<{ title: string; resourceId: string; fragment?: string }>;
   reason?: string;
 }
+export interface ReaderResource { resourceId: string; mediaType: string; size: number }
+export interface ComicResource extends ReaderResource { width: number; height: number }
+export interface EpubDescriptor extends ReaderManifest {
+  policyVersion: 'epub-scroll-v1';
+  resources: ReaderResource[];
+}
+export interface ComicDescriptor extends ReaderManifest {
+  policyVersion: 'cbz-pages-v1';
+  resources: ComicResource[];
+}
+export type ReaderDescriptor = EpubDescriptor | ComicDescriptor;
 export function parseReader(value: unknown): ReaderDescriptor {
   const raw = record(value);
-  if (!['preparing', 'ready', 'download-only'].includes(String(raw.state)) || raw.policyVersion !== 'epub-scroll-v1') throw invalidResponse();
+  if ((raw.state !== 'preparing' && raw.state !== 'ready' && raw.state !== 'download-only') ||
+      (raw.policyVersion !== 'epub-scroll-v1' && raw.policyVersion !== 'cbz-pages-v1')) throw invalidResponse();
   const resources = list(raw.resources).map(value => {
     const resource = record(value);
     const resourceId = id(resource.resourceId);
@@ -155,10 +166,11 @@ export function parseReader(value: unknown): ReaderDescriptor {
   });
   const ids = new Set(resources.map(resource => resource.resourceId));
   const spine = list(raw.spine).map(id);
-  if (ids.size !== resources.length || spine.some(id => !ids.has(id)) || (raw.state === 'ready' && !spine.length)) throw invalidResponse();
-  return {
-    readerId: id(raw.readerId), state: raw.state as ReaderDescriptor['state'],
-    contentVersion: id(raw.contentVersion), policyVersion: raw.policyVersion, resources, spine,
+  if (ids.size !== resources.length || new Set(spine).size !== spine.length ||
+      spine.some(id => !ids.has(id)) || (raw.state === 'ready' && !spine.length)) throw invalidResponse();
+  const manifest: ReaderManifest = {
+    readerId: id(raw.readerId), state: raw.state,
+    contentVersion: id(raw.contentVersion), spine,
     toc: list(raw.toc).map(value => {
       const entry = record(value);
       const resourceId = id(entry.resourceId);
@@ -167,10 +179,24 @@ export function parseReader(value: unknown): ReaderDescriptor {
     }),
     ...(raw.reason === undefined ? {} : { reason: text(raw.reason, 500) }),
   };
+  if (raw.policyVersion === 'cbz-pages-v1') {
+    const pages = list(raw.resources, COMIC_LIMITS.pages).map((value, index): ComicResource => {
+      const page = record(value);
+      const width = integer(page.width); const height = integer(page.height);
+      if (!width || !height || width > COMIC_LIMITS.dimension || height > COMIC_LIMITS.dimension ||
+          width * height > COMIC_LIMITS.pixels || !['image/png', 'image/jpeg', 'image/webp'].includes(resources[index].mediaType)) throw invalidResponse();
+      return { ...resources[index], width, height };
+    });
+    if (spine.length !== pages.length || pages.reduce((sum, page) => sum + page.size, 0) > 512 * 1024 * 1024) throw invalidResponse();
+    return { ...manifest, policyVersion: raw.policyVersion, resources: pages };
+  }
+  return { ...manifest, policyVersion: raw.policyVersion, resources };
 }
 
+export interface ComicLocator { kind: 'cbz'; page: number; offset: number; horizontal: number; policyVersion: string }
 export type EbookLocator =
   { kind: 'epub'; resourceId: string; textOffset: number; fraction: number; policyVersion: string } |
+  ComicLocator |
   { kind: 'pdf'; page: number; offset: number };
 export interface AudioLocator { kind: 'audio'; trackId: string; localSeconds: number; globalSeconds: number }
 export interface Progress {
@@ -184,6 +210,11 @@ export interface ProgressWrite {
 }
 export function parseLocator(value: unknown): EbookLocator | AudioLocator {
   const raw = record(value);
+  if (raw.kind === 'cbz') {
+    const page = integer(raw.page); const offset = finite(raw.offset); const horizontal = finite(raw.horizontal);
+    if (!page || page > COMIC_LIMITS.pages || offset > 1 || horizontal > 1) throw invalidResponse();
+    return { kind: 'cbz', page, offset, horizontal, policyVersion: id(raw.policyVersion) };
+  }
   if (raw.kind === 'epub') {
     const fraction = finite(raw.fraction); const textOffset = integer(raw.textOffset);
     if (fraction > 1 || textOffset > 1024 * 1024 || raw.policyVersion !== 'epub-scroll-v1') throw invalidResponse();

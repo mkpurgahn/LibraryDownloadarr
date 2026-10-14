@@ -11,6 +11,7 @@ import test, { after } from 'node:test';
 import { ArchiveBudget, EPUB_LIMITS, validateArchiveName } from '../books/epub/manifest';
 import { EpubPreparation, runArchiveWorker } from '../books/epub/prepare';
 import { buildEpubFixture as epub, fixturePackage as packageXml, fixtureChapter as chapter } from '../books/proof/epubFixture';
+import { buildCbzFixture } from '../books/proof/cbzFixture';
 import { DatabaseService } from '../models/database';
 import { createBooksRouter } from '../books/routes';
 import { PlexService } from '../services/plexService';
@@ -98,30 +99,30 @@ test('archive_names_and_xml_are_untrusted', async () => {
   evidence.push({ test: 'archive_names_and_xml_are_untrusted', invalidNames: 'rejected', dtd: 'rejected', unknownSpine: 'rejected', verdict: 'pass' });
 });
 
-test('binary_archive_rejects_unsafe_entries_and_observes_inflated_bytes', async () => {
+for (const format of ['epub', 'cbz'] as const) test(`${format}_binary_archive_rejects_unsafe_entries_and_observes_inflated_bytes`, async () => {
     for (const entries of [
       [{ name: '../escape' }], [{ name: '/absolute' }], [{ name: 'duplicate' }, { name: 'duplicate' }],
       [{ name: 'OPS//ambiguous' }], [{ name: 'link', symlink: true }],
     ]) await withArchive(rawArchive(entries), async (source, output) => {
-      assert.equal((await runArchiveWorker(source, output, new AbortController().signal)).state, 'download-only');
+      assert.equal((await runArchiveWorker(source, output, new AbortController().signal, undefined, format)).state, 'download-only');
     });
     await withArchive(rawArchive([{ name: 'oversized', data: Buffer.alloc(33 * 1024 * 1024), declaredSize: 1 }]), async (source, output) => {
-      const result = await runArchiveWorker(source, output, new AbortController().signal);
+      const result = await runArchiveWorker(source, output, new AbortController().signal, undefined, format);
       assert.equal(result.state, 'download-only');
       assert.ok(result.metrics.expandedBytes <= EPUB_LIMITS.entryBytes);
     });
     await withArchive(rawArchive([{ name: 'ratio', data: Buffer.alloc(2 * 1024 * 1024), deflate: true }]), async (source, output) => {
-      const result = await runArchiveWorker(source, output, new AbortController().signal);
+      const result = await runArchiveWorker(source, output, new AbortController().signal, undefined, format);
       assert.equal(result.state, 'download-only');
       assert.ok(result.metrics.expandedBytes > 0);
       assert.ok(result.metrics.expandedBytes <= (await fs.stat(source)).size * EPUB_LIMITS.ratio);
     });
     await withArchive(rawArchive(Array.from({ length: 10001 }, (_, index) => ({ name: `entry-${index}` }))), async (source, output) => {
-      const result = await runArchiveWorker(source, output, new AbortController().signal);
+      const result = await runArchiveWorker(source, output, new AbortController().signal, undefined, format);
       assert.equal(result.state, 'download-only');
       assert.equal(result.metrics.entries, 10000);
     });
-    evidence.push({ test: 'binary_archive_rejects_unsafe_entries_and_observes_inflated_bytes', actualEntryCount: 10001, sizeLie: 'rejected', streamRatio: 'bounded', verdict: 'pass' });
+    evidence.push({ test: `${format}_binary_archive_rejects_unsafe_entries_and_observes_inflated_bytes`, actualEntryCount: 10001, sizeLie: 'rejected', streamRatio: 'bounded', verdict: 'pass' });
 });
 
 test('valid_epub_is_manifest_bounded_and_original_stays_unchanged', async () => {
@@ -173,8 +174,8 @@ test('epub_two_navigation_and_unused_nested_archives', async () => {
   evidence.push({ test: 'epub_two_navigation_and_unused_nested_archives', ncx: 'renderable', nestedExpansion: false, verdict: 'pass' });
 });
 
-test('resource_navigation_is_non_executable_and_handles_are_session_bound', async () => {
-  const bytes = await epub();
+for (const format of ['epub', 'cbz'] as const) test(`${format}_resource_navigation_is_non_executable_and_handles_are_session_bound`, async () => {
+  const bytes = format === 'cbz' ? await buildCbzFixture() : await epub();
   const root = path.resolve('.test-data', 'books-epub', randomUUID());
   await fs.mkdir(root, { recursive: true });
   const oldEnabled = process.env.BOOKS_ENABLED;
@@ -191,7 +192,7 @@ test('resource_navigation_is_non_executable_and_handles_are_session_bound', asyn
       res.end(JSON.stringify({
         id: 'item', libraryId, mediaType: 'book',
         libraryFiles: [{ ino: 'ebook', fileType: 'ebook', metadata: {
-          filename: 'Fixture.epub', ext: '.epub', size: declaredSize, mtimeMs: 1700000000000,
+          filename: `Fixture.${format}`, ext: `.${format}`, size: declaredSize, mtimeMs: 1700000000000,
         } }],
         media: { metadata: { title: 'Reader fixture' }, ebookFile: { ino: 'ebook' }, audioFiles: [], tracks: [], chapters: [] },
       }));
@@ -237,12 +238,13 @@ test('resource_navigation_is_non_executable_and_handles_are_session_bound', asyn
   try {
     assert.equal(typeof EpubPreparation, 'function');
     const item = await (await request('/items/item')).json() as BookItem;
+    assert.equal(item.read.available, true);
     const file = item.files[0];
     const principal = { userId: user.id, sessionId: sessions[0].id, expiresAt: sessions[0].expiresAt };
     const controller = new AbortController();
     const originalStarted = new Promise<void>(resolve => { beginOriginal = resolve; });
     stallSource = true;
-    const cancelled = preparation.prepareEpub(principal, {
+    const cancelled = preparation.prepareReader(principal, {
       itemId: 'item', fileId: file.fileId, contentVersion: file.contentVersion,
     }, controller.signal);
     await originalStarted;
@@ -269,13 +271,16 @@ test('resource_navigation_is_non_executable_and_handles_are_session_bound', asyn
     }
     const write = {
       editionId: file.fileId, op: 'claim', contentVersion: descriptor.contentVersion, expectedRevision: 0,
-      writerId: 'reader-a', sequence: 1, locator: {
+      writerId: 'reader-a', sequence: 1, locator: format === 'cbz' ? {
+        kind: 'cbz', page: 2, offset: 0.2, horizontal: 0, policyVersion: descriptor.policyVersion,
+      } : {
         kind: 'epub', resourceId: descriptor.spine[0], textOffset: 10, fraction: 0.2, policyVersion: descriptor.policyVersion,
       },
     };
     assert.equal((await request('/items/item/progress/ebook', 'PUT', 0, write)).status, 200);
     assert.equal((await request('/items/item/progress/ebook', 'PUT', 0, {
-      ...write, expectedRevision: 1, locator: { ...write.locator, textOffset: 1000000 },
+      ...write, expectedRevision: 1, locator: format === 'cbz'
+        ? { ...write.locator, page: 4 } : { ...write.locator, textOffset: 1000000 },
     })).status, 422);
     now += EPUB_LIMITS.handleTtlMs + 1;
     assert.equal((await request(resource)).status, 410);
@@ -299,7 +304,7 @@ test('resource_navigation_is_non_executable_and_handles_are_session_bound', asyn
     })).status, 413);
     db.deleteSession(sessions[0].token);
     assert.equal((await request(resource)).status, 401);
-    evidence.push({ test: 'resource_navigation_is_non_executable_and_handles_are_session_bound', get: true, head: true, replacement: 409, foreignSession: 404, verdict: 'pass' });
+    evidence.push({ test: `${format}_resource_navigation_is_non_executable_and_handles_are_session_bound`, get: true, head: true, replacement: 409, foreignSession: 404, verdict: 'pass' });
   } finally {
     db.close();
     for (const service of [server, upstream]) {
@@ -338,6 +343,6 @@ after(async () => {
   assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(path.join(output, 'epub-worker-verdict.json'), JSON.stringify({
-    schemaVersion: 1, cases: evidence, verdict: evidence.length === 8 ? 'pass' : 'blocked', node: process.version,
+    schemaVersion: 1, cases: evidence, verdict: evidence.length === 10 ? 'pass' : 'blocked', node: process.version,
   }, null, 2));
 });

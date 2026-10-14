@@ -7,7 +7,7 @@ import { BooksError, invalidInput, notFound, opaqueSegment } from './limits';
 import { audioEdition, ProgressKey, ProgressWrite, progressLocator, progressWrite } from './progressTypes';
 import { bookHandler } from './routes';
 import { EpubPreparation } from './epub/prepare';
-import { epubContentVersion } from './epub/manifest';
+import { cbzContentVersion, epubContentVersion } from './epub/manifest';
 import { AuthRequest } from '../middleware/auth';
 import { BooksPrincipal } from './mediaAuth';
 
@@ -17,7 +17,8 @@ function currentEdition(item: BookItem, mode: 'ebook' | 'audio', editionId: stri
     return edition?.editionId === editionId ? edition : undefined;
   }
   const file = item.files.find(file => file.fileId === editionId && file.role === 'ebook' && file.available);
-  return file ? { editionId, contentVersion: file.extension === 'epub' ? epubContentVersion(file.contentVersion) : file.contentVersion } : undefined;
+  return file ? { editionId, contentVersion: file.extension === 'epub' ? epubContentVersion(file.contentVersion) :
+    file.extension === 'cbz' ? cbzContentVersion(file.contentVersion) : file.contentVersion } : undefined;
 }
 
 export async function validateProgressLocator(item: BookItem, editionId: string, write: ProgressWrite): Promise<boolean> {
@@ -26,7 +27,7 @@ export async function validateProgressLocator(item: BookItem, editionId: string,
     if (error instanceof BooksError) return false;
     throw error;
   }
-  if (locator.kind === 'epub') return false;
+  if (locator.kind === 'epub' || locator.kind === 'cbz') return false;
   if (locator.kind === 'pdf') {
     return item.files.some(file => file.fileId === editionId && file.available &&
       file.extension === 'pdf' && file.contentVersion === write.contentVersion);
@@ -80,7 +81,9 @@ export function createBooksProgressRouter(
     const progress = db.booksProgress.read(key);
     const edition = currentEdition(item, mode, editionId);
     if (!edition && !progress) throw notFound();
-    const history = db.booksProgress.history(key).filter(record =>
+    const history = db.booksProgress.history(key, mode === 'ebook' ? {
+      id: editionId, present: item.files.filter(file => file.role === 'ebook').map(file => file.fileId),
+    } : undefined).filter(record =>
       record.key.editionId !== editionId || record.contentVersion !== edition?.contentVersion);
     const compatible = Boolean(edition && (progress
       ? progress.contentVersion === edition.contentVersion
@@ -107,7 +110,8 @@ export function createBooksProgressRouter(
       return res.status(409).json({ code: 'BOOK_VERSION_CHANGED', error: 'The original changed; choose a new position', canonical: current ?? null });
     }
     const original = item.files.find(file => file.fileId === editionId);
-    const valid = write.locator.kind === 'epub' && original?.extension === 'epub' && preparation
+    const valid = (write.locator.kind === 'epub' || write.locator.kind === 'cbz') &&
+      original?.extension === write.locator.kind && preparation
       ? await preparation.validateLocator(identity, {
         itemId: item.itemId, fileId: editionId, contentVersion: original.contentVersion,
       }, write.locator, signal)
