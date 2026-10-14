@@ -24,6 +24,10 @@ import {
   BurnJobStatus,
   DownloadTicket,
 } from '../types';
+import {
+  BookDownloadTarget, BookQueueItem, DownloadSource, startBookDownloads as startNativeBookDownloads,
+} from '../books/downloads';
+import { SESSION_CHANGED_EVENT } from '../stores/authStore';
 
 export type DownloadStatus =
   | BurnJobStatus
@@ -55,7 +59,9 @@ export interface Download {
 }
 
 interface DownloadContextType {
-  downloads: Download[];
+  downloads: QueueDownload[];
+  startBookDownloads: (targets: BookDownloadTarget[]) => Promise<{ started: number; failed: number }>;
+  retryBookDownload: (id: string) => Promise<void>;
   startOriginalDownload: (
     ratingKey: string,
     partKey: string,
@@ -92,6 +98,9 @@ interface DownloadContextType {
   cancelBurnJob: (id: string) => Promise<void>;
   removeDownload: (id: string) => void;
 }
+
+export type PlexQueueDownload = Download & Extract<DownloadSource, { source: 'plex' }>;
+export type QueueDownload = PlexQueueDownload | BookQueueItem;
 
 const STORAGE_KEY = 'librarydownloadarr:burn-jobs';
 const ACTIVE_STATUSES = new Set<DownloadStatus>(['queued', 'preparing']);
@@ -294,9 +303,45 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
   userId,
 }) => {
   const [downloads, setDownloads] = useState<Download[]>(() => storedDownloads(userId));
+  const [bookDownloads, setBookDownloads] = useState<BookQueueItem[]>([]);
+  const bookControllersRef = useRef(new Set<AbortController>());
   const parallelControllersRef = useRef<Map<string, AbortController>>(new Map());
   const preparedHandlesRef = useRef<Map<string, ParallelFileHandle>>(new Map());
   const autoTransfersRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const clearBooks = () => {
+      for (const controller of bookControllersRef.current) controller.abort();
+      bookControllersRef.current.clear();
+      setBookDownloads([]);
+    };
+    window.addEventListener(SESSION_CHANGED_EVENT, clearBooks);
+    return () => {
+      window.removeEventListener(SESSION_CHANGED_EVENT, clearBooks);
+      for (const controller of bookControllersRef.current) controller.abort();
+      bookControllersRef.current.clear();
+    };
+  }, []);
+
+  const startBookDownloads: DownloadContextType['startBookDownloads'] = async targets => {
+    const controller = new AbortController();
+    bookControllersRef.current.add(controller);
+    try {
+      return await startNativeBookDownloads(targets, {
+        signal: controller.signal,
+        onUpdate: item => {
+          if (!controller.signal.aborted) setBookDownloads(current => [
+            ...current.filter(existing => existing.id !== item.id), item,
+          ]);
+        },
+      });
+    } finally { bookControllersRef.current.delete(controller); }
+  };
+  const retryBookDownload = async (id: string): Promise<void> => {
+    const item = bookDownloads.find(item => item.id === id);
+    if (!item) throw new Error('This Books download is no longer in the queue.');
+    await startBookDownloads([item]);
+  };
 
   const activeJobKey = useMemo(
     () =>
@@ -1010,6 +1055,7 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
   };
 
   const removeDownload = (id: string) => {
+    setBookDownloads(current => current.filter(download => download.id !== id));
     const download = downloads.find((item) => item.id === id);
     if (download?.transfer === 'parallel' || download?.mode === 'parallel') {
       if (parallelControllersRef.current.has(id)) return;
@@ -1022,7 +1068,9 @@ export const DownloadProvider: React.FC<{ children: ReactNode; userId: string }>
   return (
     <DownloadContext.Provider
       value={{
-        downloads,
+        downloads: [...downloads.map(download => ({ ...download, source: 'plex' as const })), ...bookDownloads],
+        startBookDownloads,
+        retryBookDownload,
         startOriginalDownload,
         startPreferredDownloads,
         startBurnJob,

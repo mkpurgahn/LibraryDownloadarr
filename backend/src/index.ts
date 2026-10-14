@@ -18,7 +18,7 @@ import { PlexService, plexService } from './services/plexService';
 import { BooksError } from './books/limits';
 
 export const createApp = (
-  db: DatabaseService, burnManager: BurnManager, dependencies: { plex?: PlexService } = {}
+  db: DatabaseService, burnManager: BurnManager, dependencies: { plex?: PlexService; publicPath?: string } = {}
 ): express.Express => {
   const app = express();
   const plex = dependencies.plex ?? plexService;
@@ -47,7 +47,7 @@ export const createApp = (
   app.use('/api/settings', createSettingsRouter(db, plex));
   app.use('/api/logs', createLogsRouter(db, plex));
 
-  const publicPath = path.join(__dirname, '..', 'public');
+  const publicPath = dependencies.publicPath ?? path.join(__dirname, '..', 'public');
   app.use(express.static(publicPath));
   app.get('*', (_req, res) => res.sendFile(path.join(publicPath, 'index.html')));
   app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {

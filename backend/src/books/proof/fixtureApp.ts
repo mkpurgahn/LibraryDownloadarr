@@ -60,6 +60,7 @@ export async function startFixtureApp(
     db.setSetting('plex_owner_id', 'fixture-owner');
     db.setSetting('plex_owner_validated_at', String(Date.now()));
     db.setSetting('plex_url', 'http://127.0.0.1:1');
+    db.setSetting('plex_token', 'fixture-account-owner');
     const users = ['a', 'b', 'owner'].map(label => {
       const user = db.createOrUpdatePlexUser({
         username: `Fixture ${label}`, email: `${label}@fixture.invalid`, plexId: `fixture-${label}`,
@@ -78,7 +79,13 @@ export async function startFixtureApp(
     if (process.env.BOOKS_ENABLED !== 'true') throw new Error('Isolated fixture requires explicit BOOKS_ENABLED=true');
     const burnManager = new BurnManager(db, { ...config.burn, cacheDir: path.join(root, 'burn-cache') });
     await burnManager.start();
-    const app = createApp(db, burnManager, { plex: new FixturePlexService() });
+    const publicPath = process.env.BOOKS_TEST_FRONTEND_DIST
+      ? await fs.realpath(process.env.BOOKS_TEST_FRONTEND_DIST) : undefined;
+    if (publicPath) {
+      const publicRelative = path.relative(executionRoot, publicPath);
+      if (!publicRelative || publicRelative.startsWith('..') || path.isAbsolute(publicRelative)) throw new Error('Fixture assets escape execution root');
+    }
+    const app = createApp(db, burnManager, { plex: new FixturePlexService(), publicPath });
     const server = https.createServer({ cert, key }, app);
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);

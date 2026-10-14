@@ -77,6 +77,21 @@ History responses show the latest 100 records; older versions remain stored.
 EPUB positions are rejected until validated reader preparation is available.
 
 The native reader/player features are under development.
+The Books browse/detail/settings views and original-download queue are available
+in the preview. Inventory filters do not promise browser codec compatibility.
+For a large selection, **Prepare all downloads** issues individual links in
+batches of at most 100 and starts the first available file; the remaining files
+have explicit **Save file** actions. This avoids silently exceeding stream limits
+when native browser completion cannot be observed. Expired links can be renewed
+per file. Native transfers use the server's attachment headers, including UTF-8
+filenames, rather than relying on the HTML `download` attribute.
+
+Books queue rows/tickets and in-memory protected views are cleared on user or
+session change, including changes in another tab. Existing user-scoped Plex jobs
+and accelerated-download checkpoints retain their original storage format.
+Logout revokes the current application session and Books streams even when Plex
+membership lookup is temporarily unavailable; it never revokes another user's
+session.
 Do not enable this preview for production until real provider, reader-isolation,
 resume, privacy, and preservation acceptance has passed. The isolated read-only
 proof entrypoint is `backend\dist\books\proof\verifyAbs.js --read-only --out
@@ -88,8 +103,21 @@ provider or playback proof.
 `--delivery --fixture-manifest <file>` also exercises the built HTTPS application
 with synthetic application sessions and known original hashes. Supply protected
 `BOOKS_PROOF_TLS_CERT_FILE` and `BOOKS_PROOF_TLS_KEY_FILE`; do not remove Secure
-cookies or disable TLS validation to work around a missing fixture certificate.
+cookies or substitute HTTP for a missing fixture certificate.
 The fixture helper has no test-login route and refuses non-isolated providers.
+Headless browser tests first verify their generated fixture CA. Browser-local
+test trust is confined to that loopback fixture (Chromium service-worker tests
+pin its exact public key); no operating-system trust settings are changed.
+
+Use Node 20 for fixture tests, matching the application's native SQLite runtime.
+Run `npm run test:books` in `frontend` after the backend/frontend builds. The
+wrapper runs the pinned Playwright config headlessly in Chromium, Firefox, and
+WebKit at desktop/narrow sizes, scopes profiles/downloads to `.test-data`, and
+scrubs capability URLs and credentials from retained diagnostics. Each run has
+a distinct evidence directory. `npm run test:books:tools` verifies that scrubber.
+Only after a missing-browser failure, `npm run test:books -- install chromium
+firefox webkit` installs the required binaries into this worktree. These test
+artifacts and protected fixture inputs are excluded from Git and Docker context.
 
 ---
 

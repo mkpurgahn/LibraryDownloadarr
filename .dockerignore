@@ -11,3 +11,7 @@ logs
 dist
 .DS_Store
 *.log
+.test-data
+**/.test-data
+.superpowers
+artifacts/books

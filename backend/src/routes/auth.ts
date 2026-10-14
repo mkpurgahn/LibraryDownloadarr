@@ -13,6 +13,7 @@ import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
 import rateLimit from 'express-rate-limit';
 import { config } from '../config';
 import { clearSessionCookie, setSessionCookie } from '../utils/sessionCookie';
+import { BOOKS_COOKIE } from '../books/mediaAuth';
 
 export const createAuthRouter = (db: DatabaseService, service: PlexService = plexService) => {
   const router = Router();
@@ -285,12 +286,14 @@ export const createAuthRouter = (db: DatabaseService, service: PlexService = ple
   });
 
   // Logout
-  router.post('/logout', authMiddleware, (req: AuthRequest, res) => {
+  router.post('/logout', (req: AuthRequest, res) => {
     try {
-      if (req.authSession?.token) {
-        db.deleteSession(req.authSession.token);
-      }
+      const token = req.headers.authorization?.startsWith('Bearer ')
+        ? req.headers.authorization.slice(7) : undefined;
+      if (!token || !db.getSessionByToken(token)) return res.status(401).json({ error: 'Invalid or expired token' });
+      db.deleteSession(token);
       clearSessionCookie(req, res);
+      res.clearCookie(BOOKS_COOKIE, { path: '/api/books', httpOnly: true, secure: true, sameSite: 'strict' });
       return res.json({ message: 'Logged out successfully' });
     } catch (error) {
       logger.error('Logout error', { error });

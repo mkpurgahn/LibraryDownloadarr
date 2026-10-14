@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useDownloads } from '../contexts/DownloadContext';
+import { PlexQueueDownload, useDownloads } from '../contexts/DownloadContext';
 import { api } from '../services/api';
 import { MediaPart, MediaStream, OnlineSubtitleResult, Part } from '../types';
 import { DownloadIcon } from './Icons';
@@ -128,7 +128,8 @@ export const DownloadChoice: React.FC<DownloadChoiceProps> = ({
   const selectedSubtitle = subtitles.find(stream => stream.id === subtitleId);
   const selectedOnlineSubtitle = onlineSubtitles.find(result => result.id === subtitleId);
   const active = downloads.find(
-    download =>
+    (download): download is PlexQueueDownload =>
+      download.source === 'plex' &&
       download.partKey === part.key &&
       ['requesting', 'queued', 'preparing', 'ready', 'downloading', 'pausing', 'paused'].includes(download.status)
   );

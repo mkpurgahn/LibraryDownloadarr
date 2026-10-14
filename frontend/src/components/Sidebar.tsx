@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import { Library } from '../types';
 import { useAuthStore } from '../stores/authStore';
+import { booksApi, BooksApiError, aborted } from '../books/api';
 import {
   DocumentIcon,
   FilmIcon,
@@ -22,13 +23,26 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
   const [libraries, setLibraries] = useState<Library[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [booksVisible, setBooksVisible] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
-  const { user } = useAuthStore();
+  const { user, sessionRevision } = useAuthStore();
 
   useEffect(() => {
     loadLibraries();
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setBooksVisible(false);
+    void booksApi.libraries(controller.signal).then(libraries => setBooksVisible(libraries.length > 0))
+      .catch(error => {
+        if (aborted(error)) return;
+        setBooksVisible(!(error instanceof BooksApiError &&
+          ['BOOKS_DISABLED', 'PLEX_ACCESS_REQUIRED', 'BOOKS_SESSION_REQUIRED'].includes(error.code)));
+      });
+    return () => controller.abort();
+  }, [sessionRevision]);
 
   const loadLibraries = async () => {
     try {
@@ -83,6 +97,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
             <HomeIcon className="h-5 w-5 flex-none" />
             <span>Home</span>
           </button>
+
+          {booksVisible && <button onClick={() => handleNavigate('/books')}
+            className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-4 py-2 text-left transition-colors ${
+              location.pathname.startsWith('/books') ? 'bg-dark-200 text-primary-400' : 'hover:bg-dark-200'
+            }`}>
+            <DocumentIcon className="h-5 w-5 flex-none" /><span>Books</span>
+          </button>}
 
           {user?.isAdmin && (
             <>

@@ -1,0 +1,126 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Header } from '../components/Header';
+import { Sidebar } from '../components/Sidebar';
+import { DocumentIcon } from '../components/Icons';
+import { useMobileMenu } from '../hooks/useMobileMenu';
+import { useAuthStore } from '../stores/authStore';
+import { booksApi, aborted, booksErrorMessage } from './api';
+import { BookSummary, CatalogQuery } from './types';
+
+export function BookCover({ itemId, title }: { itemId: string; title: string }) {
+  const [missing, setMissing] = useState(false);
+  useEffect(() => setMissing(false), [itemId]);
+  return (
+    <div className="relative flex aspect-[2/3] items-center justify-center overflow-hidden rounded-lg bg-dark-200 ring-1 ring-white/10">
+      <div className="flex flex-col items-center gap-3 px-4 text-center text-gray-500">
+        <DocumentIcon className="h-12 w-12" />
+        <span className="text-xs">No cover available</span>
+      </div>
+      {!missing && <img src={booksApi.coverUrl(itemId)} alt={`${title} cover`} loading="lazy"
+        className="absolute inset-0 h-full w-full object-cover" onError={() => setMissing(true)} />}
+    </div>
+  );
+}
+
+export const BooksPage: React.FC = () => {
+  const menu = useMobileMenu();
+  const sessionRevision = useAuthStore(state => state.sessionRevision);
+  const [items, setItems] = useState<BookSummary[]>([]);
+  const [query, setQuery] = useState<CatalogQuery>({ page: 0, limit: 50, filter: 'all', sort: 'title', desc: false });
+  const [input, setInput] = useState('');
+  const [search, setSearch] = useState('');
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [refresh, setRefresh] = useState(0);
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { heading.current?.focus(); }, [sessionRevision]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true); setError(''); setItems([]);
+    void (async () => {
+      const libraries = await booksApi.libraries(controller.signal);
+      if (!libraries.length) { setTotal(0); return; }
+      const library = libraries[0];
+      if (search) setItems(await booksApi.search(library.libraryId, search, controller.signal));
+      else {
+        const result = await booksApi.catalog(library.libraryId, query, controller.signal);
+        if (controller.signal.aborted) return;
+        setItems(result.items); setTotal(result.total);
+      }
+    })().catch(error => { if (!aborted(error)) setError(booksErrorMessage(error)); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [query, search, refresh, sessionRevision]);
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Header onMenuClick={menu.toggleMobileMenu} />
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar isOpen={menu.isMobileMenuOpen} onClose={menu.closeMobileMenu} />
+        <main className="min-w-0 flex-1 overflow-y-auto p-4 pb-24 md:p-8">
+          <div className="mx-auto max-w-7xl">
+            <div className="mb-6">
+              <h1 ref={heading} tabIndex={-1} className="text-2xl font-bold outline-none md:text-3xl">Books</h1>
+              <p className="mt-2 text-sm text-gray-400">Read, listen, or keep the original. One collection, independent formats.</p>
+            </div>
+            <form className="mb-6 grid gap-3 lg:grid-cols-[minmax(15rem,1fr)_14rem_10rem_auto]" onSubmit={event => {
+              event.preventDefault(); setSearch(input.trim()); setQuery(current => ({ ...current, page: 0 }));
+            }}>
+              <label className="text-sm">Search books
+                <input className="input mt-1 min-h-11" value={input} maxLength={200} placeholder="Title or author"
+                  onChange={event => setInput(event.target.value)} />
+              </label>
+              <label className="text-sm">Available sources
+                <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={query.filter} disabled={Boolean(search)}
+                  onChange={event => setQuery(current => ({ ...current, page: 0, filter: event.target.value as CatalogQuery['filter'] }))}>
+                  <option value="all">All</option><option value="ebook">Has ebook</option>
+                  <option value="single">Single-track audio</option><option value="multi">Multi-track audio</option>
+                </select>
+              </label>
+              <label className="text-sm">Sort
+                <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={query.sort} disabled={Boolean(search)}
+                  onChange={event => setQuery(current => ({ ...current, page: 0, sort: event.target.value as CatalogQuery['sort'] }))}>
+                  <option value="title">Title</option><option value="author">Author</option>
+                </select>
+              </label>
+              <button className="btn-primary min-h-11 self-end" type="submit">Search</button>
+            </form>
+            {search && <div className="mb-4 flex flex-wrap items-center gap-3 text-sm text-gray-400">
+              <span>Search results. Inventory filters and pagination do not apply to search.</span>
+              <button className="btn-secondary min-h-11" onClick={() => { setInput(''); setSearch(''); }}>Clear search</button>
+            </div>}
+            {error && <div role="alert" className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-red-200">
+              <p>{error}</p><p className="mt-1 text-sm">Plex libraries remain separate from Books.</p>
+              <button className="btn-secondary mt-3 min-h-11" onClick={() => setRefresh(value => value + 1)}>Retry Books</button>
+            </div>}
+            {loading ? <p role="status" className="py-12 text-center text-gray-400">Loading Books...</p> :
+              !error && !items.length ? <p role="status" className="py-12 text-center text-gray-400">No books found</p> :
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                  {items.map(item => <Link key={`${item.providerInstanceId}:${item.itemId}`} to={`/books/items/${item.itemId}`} tabIndex={0}
+                    aria-label={`Open ${item.title}`} className="group rounded-xl p-2 outline-none transition-colors hover:bg-white/5 focus-visible:ring-2 focus-visible:ring-primary-500">
+                    <BookCover itemId={item.itemId} title={item.title} />
+                    <h2 className="mt-3 line-clamp-2 text-sm font-semibold group-hover:text-primary-300">{item.title}</h2>
+                    <p className="mt-1 line-clamp-1 text-xs text-gray-400">{item.authors.join(', ') || 'Author unavailable'}</p>
+                    <div className="mt-2 flex flex-wrap gap-1 text-xs text-gray-300">
+                      {item.hasEbook && <span className="rounded bg-white/5 px-2 py-1">Ebook</span>}
+                      {item.audioTrackCount > 0 && <span className="rounded bg-white/5 px-2 py-1">{item.audioTrackCount} audio tracks</span>}
+                      {(item.missing || item.invalid) && <span className="text-amber-300">Unavailable</span>}
+                    </div>
+                  </Link>)}
+                </div>}
+            {!search && !error && !loading && <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-gray-400">{total} books - Page {query.page + 1}</p>
+              <div className="flex gap-2">
+                <button className="btn-secondary min-h-11" disabled={query.page === 0} onClick={() => setQuery(current => ({ ...current, page: current.page - 1 }))}>Previous page</button>
+                <button className="btn-secondary min-h-11" disabled={(query.page + 1) * query.limit >= total} onClick={() => setQuery(current => ({ ...current, page: current.page + 1 }))}>Next page</button>
+              </div>
+            </div>}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+};

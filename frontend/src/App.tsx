@@ -13,11 +13,13 @@ import { DownloadHistory } from './pages/DownloadHistory';
 import { Logs } from './pages/Logs';
 import { DownloadProvider } from './contexts/DownloadContext';
 import { DownloadManager } from './components/DownloadManager';
+import { BooksPage } from './books/BooksPage';
+import { BookDetail } from './books/BookDetail';
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { token } = useAuthStore();
+  const { token, user } = useAuthStore();
 
-  if (!token) {
+  if (!token || !user) {
     return <Navigate to="/login" replace />;
   }
 
@@ -93,6 +95,9 @@ const App: React.FC = () => {
       ) : (
         <>
           <Route path="/login" element={<Login />} />
+          <Route path="/books" element={<ProtectedRoute><BooksPage /></ProtectedRoute>} />
+          <Route path="/books/items/:itemId" element={<ProtectedRoute><BookDetail /></ProtectedRoute>} />
+          <Route path="/books/items/:itemId/read/:fileId" element={<ProtectedRoute><BookDetail readerPending /></ProtectedRoute>} />
           <Route
             path="/"
             element={

@@ -35,7 +35,8 @@ export class BooksMediaAuth {
     if (!session) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED', 'Sign in to access Books');
     try {
       const user = await ensurePlexMembership(this.db, session.userId, forceMembership, this.plex);
-      if (!user || !this.db.getSessionById(session.id)) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
+      if (!user) throw new BooksError(403, 'PLEX_ACCESS_REQUIRED', 'Plex access is required for Books');
+      if (!this.db.getSessionById(session.id)) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
     } catch (error) {
       if (error instanceof BooksError) throw error;
       if (error instanceof MembershipError) throw new BooksError(403, 'PLEX_ACCESS_REVOKED', 'Plex access has been revoked');

@@ -18,6 +18,7 @@ import { startFixtureApp } from '../books/proof/fixtureApp';
 import { config } from '../config';
 import { normalizeFixtureManifest } from '../books/proof/verifyAbs';
 import Database from 'better-sqlite3';
+import { createAuthRouter } from '../routes/auth';
 
 const oldEnabled = process.env.BOOKS_ENABLED;
 process.env.BOOKS_ENABLED = 'true';
@@ -25,9 +26,11 @@ after(() => { if (oldEnabled === undefined) delete process.env.BOOKS_ENABLED; el
 const libraryId = '163ac435-50a9-4f56-96d0-276edf9303c1';
 class MembershipFixture extends PlexService {
   denied = false;
+  unavailable = false;
   forceChecks = 0;
   override async validateExactServerMembership() {
     this.forceChecks += 1;
+    if (this.unavailable) throw new Error('Fixture membership service unavailable');
     if (this.denied) throw new PlexServerAccessDeniedError();
     return { serverToken: 'synthetic-server-token', discoveredUrl: '', owned: false };
   }
@@ -106,6 +109,7 @@ async function fixture() {
   const plex = new MembershipFixture();
   const app = express();
   app.use(express.json());
+  app.use('/api/auth', createAuthRouter(db, plex));
   app.use('/api/books', createBooksRouter(db, { plex }));
   const local = await listening(app);
   const auth = (index = 0) => ({ Authorization: `Bearer ${sessions[index].token}` });
@@ -178,6 +182,47 @@ test('every_content_route_rechecks_identity', async () => {
     f.plex.denied = true;
     assert.equal((await f.get(f.content, { headers: { Cookie: cookie } })).status, 403);
     assert.equal(f.db.getSessionById(f.sessions[0].id), undefined);
+  } finally { await f.close(); }
+});
+
+test('books_probe_does_not_invalidate_first_run_plex_setup', async () => {
+  const db = new DatabaseService(':memory:', 'bootstrap-fixture-key-longer-than-thirty-two');
+  const user = db.createAdminUser({ username: 'bootstrap', email: 'bootstrap@fixture.invalid', passwordHash: 'fixture-placeholder', isAdmin: true });
+  const session = db.createSession(user.id);
+  const app = express(); app.use(express.json());
+  app.use('/api/auth', createAuthRouter(db));
+  app.use('/api/books', createBooksRouter(db));
+  const { server, origin } = await listening(app);
+  const headers = { Authorization: `Bearer ${session.token}`, Origin: origin };
+  try {
+    const probe = await fetch(`${origin}/api/books/media-session`, { method: 'POST', headers });
+    assert.equal(probe.status, 403);
+    assert.equal((await probe.json() as { code: string }).code, 'PLEX_ACCESS_REQUIRED');
+    assert.ok(db.getSessionById(session.id));
+    assert.equal((await fetch(`${origin}/api/auth/me`, { headers })).status, 200);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    db.close();
+  }
+});
+
+test('logout_revokes_the_same_session_even_when_plex_is_unavailable', async () => {
+  const f = await fixture();
+  try {
+    const cookie = await f.bridge();
+    await f.issue();
+    f.stall();
+    const response = await f.get(f.content, { headers: f.auth() });
+    const stopped = response.arrayBuffer().then(() => false, () => true);
+    f.db.updatePlexMembership(f.sessions[0].userId, 'fixture-server', 0);
+    f.plex.unavailable = true;
+    const logout = await f.get('/api/auth/logout', { method: 'POST', headers: { ...f.auth(), Origin: f.origin } });
+    assert.equal(logout.status, 200);
+    assert.equal(f.db.getSessionById(f.sessions[0].id), undefined);
+    assert.ok(f.db.getSessionById(f.sessions[1].id));
+    assert.equal(await stopped, true);
+    assert.equal(f.db.books.getMediaSession(cookie.slice(cookie.indexOf('=') + 1)), undefined);
   } finally { await f.close(); }
 });
 
@@ -407,6 +452,7 @@ test('fixture_app_uses_real_https_authentication_without_test_login_routes', asy
   const previous = {
     cert: process.env.BOOKS_PROOF_TLS_CERT_FILE, key: process.env.BOOKS_PROOF_TLS_KEY_FILE,
     token: process.env.BOOKS_PROOF_ABS_TOKEN,
+    frontend: process.env.BOOKS_TEST_FRONTEND_DIST,
   };
   let app: Awaited<ReturnType<typeof startFixtureApp>> | undefined;
   try {
@@ -422,6 +468,10 @@ test('fixture_app_uses_real_https_authentication_without_test_login_routes', asy
     process.env.BOOKS_PROOF_TLS_CERT_FILE = cert;
     process.env.BOOKS_PROOF_TLS_KEY_FILE = key;
     process.env.BOOKS_PROOF_ABS_TOKEN = 'synthetic-abs-credential';
+    const publicPath = path.join(root, 'public');
+    await fs.mkdir(publicPath);
+    await fs.writeFile(path.join(publicPath, 'index.html'), '<!doctype html><title>Owned frontend fixture</title>');
+    process.env.BOOKS_TEST_FRONTEND_DIST = publicPath;
     await assert.rejects(startFixtureApp(root, 'https://production.invalid', libraryId), /isolated/i);
     app = await startFixtureApp(root, f.absOrigin, libraryId);
     const ca = await fs.readFile(cert);
@@ -434,8 +484,12 @@ test('fixture_app_uses_real_https_authentication_without_test_login_routes', asy
       req.once('error', reject); if (body) req.write(body); req.end();
     });
     assert.equal((await request('/api/books/items/item', 'GET', {})).status, 401);
+    const frontend = await request('/', 'GET', {});
+    assert.equal(frontend.status, 200);
+    assert.ok(frontend.body.includes('Owned frontend fixture'));
     const headers = { Authorization: `Bearer ${app.users[0].bearer}`, Origin: app.origin };
     assert.equal((await request('/api/auth/me', 'GET', headers)).status, 200);
+    assert.equal((await request('/api/media/recently-added', 'GET', headers)).status, 200);
     const bridge = await request('/api/books/media-session', 'POST', headers);
     assert.equal(bridge.status, 200);
     assert.match(bridge.headers['set-cookie']![0], /Secure/);
@@ -456,6 +510,7 @@ test('fixture_app_uses_real_https_authentication_without_test_login_routes', asy
     for (const [name, value] of [
       ['BOOKS_PROOF_TLS_CERT_FILE', previous.cert], ['BOOKS_PROOF_TLS_KEY_FILE', previous.key],
       ['BOOKS_PROOF_ABS_TOKEN', previous.token],
+      ['BOOKS_TEST_FRONTEND_DIST', previous.frontend],
     ] as const) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     await f.close();
   }

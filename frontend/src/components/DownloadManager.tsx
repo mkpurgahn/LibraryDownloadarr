@@ -1,5 +1,52 @@
 import React from 'react';
 import { useDownloads } from '../contexts/DownloadContext';
+import { BookQueueItem } from '../books/downloads';
+import { booksErrorMessage } from '../books/api';
+
+function BookDownloadRow({ item, dismiss, retry }: {
+  item: BookQueueItem; dismiss: () => void; retry: () => Promise<void>;
+}) {
+  const [retrying, setRetrying] = React.useState(false);
+  const [notice, setNotice] = React.useState('');
+  const renew = async () => {
+    setRetrying(true); setNotice('');
+    try { await retry(); } catch (error) { setNotice(booksErrorMessage(error)); }
+    finally { setRetrying(false); }
+  };
+  return (
+    <section className="rounded-xl bg-dark-100 p-4 shadow-2xl ring-1 ring-white/10" aria-live="polite">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium">{item.title}</div>
+          <div className="mt-1 break-words text-xs text-gray-400">{item.filename}</div>
+        </div>
+        <button className="grid min-h-11 min-w-11 flex-none place-items-center rounded-lg hover:bg-white/5" onClick={dismiss} aria-label="Dismiss Books download"><CloseIcon /></button>
+      </div>
+      <p className="mt-3 text-sm font-medium">
+        {item.status === 'requesting' ? 'Securing original...' : item.status === 'started' ? 'Started' : item.status === 'ready' ? 'Ready to save' : 'Needs attention'}
+      </p>
+      {item.status === 'started' && <p className="mt-1 text-xs text-gray-400">Sent to your browser, not confirmed complete. If it was blocked, use Save file.</p>}
+      {item.status === 'ready' && <p className="mt-1 text-xs text-gray-400">Save this original when your current transfer finishes. Books allows two active streams per user.</p>}
+      {item.resumable === false && <p className="mt-2 text-xs text-amber-300">Fresh original download only; this provider cannot safely resume.</p>}
+      {(item.error || notice) && <p className="mt-2 rounded bg-red-500/10 p-2 text-xs text-red-200">{notice || item.error}</p>}
+      {item.manualUrl && (
+        <a tabIndex={0} className="btn-primary mt-3 flex min-h-11 w-full items-center justify-center" href={item.manualUrl}
+          onClick={event => {
+            if (!item.expiresAt || item.expiresAt <= Date.now()) {
+              event.preventDefault(); setNotice('This link expired. Renew it before saving.');
+            }
+          }}>
+          Save file
+        </a>
+      )}
+      {item.status !== 'requesting' && (
+        <button className="btn-secondary mt-2 min-h-11 w-full" disabled={retrying} onClick={() => void renew()}>
+          {retrying ? 'Renewing...' : 'Renew link and retry'}
+        </button>
+      )}
+    </section>
+  );
+}
 
 function CloseIcon() {
   return (
@@ -33,6 +80,7 @@ export const DownloadManager: React.FC = () => {
     removeDownload,
     pauseParallelDownload,
     resumeParallelDownload,
+    retryBookDownload,
   } = useDownloads();
 
   if (downloads.length === 0) return null;
@@ -43,6 +91,10 @@ export const DownloadManager: React.FC = () => {
       className="fixed inset-x-3 bottom-3 z-50 max-h-[70vh] space-y-2 overflow-y-auto md:inset-x-auto md:bottom-auto md:right-6 md:top-20 md:w-[23rem]"
     >
       {downloads.map((download) => {
+        if (download.source === 'abs') {
+          return <BookDownloadRow key={download.id} item={download} dismiss={() => removeDownload(download.id)}
+            retry={() => retryBookDownload(download.id)} />;
+        }
         const isPreparing = download.status === 'queued' || download.status === 'preparing';
         const isParallelActive =
           (download.transfer === 'parallel' || download.mode === 'parallel') &&

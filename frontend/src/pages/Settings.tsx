@@ -4,6 +4,7 @@ import { Sidebar } from '../components/Sidebar';
 import { api } from '../services/api';
 import { Settings as SettingsType } from '../types';
 import { useMobileMenu } from '../hooks/useMobileMenu';
+import { BooksSettings } from '../books/BooksSettings';
 
 export const Settings: React.FC = () => {
   const { isMobileMenuOpen, toggleMobileMenu, closeMobileMenu } = useMobileMenu();
@@ -218,6 +219,8 @@ export const Settings: React.FC = () => {
                 </div>
               </form>
             </div>
+
+            <BooksSettings />
 
             <div className="card p-4 md:p-6 mt-4 md:mt-6">
               <h2 className="text-xl md:text-2xl font-semibold mb-4">About</h2>
