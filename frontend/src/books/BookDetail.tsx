@@ -6,7 +6,7 @@ import { useMobileMenu } from '../hooks/useMobileMenu';
 import { useDownloads } from '../contexts/DownloadContext';
 import { useAuthStore } from '../stores/authStore';
 import { booksApi, aborted, booksErrorMessage } from './api';
-import { BookFile, BookItem } from './types';
+import { BookFile, BookItem, READ_LIMITS } from './types';
 import { BookCover } from './BooksPage';
 
 const fileSize = (bytes: number) => bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -47,7 +47,9 @@ export const BookDetail: React.FC = () => {
     finally { setStarting(false); }
   };
   const selected = item?.files.find(file => file.fileId === ebook);
-  const readable = selected?.available && ['epub', 'pdf'].includes(selected.extension);
+  const oversized = selected && (selected.extension === 'epub' ? selected.size > READ_LIMITS.epub :
+    selected.extension === 'pdf' && selected.size > READ_LIMITS.pdf);
+  const readable = selected?.available && ['epub', 'pdf'].includes(selected.extension) && !oversized;
   return (
     <div className="min-h-screen flex flex-col">
       <Header onMenuClick={menu.toggleMobileMenu} />
@@ -78,7 +80,7 @@ export const BookDetail: React.FC = () => {
                     <button className="btn-primary min-h-11" disabled={!item.listen.available}
                       onClick={() => setNotice('The native player is not enabled in this preview yet. Original tracks remain available below.')}>Listen</button>
                   </div>
-                  {!readable && <p className="mt-2 text-xs text-gray-400">{item.read.reason || 'This ebook is download-only.'}</p>}
+                  {!readable && <p className="mt-2 text-xs text-gray-400">{oversized ? 'This original exceeds the in-app reader size limit; download it below.' : item.read.reason || 'This ebook is download-only.'}</p>}
                   {!item.listen.available && <p className="mt-2 text-xs text-gray-400">{item.listen.reason}</p>}
                 </div>
               </div>

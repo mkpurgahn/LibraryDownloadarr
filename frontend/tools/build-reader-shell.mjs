@@ -23,7 +23,7 @@ const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta h
 await fs.mkdir(path.join(root, '.reader-build'), { recursive: true });
 await fs.writeFile(path.join(root, '.reader-build', 'shell.html'), html);
 const notices = ['Books reader dependency notices. Libraries are bundled without source modifications.\n'];
-for (const name of ['foliate-js', 'dompurify', 'css-tree', 'mdn-data', 'source-map-js']) {
+for (const name of ['foliate-js', 'dompurify', 'css-tree', 'mdn-data', 'source-map-js', 'pdfjs-dist']) {
   const directory = path.join(root, 'node_modules', name);
   const metadata = JSON.parse(await fs.readFile(path.join(directory, 'package.json'), 'utf8'));
   notices.push(`\n${name} ${metadata.version ?? ''} (${metadata.license ?? 'see license'})\n`);
@@ -31,4 +31,15 @@ for (const name of ['foliate-js', 'dompurify', 'css-tree', 'mdn-data', 'source-m
   if (!licenses.length) throw new Error(`Reader dependency license missing: ${name}`);
   for (const file of licenses) notices.push(`${file}\n${await fs.readFile(path.join(directory, file), 'utf8')}`);
 }
-await fs.writeFile(path.join(root, '.reader-build', 'notices.txt'), notices.join('\n'));
+const assets = [];
+for (const folder of ['cmaps', 'standard_fonts']) {
+  const directory = path.join(root, 'node_modules', 'pdfjs-dist', folder);
+  for (const name of await fs.readdir(directory)) {
+    if (/^(LICENSE|LICENCE|NOTICE)/.test(name)) notices.push(`pdfjs-dist/${folder}/${name}\n${await fs.readFile(path.join(directory, name), 'utf8')}`);
+    if (!/^[A-Za-z0-9_.-]+\.(bcmap|pfb|ttf)$/.test(name)) continue;
+    const source = path.join(directory, name);
+    assets.push({ path: `${folder}/${name}`, size: (await fs.stat(source)).size });
+  }
+  await fs.writeFile(path.join(root, '.reader-build', 'notices.txt'), notices.join('\n'));
+}
+await fs.writeFile(path.join(root, '.reader-build', 'pdf-assets.json'), JSON.stringify(assets));

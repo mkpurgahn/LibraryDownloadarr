@@ -82,7 +82,7 @@ size, and private resume. A second device must explicitly claim the saved
 position; conflicts offer **Resume saved position** or **Continue here**.
 Positions save every ten seconds and on navigation/visibility changes when
 possible. Network failures show an unsaved state; browser-close delivery is
-best effort. PDF and audio playback remain under development.
+best effort. Audio playback remains under development.
 
 EPUB archives are processed in a cancellable worker, never in the main request
 thread: 100 MiB compressed, 512 MiB expanded, 10,000 entries, 32 MiB per entry,
@@ -101,6 +101,26 @@ bounds are 100,000 XML nodes, 128 levels, one million characters per section,
 512 KiB per stylesheet, and 64 MiB of assets for the visible section. Dependency
 licenses ship at `/books-reader-notices.txt`; Foliate is pinned to reviewed
 commit `78914aef4466eb960965702401634c2cb348e9b1`.
+
+The PDF preview uses pinned PDF.js 5.4.624 display/worker APIs, not a PDF plugin
+or embedded generic viewer. It offers page controls, scrolling, zoom, accessible
+text and private page/within-page resume. Evaluation, XFA, scripting and
+interactive annotation/form/link actions are not enabled. Fonts and CMaps come
+only from the packaged, allowlisted assets.
+
+PDF limits are **512 MiB source**, **5,000 pages**, **16 million pixels per
+rendered page**, and **128 MiB of application-managed retained page/render/range
+cache**. The source backing is separate: PDF.js reserves a full-length source
+buffer even when only requested ranges arrive. The counters report logical
+source backing and owned cache separately, not measured resident memory.
+Engine/browser overhead is additional; total memory is not bounded to 128 MiB
+or exactly 640 MiB. Large-file support is browser/device-dependent, with explicit
+download-only/capability errors rather than a guarantee for every sub-limit PDF.
+Current and neighboring pages are retained; abandoned work is canceled and
+evicted. Each reader instance owns its document/worker, destroys it on close or
+replacement, and aborts its ranges without closing another tab's reader.
+An ignored or changed range response never becomes a second full-file download
+inside the reader. Original downloads remain available independently.
 
 The Books browse/detail/settings views and original-download queue are available
 in the preview. Inventory filters do not promise browser codec compatibility.

@@ -8,6 +8,8 @@ import { promisify } from 'node:util';
 import { createHash, randomUUID, X509Certificate } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { TLSSocket } from 'node:tls';
+import { Readable } from 'node:stream';
+import { buildPdfFixture, PdfFixtureMode } from './pdfFixture';
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 process.chdir(repoRoot);
@@ -23,6 +25,7 @@ type Provider = {
   libraryId: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
+  setPdf(mode: PdfFixtureMode): void;
   stop(): Promise<void>;
 };
 export type BooksApp = App & {
@@ -30,6 +33,7 @@ export type BooksApp = App & {
   certificatePin: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
+  setPdf(mode: PdfFixtureMode): void;
 };
 
 async function syntheticProvider(): Promise<Provider> {
@@ -82,6 +86,9 @@ async function syntheticProvider(): Promise<Provider> {
   const ebook = await buildEpubFixture({ first: fixtureChapter('First section', 100).replace('</body>', `${hostile}</body>`), long: true });
   files.set('dual:dual-0', ebook);
   items[0].libraryFiles[0].metadata.size = ebook.length;
+  const pdf = buildPdfFixture();
+  files.set('dual:dual-1', pdf);
+  items[0].libraryFiles[1].metadata.size = pdf.length;
   const server = http.createServer((req, res) => {
     if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(403).end(); return; }
     if (unavailable) { res.writeHead(503).end(); return; }
@@ -110,20 +117,29 @@ async function syntheticProvider(): Promise<Provider> {
     const data = files.get(`${item.id}:${match[2]}`);
     const file = item.libraryFiles.find(file => file.ino === match[2]);
     if (!data || !file) { res.writeHead(404).end(); return; }
+    const total = file.metadata.size;
     res.setHeader('Content-Type', file.fileType === 'audio' ? 'audio/mpeg' : file.metadata.ext === '.pdf' ? 'application/pdf' : 'application/octet-stream');
-    res.setHeader('ETag', `"${createHash('sha256').update(data).digest('hex')}"`);
+    res.setHeader('ETag', `"${createHash('sha256').update(data).update(String(total)).digest('hex')}"`);
     res.setHeader('Last-Modified', 'Tue, 14 Nov 2023 22:13:20 GMT');
     res.setHeader('Accept-Ranges', 'bytes');
     const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? '');
-    let bytes = data;
+    let start = 0; let end = total - 1;
     if (range) {
-      const start = Number(range[1]); const end = range[2] ? Math.min(Number(range[2]), data.length - 1) : data.length - 1;
-      if (start >= data.length || start > end) { res.writeHead(416, { 'Content-Range': `bytes */${data.length}` }).end(); return; }
-      bytes = data.subarray(start, end + 1);
-      res.statusCode = 206; res.setHeader('Content-Range', `bytes ${start}-${end}/${data.length}`);
+      start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), total - 1) : total - 1;
+      if (start >= total || start > end) { res.writeHead(416, { 'Content-Range': `bytes */${total}` }).end(); return; }
+      res.statusCode = 206; res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
     }
-    res.setHeader('Content-Length', String(bytes.length));
-    res.end(req.method === 'HEAD' ? undefined : bytes);
+    res.setHeader('Content-Length', String(end - start + 1));
+    if (req.method === 'HEAD') { res.end(); return; }
+    if (total === data.length) { res.end(data.subarray(start, end + 1)); return; }
+    const stream = Readable.from((function* () {
+      for (let offset = start; offset <= end; offset += 65536) {
+        const chunk = Buffer.alloc(Math.min(65536, end - offset + 1), 32);
+        if (offset < data.length) data.copy(chunk, 0, offset, Math.min(data.length, offset + chunk.length));
+        yield chunk;
+      }
+    })());
+    res.once('close', () => stream.destroy()); stream.pipe(res);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -136,6 +152,13 @@ async function syntheticProvider(): Promise<Provider> {
       files.set('dual:dual-0', replacement);
       items[0].libraryFiles[0].metadata.size = replacement.length;
       items[0].libraryFiles[0].metadata.mtimeMs += 1000;
+    },
+    setPdf(mode) {
+      const replacement = mode === 'corrupt' ? Buffer.from('Not a valid PDF') :
+        buildPdfFixture(mode === 'many-pages' ? 5001 : 5, true, mode === 'password', mode === 'replacement' ? 'Revised PDF page' : 'Generated PDF page');
+      files.set('dual:dual-1', replacement);
+      items[0].libraryFiles[1].metadata.size = mode === 'oversized' ? 512 * 1024 * 1024 + 1 : replacement.length;
+      items[0].libraryFiles[1].metadata.mtimeMs += 1000;
     },
     async stop() {
       server.closeAllConnections();
@@ -198,6 +221,10 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean }>({
         async replaceEpub() {
           if (!provider) throw new Error('Live provider originals cannot be replaced by consumer tests');
           await provider.replaceEpub();
+        },
+        setPdf(mode) {
+          if (!provider) throw new Error('Live provider originals cannot be replaced by consumer tests');
+          provider.setPdf(mode);
         },
       };
       await use(fixture);

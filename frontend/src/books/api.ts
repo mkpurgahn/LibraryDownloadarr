@@ -25,7 +25,8 @@ function clearBooksSession(): void {
 }
 window.addEventListener(SESSION_CHANGED_EVENT, clearBooksSession);
 
-async function request(path: string, options: RequestInit = {}, signal?: AbortSignal, binaryBytes?: number): Promise<unknown> {
+type ResponseDecoder = (response: Response) => Promise<unknown>;
+async function request(path: string, options: RequestInit = {}, signal?: AbortSignal, decode?: ResponseDecoder): Promise<unknown> {
   const token = useAuthStore.getState().token;
   if (!token) throw new BooksApiError(401, 'BOOKS_SESSION_REQUIRED', 'Sign in to LibraryDownloadarr to open Books.');
   const controller = new AbortController();
@@ -34,22 +35,19 @@ async function request(path: string, options: RequestInit = {}, signal?: AbortSi
   signal?.addEventListener('abort', cancel, { once: true });
   pending.add(controller);
   try {
+    const headers = new Headers(options.headers);
+    headers.set('Content-Type', 'application/json');
+    headers.set('Authorization', `Bearer ${token}`);
     const response = await fetch(path, {
       ...options, cache: 'no-store', credentials: 'same-origin', redirect: 'error',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers,
       signal: controller.signal,
     });
     if (token !== useAuthStore.getState().token || controller.signal.aborted) throw new DOMException('Session changed', 'AbortError');
     if (response.status === 204) return undefined;
-    if (response.ok && binaryBytes !== undefined) {
-      if (Number(response.headers.get('content-length')) !== binaryBytes ||
-          response.headers.get('content-type') !== 'application/octet-stream') throw invalidResponse();
-      const bytes = await response.arrayBuffer();
-      if (token !== useAuthStore.getState().token || controller.signal.aborted) throw new DOMException('Session changed', 'AbortError');
-      if (bytes.byteLength !== binaryBytes) throw invalidResponse();
-      return bytes;
-    }
-    const value: unknown = await response.json();
+    const value: unknown = response.ok && decode ? await decode(response) :
+      options.method === 'HEAD' && !response.ok ? { code: response.status === 409 ? 'BOOK_VERSION_CHANGED' : 'BOOK_CONTENT_UNAVAILABLE', error: 'Book content is unavailable.' } :
+        await response.json();
     if (token !== useAuthStore.getState().token || controller.signal.aborted) throw new DOMException('Session changed', 'AbortError');
     if (!response.ok) {
       const error = record(value);
@@ -59,6 +57,9 @@ async function request(path: string, options: RequestInit = {}, signal?: AbortSi
       );
     }
     return value;
+  } catch (error) {
+    controller.abort();
+    throw error;
   } finally {
     signal?.removeEventListener('abort', cancel);
     pending.delete(controller);
@@ -85,16 +86,16 @@ async function mediaSession(signal?: AbortSignal): Promise<void> {
   } finally { if (exchange?.promise === promise) exchange = undefined; }
 }
 
-async function booksRequest(path: string, options: RequestInit = {}, signal?: AbortSignal, binaryBytes?: number): Promise<unknown> {
+async function booksRequest(path: string, options: RequestInit = {}, signal?: AbortSignal, decode?: ResponseDecoder): Promise<unknown> {
   const token = useAuthStore.getState().token;
   await mediaSession(signal);
   if (token !== useAuthStore.getState().token) throw new DOMException('Session changed', 'AbortError');
-  try { return await request(`/api/books${path}`, options, signal, binaryBytes); }
+  try { return await request(`/api/books${path}`, options, signal, decode); }
   catch (error) {
     if (error instanceof BooksApiError && (error.status === 401 || error.code === 'BOOKS_IDENTITY_MISMATCH')) {
       bridge = undefined;
       await mediaSession(signal);
-      return request(`/api/books${path}`, options, signal, binaryBytes);
+      return request(`/api/books${path}`, options, signal, decode);
     }
     if (error instanceof BooksApiError && error.code === 'PLEX_ACCESS_REVOKED' && token === useAuthStore.getState().token) {
       useAuthStore.getState().setToken(null);
@@ -102,6 +103,12 @@ async function booksRequest(path: string, options: RequestInit = {}, signal?: Ab
     throw error;
   }
 }
+
+export interface BookContentInfo {
+  size: number; mime: string; ranges: boolean; validator?: string;
+}
+const filePath = (target: BookTarget) =>
+  `/items/${id(target.itemId)}/files/${id(target.fileId)}/content?${new URLSearchParams({ version: id(target.contentVersion) })}`;
 
 function ticketResult(value: unknown): BookTicketResult {
   const raw = record(value);
@@ -154,7 +161,36 @@ export const booksApi = {
   },
   coverUrl(itemId: string): string { return `/api/books/items/${id(itemId)}/cover`; },
   contentUrl(target: BookTarget): string {
-    return `/api/books/items/${id(target.itemId)}/files/${id(target.fileId)}/content?${new URLSearchParams({ version: id(target.contentVersion) })}`;
+    return `/api/books${filePath(target)}`;
+  },
+  async contentInfo(target: BookTarget, signal: AbortSignal): Promise<BookContentInfo> {
+    const raw = record(await booksRequest(filePath(target), { method: 'HEAD' }, signal, async response => {
+      const length = response.headers.get('content-length');
+      const etag = response.headers.get('etag');
+      const modified = response.headers.get('last-modified');
+      if (!length || !/^\d+$/.test(length)) throw invalidResponse();
+      return { size: Number(length), mime: response.headers.get('content-type')?.split(';')[0],
+        ranges: response.headers.get('accept-ranges') === 'bytes',
+        validator: etag && !etag.startsWith('W/') ? etag : modified ?? undefined };
+    }));
+    return { size: integer(raw.size), mime: text(raw.mime, 100), ranges: flag(raw.ranges),
+      ...(raw.validator === undefined ? {} : { validator: text(raw.validator, 1000) }) };
+  },
+  async contentRange(target: BookTarget, info: BookContentInfo, begin: number, end: number, signal: AbortSignal): Promise<ArrayBuffer> {
+    if (!Number.isSafeInteger(begin) || !Number.isSafeInteger(end) || begin < 0 || end <= begin || end > info.size) throw invalidResponse();
+    const bytes = await booksRequest(filePath(target), {
+      headers: { Range: `bytes=${begin}-${end - 1}`, ...(info.validator ? { 'If-Range': info.validator } : {}) },
+    }, signal, async response => {
+      if (response.status !== 206 || response.headers.get('content-range') !== `bytes ${begin}-${end - 1}/${info.size}` ||
+          Number(response.headers.get('content-length')) !== end - begin) {
+        throw new BooksApiError(409, 'BOOK_RANGE_CHANGED', 'The original changed or no longer supports safe ranges. Open it again.');
+      }
+      const data = await response.arrayBuffer();
+      if (data.byteLength !== end - begin) throw invalidResponse();
+      return data;
+    });
+    if (!(bytes instanceof ArrayBuffer)) throw invalidResponse();
+    return bytes;
   },
   async tickets(targets: BookTarget[], signal?: AbortSignal): Promise<BookTicketResult[]> {
     const raw = record(await booksRequest('/download-tickets', { method: 'POST', body: JSON.stringify({ targets }) }, signal));
@@ -171,7 +207,13 @@ export const booksApi = {
   },
   async releaseReader(readerId: string) { await booksRequest(`/readers/${id(readerId)}`, { method: 'DELETE' }); },
   async readerResource(readerId: string, resourceId: string, size: number, signal: AbortSignal): Promise<ArrayBuffer> {
-    const bytes = await booksRequest(`/readers/${id(readerId)}/resources/${id(resourceId)}`, {}, signal, size);
+    const bytes = await booksRequest(`/readers/${id(readerId)}/resources/${id(resourceId)}`, {}, signal, async response => {
+      if (Number(response.headers.get('content-length')) !== size ||
+          response.headers.get('content-type') !== 'application/octet-stream') throw invalidResponse();
+      const data = await response.arrayBuffer();
+      if (data.byteLength !== size) throw invalidResponse();
+      return data;
+    });
     if (!(bytes instanceof ArrayBuffer)) throw invalidResponse();
     return bytes;
   },
