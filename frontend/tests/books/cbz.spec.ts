@@ -5,6 +5,15 @@ import { test, expect, signIn, capture, originalDownload } from './harness';
 
 test.use({ cbzFixtures: true, controlledReaderClock: true, reverseProxy: true });
 
+async function openComic(page: Page) {
+  const card = page.getByRole('link', { name: 'Open The Paper Observatory', exact: true });
+  await card.scrollIntoViewIfNeeded();
+  // The fixture's absent cover must not remove the pointer target during the click.
+  await expect(card.getByRole('img')).toHaveCount(0);
+  await card.click();
+  await expect(page.getByLabel('Ebook original').locator('option')).toHaveCount(2);
+}
+
 async function expectPanel(page: Page, position: number, panel: number, chapter = 1) {
   const image = page.getByRole('img', { name: `Comic page ${position} of 3`, exact: true });
   await expect(image).toBeVisible();
@@ -32,7 +41,7 @@ async function expectFraction(viewport: Locator, axis: 'vertical' | 'horizontal'
 
 test('CBZ same-input detail and real numbered pages', async ({ page, app }, info) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await expect(page.getByLabel('Ebook original').locator('option')).toHaveCount(2);
   await capture(page, 'cbz-detail', info);
   if (process.env.BOOKS_CBZ_BEFORE === 'true') {
@@ -69,7 +78,7 @@ test('CBZ same-input detail and real numbered pages', async ({ page, app }, info
 
 test('CBZ originals keep independent private progress across handles cache and backend restart', async ({ page, app }, info) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await expect(page.getByLabel('Ebook original').locator('option')).toHaveCount(2);
   const options = await page.getByLabel('Ebook original').locator('option').evaluateAll(elements =>
     elements.map(element => (element as HTMLOptionElement).value));
@@ -105,7 +114,7 @@ test('CBZ originals keep independent private progress across handles cache and b
   await capture(page, 'cbz-chapter-B-resumed', info);
   await expectPanel(page, 2, 2, 2);
   await signIn(page, app, 1);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expect(page.getByRole('img', { name: 'Comic page 1 of 3', exact: true })).toBeVisible();
 });
@@ -113,7 +122,7 @@ test('CBZ originals keep independent private progress across handles cache and b
 test('CBZ corrupt pages fail honestly and original bytes still download unchanged', async ({ page, app }, info) => {
   await app.setCbz('corrupt');
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   const { buildCbzFixture, comicPanel } = await import('../../../backend/dist/books/proof/cbzFixture.js');
   const expected = await buildCbzFixture([10, 2, 1].map(number => ({
     name: `Pages/${number}.png`, data: number === 2 ? Buffer.from('Damaged generated page') : comicPanel(number, 1),
@@ -137,7 +146,7 @@ test('CBZ cancels abandoned turns and releases every page URL on configuration r
     URL.revokeObjectURL = url => { urls.delete(url); revoke(url); };
   });
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expect(page.getByRole('img', { name: 'Comic page 1 of 3', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
@@ -153,7 +162,7 @@ test('CBZ cancels abandoned turns and releases every page URL on configuration r
 
 test('CBZ within-page position survives zoom reflow reopen and explicit writer takeover', async ({ page, app, browser }, info) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expectPanel(page, 1, 1);
   const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
@@ -181,7 +190,7 @@ test('CBZ within-page position survives zoom reflow reopen and explicit writer t
   try {
     const other = await context.newPage();
     await signIn(other, app, 3);
-    await other.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+    await openComic(other);
     await other.getByRole('link', { name: 'Read', exact: true }).click();
     await other.getByRole('button', { name: 'Resume saved position', exact: true }).click();
     await expectPanel(other, 1, 1);
@@ -197,7 +206,7 @@ test('CBZ within-page position survives zoom reflow reopen and explicit writer t
 for (const axis of ['vertical', 'horizontal'] as const) {
   test(`CBZ ${axis} bookmark survives viewport growth clamping and saved reopen`, async ({ page, app }, info) => {
     await signIn(page, app);
-    await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+    await openComic(page);
     await page.getByRole('link', { name: 'Read', exact: true }).click();
     await expectPanel(page, 1, 1);
     const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
@@ -241,7 +250,7 @@ for (const axis of ['vertical', 'horizontal'] as const) {
 
 test('CBZ fast real scrolling is captured before resize and saved reopen', async ({ page, app }) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expectPanel(page, 1, 1);
   const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
@@ -266,7 +275,7 @@ test('CBZ fast real scrolling is captured before resize and saved reopen', async
 
 test('CBZ movement in the restoration frame survives resize and page transition', async ({ page, app }) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expectPanel(page, 1, 1);
   const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
@@ -298,7 +307,7 @@ test('CBZ movement in the restoration frame survives resize and page transition'
 
 test('CBZ replaced originals retain incompatible history and failed saves retry without losing a rewind', async ({ page, app }) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expectPanel(page, 1, 1);
   await page.route('**/progress/ebook', route => route.request().method() === 'PUT'
@@ -325,7 +334,7 @@ test.describe('touch-enabled comic reader', () => {
   test.use({ hasTouch: true });
   test('CBZ touch turning and page bounds preserve semantic page order', async ({ page, app }) => {
   await signIn(page, app);
-  await page.getByRole('link', { name: 'Open The Paper Observatory', exact: true }).click();
+  await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expectPanel(page, 1, 1);
   const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
