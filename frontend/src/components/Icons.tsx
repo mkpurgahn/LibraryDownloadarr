@@ -76,8 +76,7 @@ export function MusicIcon({ className }: IconProps) {
 export function BookIcon({ className }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className={iconClass(className)}>
-      <path d="M6 3h14v18H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M3 18a3 3 0 0 1 3-3h14M9 3v7l2-1 2 1V3" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 5C9 3 6 3 3 4v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

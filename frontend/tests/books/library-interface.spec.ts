@@ -95,7 +95,7 @@ test('library_icons_match_book_and_book_with_waves_across_home_and_navigation', 
   await plexFixture(page);
   await home(page, app);
   const expected = {
-    Books: '<path d="M6 3h14v18H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z" stroke-linecap="round" stroke-linejoin="round"></path><path d="M3 18a3 3 0 0 1 3-3h14M9 3v7l2-1 2 1V3" stroke-linecap="round" stroke-linejoin="round"></path>',
+    Books: '<path d="M12 5C9 3 6 3 3 4v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15" stroke-linecap="round" stroke-linejoin="round"></path>',
     Audiobooks: '<path d="M5 3h8v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke-linecap="round" stroke-linejoin="round"></path><path d="M3 19a2 2 0 0 1 2-2h8M6 3v14M16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14" stroke-linecap="round" stroke-linejoin="round"></path>',
     Movies: '<rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M7 5v14M17 5v14M3 9h4m10 0h4M3 15h4m10 0h4"></path>',
     Shows: '<rect x="3" y="6" width="18" height="14" rx="2"></rect><path d="m8 3 4 3 4-3" stroke-linecap="round" stroke-linejoin="round"></path>',
