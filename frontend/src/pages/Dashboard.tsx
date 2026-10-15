@@ -8,7 +8,7 @@ import { MediaItem } from '../types';
 import { useAuthStore } from '../stores/authStore';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 import { useLibraryNavigation } from '../hooks/useLibraryNavigation';
-import { DocumentIcon, HistoryIcon, SettingsIcon } from '../components/Icons';
+import { HistoryIcon, SettingsIcon } from '../components/Icons';
 
 export const Dashboard: React.FC = () => {
   const [recentlyAdded, setRecentlyAdded] = useState<MediaItem[]>([]);
@@ -61,22 +61,18 @@ export const Dashboard: React.FC = () => {
             <section aria-label="Libraries" className="mb-8">
               <h3 className="mb-3 text-xl font-semibold">Libraries</h3>
               <div className="flex flex-wrap gap-3">
-                {navigation.libraries.map(library => <Link key={library.key}
-                  to={`/library/${library.key}`} className="library-destination">
+                {navigation.destinations.map(library => <Link key={library.key}
+                  to={library.path} className="library-destination">
                   <LibraryIcon type={library.type} />
                   <span className="min-w-0 flex-1 break-words">{library.title}</span>
                   <span aria-hidden="true" className="text-gray-400">&rarr;</span>
                 </Link>)}
-                {navigation.booksVisible && <Link to="/books" className="library-destination">
-                  <DocumentIcon className="h-5 w-5 flex-none" />
-                  <span className="flex-1">Books</span><span aria-hidden="true" className="text-gray-400">&rarr;</span>
-                </Link>}
               </div>
               {navigation.plexLoading && <p role="status" className="mt-3 text-sm text-gray-400">Loading Plex libraries...</p>}
               {navigation.plexError && <p role="status" className="mt-3 text-sm text-gray-400">Plex libraries unavailable. Reload to try again.</p>}
               {!navigation.plexLoading && !navigation.plexError && !navigation.libraries.length &&
                 <p className="mt-3 text-sm text-gray-400">No Plex libraries available.</p>}
-              {navigation.booksUnavailable && <p role="status" className="mt-3 text-sm text-gray-400">Books is temporarily unavailable. Open Books to retry.</p>}
+              {navigation.booksUnavailable && <p role="status" className="mt-3 text-sm text-gray-400">Books and Ebooks are temporarily unavailable. Open either category to retry.</p>}
             </section>
 
             {user?.isAdmin && <section aria-label="Management"

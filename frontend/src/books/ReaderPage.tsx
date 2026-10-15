@@ -6,6 +6,7 @@ import { BookFile, BookItem, EbookLocator, ReaderDescriptor, READ_LIMITS } from 
 import { ProgressClient, SaveState } from './progress';
 import { mountEpubReader } from './reader/epubAdapter';
 import { ComicReader } from './reader/ComicReader';
+import { useBookCategory } from './navigation';
 
 const beginning = (descriptor?: ReaderDescriptor): EbookLocator => descriptor?.policyVersion === 'cbz-pages-v1'
   ? { kind: 'cbz', page: 1, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion }
@@ -14,6 +15,7 @@ const beginning = (descriptor?: ReaderDescriptor): EbookLocator => descriptor?.p
 
 export const ReaderPage: React.FC = () => {
   const { itemId, fileId } = useParams<{ itemId: string; fileId: string }>();
+  const category = useBookCategory();
   const revision = useAuthStore(state => state.sessionRevision);
   const [item, setItem] = useState<BookItem>();
   const [file, setFile] = useState<BookFile>();
@@ -118,7 +120,7 @@ export const ReaderPage: React.FC = () => {
   };
   return <main className="flex flex-col bg-dark p-3" style={{ height: 'calc(100dvh - var(--books-player-height, 0px))', paddingTop: 'max(0.75rem, env(safe-area-inset-top))', paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
     <header className="flex flex-wrap items-center justify-between gap-3 pb-2">
-      <Link tabIndex={0} className="inline-flex min-h-11 items-center text-primary-300" to={`/books/items/${itemId}`}>Back to book</Link>
+      <Link tabIndex={0} className="inline-flex min-h-11 items-center text-primary-300" to={`/${category}/items/${itemId}`}>Back to book</Link>
       <div className="min-w-0">
         <h1 ref={heading} tabIndex={-1} className="break-words text-lg font-semibold outline-none">{item?.title ?? 'Book reader'}</h1>
         {file?.extension === 'cbz' && <p className="break-words text-xs text-gray-400">{file.basename}</p>}

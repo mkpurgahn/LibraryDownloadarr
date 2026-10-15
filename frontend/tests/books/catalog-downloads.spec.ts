@@ -35,15 +35,15 @@ test('dual_capability_item_is_one_card', async ({ page, app }, info) => {
 test('inventory_filters_are_not_codec_promises', async ({ page, app }, info) => {
   await signIn(page, app);
   const filter = page.getByRole('combobox', { name: 'Available sources' });
-  await expect(filter.locator('option')).toHaveText(['All', 'Has ebook', 'Single-track audio', 'Multi-track audio']);
+  await expect(filter.locator('option')).toHaveText(['All audio', 'Single-track audio', 'Multi-track audio']);
   await filter.selectOption('single');
   await expect(page.getByText('No books found', { exact: true })).toBeVisible();
-  await filter.selectOption('ebook');
+  await page.goto(`${app.origin}/ebooks`);
   await expect(page.getByRole('link', { name: 'Open Download-only Archive', exact: true })).toBeVisible();
-  await page.getByRole('textbox', { name: 'Search books' }).fill('Two Formats');
-  await page.getByRole('textbox', { name: 'Search books' }).press('Enter');
+  await page.getByRole('textbox', { name: 'Search ebooks' }).fill('Two Formats');
+  await page.getByRole('textbox', { name: 'Search ebooks' }).press('Enter');
   await expect(page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Next page' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Next page' })).toBeDisabled();
   await capture(page, 'catalog-search', info);
 });
 
@@ -261,7 +261,7 @@ test('books_outage_does_not_erase_plex_authentication', async ({ page, app }, in
   await signIn(page, app);
   await expect(page.getByRole('heading', { name: 'Books', exact: true })).toBeVisible();
   app.setUnavailable(true);
-  await page.getByRole('combobox', { name: 'Available sources' }).selectOption('ebook');
+  await page.getByRole('combobox', { name: 'Available sources' }).selectOption('multi');
   await expect(page.getByRole('alert')).toContainText('Books');
   expect(await page.evaluate(() => Boolean(localStorage.getItem('token')))).toBe(true);
   await capture(page, 'provider-unavailable', info);

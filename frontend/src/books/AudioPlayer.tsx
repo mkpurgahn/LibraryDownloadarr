@@ -42,7 +42,7 @@ export const AudioPlayer: React.FC = () => {
     style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}>
     <div className="mx-auto max-w-6xl space-y-2">
       <div className="flex items-center justify-between gap-3">
-        <Link ref={title} tabIndex={0} to={`/books/items/${item.itemId}`} className="min-w-0 truncate font-semibold text-primary-300">{item.title}</Link>
+        <Link ref={title} tabIndex={0} to={`/${state.category ?? 'books'}/items/${item.itemId}`} className="min-w-0 truncate font-semibold text-primary-300">{item.title}</Link>
         <button className="btn-secondary min-h-11" disabled={state.status === 'closing'} onClick={state.close} aria-label="Close audiobook">Close</button>
       </div>
       {state.error && <p role="alert" className="text-sm text-amber-200">{state.error}</p>}
@@ -53,7 +53,7 @@ export const AudioPlayer: React.FC = () => {
         {state.compatible && state.saveState === 'conflict' && <button className="btn-secondary min-h-11" onClick={() => void state.resume('here')}>Continue here</button>}
         <button className="btn-secondary min-h-11" onClick={() => void state.resume('start')}>Start from beginning</button>
       </div> : <div className="flex flex-wrap items-center gap-2">
-        {state.status === 'error' ? <button className="btn-secondary min-h-11" onClick={() => void state.open(item)}>Reload audiobook</button> :
+        {state.status === 'error' ? <button className="btn-secondary min-h-11" onClick={() => void state.open(item, state.category)}>Reload audiobook</button> :
           state.status === 'finished' ? <button className="btn-primary min-h-11" onClick={() => void state.resume('start')}>Play from beginning</button> :
             state.wantsPlaying ? <button className="btn-primary min-h-11" onClick={state.pause}>Pause</button> :
               <button className="btn-primary min-h-11" disabled={state.status === 'loading' || state.status === 'closing'} onClick={() => void state.play()}>

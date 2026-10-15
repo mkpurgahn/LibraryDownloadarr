@@ -7,6 +7,10 @@ export const SELECTED_LIBRARY_ID = '163ac435-50a9-4f56-96d0-276edf9303c1';
 export const BOOKS_LIMITS = {
   metadataBytes: 8 * 1024 * 1024,
   metadataTimeoutMs: 10000,
+  categoryItems: 10000,
+  categoryRequests: 102,
+  categoryBytes: 32 * 1024 * 1024,
+  categoryTimeoutMs: 20000,
   coverBytes: 2 * 1024 * 1024,
   coverCacheBytes: 64 * 1024 * 1024,
   coverTtlMs: 5 * 60 * 1000,
@@ -61,7 +65,7 @@ export function sameOrigin(req: Request): void {
 }
 
 export function boundedQuery(query: Record<string, unknown>): CatalogQuery {
-  if (Object.keys(query).some(key => !['page', 'limit', 'filter', 'sort', 'desc'].includes(key))) throw invalidInput();
+  if (Object.keys(query).some(key => !['page', 'limit', 'filter', 'sort', 'desc', 'category', 'q'].includes(key))) throw invalidInput();
   const integer = (value: unknown, fallback: number): number => {
     if (value === undefined) return fallback;
     if (typeof value !== 'string' || !/^\d{1,9}$/.test(value)) throw invalidInput();
@@ -72,13 +76,21 @@ export function boundedQuery(query: Record<string, unknown>): CatalogQuery {
   const filter = query.filter ?? 'all';
   const sort = query.sort ?? 'title';
   const desc = query.desc ?? 'false';
+  const category = query.category;
+  const q = query.q;
   if (limit < 1 || !['all', 'ebook', 'single', 'multi'].includes(String(filter)) ||
       !['title', 'author'].includes(String(sort)) || !['true', 'false', '1', '0'].includes(String(desc)) ||
       typeof filter !== 'string' || typeof sort !== 'string' || typeof desc !== 'string') throw invalidInput();
+  if (category !== undefined && category !== 'books' && category !== 'ebooks') throw invalidInput();
+  if ((category === 'books' && filter === 'ebook') ||
+      (category === 'ebooks' && filter !== 'all' && filter !== 'ebook')) throw invalidInput();
+  if (q !== undefined && (!category || typeof q !== 'string' || !q.trim() || q.length > 200)) throw invalidInput();
   return {
     page, limit: Math.min(100, limit),
     filter: filter as CatalogQuery['filter'], sort: sort as CatalogQuery['sort'],
     desc: desc === 'true' || desc === '1',
+    ...(category ? { category } : {}),
+    ...(typeof q === 'string' ? { q: q.trim() } : {}),
   };
 }
 

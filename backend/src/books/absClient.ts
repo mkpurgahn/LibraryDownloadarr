@@ -9,6 +9,7 @@ import {
 } from './limits';
 
 type Json = Record<string, unknown>;
+type MetadataBudget = { bytes: number; requests: number };
 const optionalObject = (value: unknown): Json | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
 const object = (value: unknown): Json => {
@@ -112,7 +113,10 @@ export class AbsClient {
     }
     return Buffer.concat(chunks, size);
   }
-  private async json(path: string, signal: AbortSignal): Promise<Json> {
+  private async json(path: string, signal: AbortSignal, budget?: MetadataBudget): Promise<Json> {
+    if (budget && ++budget.requests > BOOKS_LIMITS.categoryRequests) {
+      throw new BooksError(503, 'BOOKS_CATEGORY_CAPACITY', 'The category exceeds the safe catalog request budget.');
+    }
     const abort = new AbortController();
     const cancel = () => abort.abort();
     if (signal.aborted) abort.abort();
@@ -121,6 +125,12 @@ export class AbsClient {
     try {
       const response = await this.request(path, 'GET', abort.signal);
       const body = await this.body(response, BOOKS_LIMITS.metadataBytes);
+      if (budget) {
+        budget.bytes += body.length;
+        if (budget.bytes > BOOKS_LIMITS.categoryBytes) {
+          throw new BooksError(503, 'BOOKS_CATEGORY_CAPACITY', 'The category exceeds the safe catalog metadata budget.');
+        }
+      }
       try { return object(JSON.parse(body.toString('utf8'))); }
       catch { throw new BooksError(502, 'ABS_INVALID_RESPONSE'); }
     } finally {
@@ -136,8 +146,10 @@ export class AbsClient {
     const media = object(raw.media);
     const meta = optionalObject(media.metadata) ?? {};
     const hasEbook = Boolean(media.ebookFile || media.ebookFormat);
-    const audioTrackCount = number(media.numTracks ?? media.numAudioFiles ??
-      (Array.isArray(media.tracks) ? media.tracks.length : Array.isArray(media.audioFiles) ? media.audioFiles.length : 0));
+    const audioTrackCount = number(media.numAudioFiles ??
+      (Array.isArray(media.audioFiles) ? media.audioFiles.length : media.numTracks ??
+        (Array.isArray(media.tracks) ? media.tracks.length : 0)));
+    const playableTracks = number(media.numTracks ?? (Array.isArray(media.tracks) ? media.tracks.length : audioTrackCount));
     const missing = raw.isMissing === true;
     const invalid = raw.isInvalid === true;
     const available = !missing && !invalid;
@@ -147,7 +159,7 @@ export class AbsClient {
       series: names(meta.series, meta.seriesName), description: text(meta.description),
       missing, invalid, hasEbook, audioTrackCount,
       read: { available: available && hasEbook, ...(!available || !hasEbook ? { reason: 'No available ebook' } : {}) },
-      listen: { available: available && audioTrackCount > 0, ...(!available || audioTrackCount === 0 ? { reason: 'No available audio' } : {}) },
+      listen: { available: available && playableTracks > 0, ...(!available || playableTracks === 0 ? { reason: 'No available audio' } : {}) },
     };
   }
   async library(signal: AbortSignal): Promise<{ libraryId: string; name: string }> {
@@ -163,7 +175,15 @@ export class AbsClient {
   async list(query: CatalogQuery, signal: AbortSignal): Promise<CatalogPage> {
     if (!Number.isInteger(query.page) || query.page < 0 || !Number.isInteger(query.limit) ||
         query.limit < 1 || query.limit > 100 || !['title', 'author'].includes(query.sort) ||
-        !['all', 'ebook', 'single', 'multi'].includes(query.filter)) throw invalidInput();
+        !['all', 'ebook', 'single', 'multi'].includes(query.filter) || typeof query.desc !== 'boolean' ||
+        (query.category !== undefined && !['books', 'ebooks'].includes(query.category)) ||
+        (query.category === 'books' && query.filter === 'ebook') ||
+        (query.category === 'ebooks' && !['all', 'ebook'].includes(query.filter)) ||
+        (query.q !== undefined && (!query.category || typeof query.q !== 'string' || !query.q.trim() || query.q.length > 200))) throw invalidInput();
+    if (query.category) return this.categoryList(query, signal);
+    return this.nativeList(query, signal);
+  }
+  private async nativeList(query: CatalogQuery, signal: AbortSignal, budget?: MetadataBudget): Promise<CatalogPage> {
     const params = new URLSearchParams({
       page: String(query.page), limit: String(query.limit), sort: `media.metadata.${query.sort === 'author' ? 'authorName' : 'title'}`,
       desc: query.desc ? '1' : '0', minified: '1',
@@ -172,11 +192,76 @@ export class AbsClient {
       const group = query.filter === 'ebook' ? 'ebooks' : 'tracks';
       params.set('filter', `${group}.${Buffer.from(query.filter).toString('base64')}`);
     }
-    const json = await this.json(`/api/libraries/${opaqueSegment(this.config.libraryId)}/items?${params}`, signal);
+    const json = await this.json(`/api/libraries/${opaqueSegment(this.config.libraryId)}/items?${params}`, signal, budget);
     return {
       items: array(json.results, query.limit).map(raw => this.summary(object(raw))),
       total: number(json.total), page: query.page, limit: query.limit,
     };
+  }
+  private async categoryList(query: CatalogQuery, signal: AbortSignal): Promise<CatalogPage> {
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    if (signal.aborted) cancel();
+    signal.addEventListener('abort', cancel, { once: true });
+    const timeout = setTimeout(cancel, BOOKS_LIMITS.categoryTimeoutMs);
+    const budget: MetadataBudget = { bytes: 0, requests: 0 };
+    const changed = () => new BooksError(409, 'ABS_CATALOG_CHANGED', 'The catalog changed while loading. Please retry.');
+    const capacity = () => new BooksError(503, 'BOOKS_CATEGORY_CAPACITY', 'The complete category result exceeds the safe catalog limit. No partial results are shown.');
+    const matches = (item: BookSummary) => query.category === 'ebooks' ? item.hasEbook :
+      query.filter === 'single' ? item.audioTrackCount === 1 :
+        query.filter === 'multi' ? item.audioTrackCount > 1 : item.audioTrackCount > 0;
+    const validate = (page: CatalogPage) => {
+      if (!Number.isSafeInteger(page.total) || page.items.length !== Math.max(0, Math.min(page.limit, page.total - page.page * page.limit))) {
+        throw changed();
+      }
+    };
+    try {
+      let items: BookSummary[];
+      if (query.q) {
+        // ABS search has no category or offset. A full batch cannot prove completeness.
+        const params = new URLSearchParams({ q: query.q.trim(), limit: String(BOOKS_LIMITS.categoryItems) });
+        const json = await this.json(`/api/libraries/${opaqueSegment(this.config.libraryId)}/search?${params}`, controller.signal, budget);
+        const raw = array(json.book, BOOKS_LIMITS.categoryItems);
+        if (raw.length === BOOKS_LIMITS.categoryItems) throw capacity();
+        items = raw.map(match => this.summary(object(object(match).libraryItem)));
+        if (new Set(items.map(item => item.itemId)).size !== items.length) throw changed();
+        items = items.filter(matches);
+      } else if (query.category === 'ebooks' || query.filter !== 'all') {
+        const page = await this.nativeList({ ...query, filter: query.category === 'ebooks' ? 'ebook' : query.filter }, controller.signal, budget);
+        validate(page);
+        if (!page.items.every(matches) || new Set(page.items.map(item => item.itemId)).size !== page.items.length) throw changed();
+        return page;
+      } else {
+        items = [];
+        const seen = new Set<string>();
+        let total = 0;
+        for (const filter of ['single', 'multi'] as const) {
+          const first = await this.nativeList({ ...query, filter, page: 0, limit: 100 }, controller.signal, budget);
+          validate(first);
+          total += first.total;
+          if (total > BOOKS_LIMITS.categoryItems) throw capacity();
+          let page = first;
+          for (let index = 0; index < Math.max(1, Math.ceil(first.total / 100)); index++) {
+            if (index) page = await this.nativeList({ ...query, filter, page: index, limit: 100 }, controller.signal, budget);
+            validate(page);
+            if (page.total !== first.total) throw changed();
+            for (const item of page.items) {
+              if (seen.has(item.itemId) || (filter === 'single' ? item.audioTrackCount !== 1 : item.audioTrackCount <= 1)) throw changed();
+              seen.add(item.itemId);
+              items.push(item);
+            }
+          }
+        }
+      }
+      const compare = new Intl.Collator('en', { sensitivity: 'base' }).compare;
+      items.sort((a, b) => ((query.sort === 'author' ? compare(a.authors.join(', '), b.authors.join(', ')) : 0) ||
+        compare(a.title, b.title) || compare(a.itemId, b.itemId)) * (query.desc ? -1 : 1));
+      const offset = query.page * query.limit;
+      return { items: items.slice(offset, offset + query.limit), total: items.length, page: query.page, limit: query.limit };
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', cancel);
+    }
   }
   async search(libraryId: string, q: string, signal: AbortSignal): Promise<BookSummary[]> {
     if (libraryId !== this.config.libraryId) throw notFound();

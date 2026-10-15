@@ -98,9 +98,12 @@ const App: React.FC = () => {
       ) : (
         <>
           <Route path="/login" element={<Login />} />
-          <Route path="/books" element={<ProtectedRoute><BooksPage /></ProtectedRoute>} />
+          <Route path="/books" element={<ProtectedRoute><BooksPage key="books" category="books" /></ProtectedRoute>} />
+          <Route path="/ebooks" element={<ProtectedRoute><BooksPage key="ebooks" category="ebooks" /></ProtectedRoute>} />
           <Route path="/books/items/:itemId" element={<ProtectedRoute><BookDetail /></ProtectedRoute>} />
+          <Route path="/ebooks/items/:itemId" element={<ProtectedRoute><BookDetail /></ProtectedRoute>} />
           <Route path="/books/items/:itemId/read/:fileId" element={<ProtectedRoute><React.Suspense fallback={<p role="status" className="p-6">Opening reader...</p>}><ReaderPage /></React.Suspense></ProtectedRoute>} />
+          <Route path="/ebooks/items/:itemId/read/:fileId" element={<ProtectedRoute><React.Suspense fallback={<p role="status" className="p-6">Opening reader...</p>}><ReaderPage /></React.Suspense></ProtectedRoute>} />
           <Route
             path="/"
             element={

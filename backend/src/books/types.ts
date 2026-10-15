@@ -41,6 +41,8 @@ export interface CatalogQuery {
   filter: 'all' | 'ebook' | 'single' | 'multi';
   sort: 'title' | 'author';
   desc: boolean;
+  category?: 'books' | 'ebooks';
+  q?: string;
 }
 export interface CatalogPage {
   items: BookSummary[];

@@ -4,6 +4,13 @@ import { useAuthStore } from '../stores/authStore';
 import { booksApi, BooksApiError, aborted, BOOKS_CHANGED_EVENT } from '../books/api';
 import type { Library } from '../types';
 
+interface LibraryDestination {
+  key: string;
+  title: string;
+  path: string;
+  type: string;
+}
+
 export function useLibraryNavigation() {
   const sessionRevision = useAuthStore(state => state.sessionRevision);
   const [libraries, setLibraries] = useState<Library[]>([]);
@@ -48,7 +55,16 @@ export function useLibraryNavigation() {
     return () => { controller.abort(); window.removeEventListener(BOOKS_CHANGED_EVENT, refresh); };
   }, [sessionRevision]);
 
-  return { libraries, plexLoading, plexError, booksVisible, booksUnavailable };
+  const destinations: LibraryDestination[] = libraries.map(library => ({
+    key: `plex-${library.key}`, path: `/library/${library.key}`, type: library.type,
+    title: library.type === 'show' && library.title === 'TV Shows' ? 'Shows' : library.title,
+  }));
+  if (booksVisible) destinations.push(
+    { key: 'books', path: '/books', title: 'Books', type: 'books' },
+    { key: 'ebooks', path: '/ebooks', title: 'Ebooks', type: 'ebooks' }
+  );
+  destinations.sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base' }) || a.key.localeCompare(b.key));
+  return { libraries, destinations, plexLoading, plexError, booksVisible, booksUnavailable };
 }
 
 export type LibraryNavigation = ReturnType<typeof useLibraryNavigation>;

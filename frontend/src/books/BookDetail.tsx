@@ -9,11 +9,13 @@ import { booksApi, aborted, booksErrorMessage, BOOKS_CHANGED_EVENT } from './api
 import { BookFile, BookItem, READ_LIMITS } from './types';
 import { BookCover } from './BooksPage';
 import { useBookAudio } from './AudioProvider';
+import { useBookCategory } from './navigation';
 
 const fileSize = (bytes: number) => bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 export const BookDetail: React.FC = () => {
   const { itemId } = useParams<{ itemId: string }>();
+  const category = useBookCategory();
   const menu = useMobileMenu();
   const sessionRevision = useAuthStore(state => state.sessionRevision);
   const { startBookDownloads } = useDownloads();
@@ -63,7 +65,7 @@ export const BookDetail: React.FC = () => {
         <Sidebar isOpen={menu.isMobileMenuOpen} onClose={menu.closeMobileMenu} />
         <main className="min-w-0 flex-1 overflow-y-auto p-4 pb-24 md:p-8">
           <div className="mx-auto max-w-5xl">
-            <Link tabIndex={0} className="inline-flex min-h-11 items-center text-sm text-primary-300 hover:underline" to="/books">Back to Books</Link>
+            <Link tabIndex={0} className="inline-flex min-h-11 items-center text-sm text-primary-300 hover:underline" to={`/${category}`}>Back to {category === 'ebooks' ? 'Ebooks' : 'Books'}</Link>
             {error && <p role="alert" className="my-4 rounded-lg bg-red-500/10 p-4 text-red-200">{error}</p>}
             {!item && !error && <p role="status" className="py-12 text-gray-400">Loading book...</p>}
             {item && <>
@@ -81,10 +83,10 @@ export const BookDetail: React.FC = () => {
                     </select>
                   </label>}
                   <div className="mt-4 flex flex-wrap gap-3">
-                    {readable ? <Link tabIndex={0} className="btn-primary min-h-11" to={`/books/items/${item.itemId}/read/${ebook}`}>Read</Link> :
+                    {readable ? <Link tabIndex={0} className="btn-primary min-h-11" to={`/${category}/items/${item.itemId}/read/${ebook}`}>Read</Link> :
                       <button className="btn-secondary min-h-11" disabled>Read</button>}
                     <button className="btn-primary min-h-11" disabled={!item.listen.available}
-                      onClick={() => void audio.open(item)}>Listen</button>
+                      onClick={() => void audio.open(item, category)}>Listen</button>
                   </div>
                   {!readable && <p className="mt-2 text-xs text-gray-400">{oversized
                     ? selected?.extension === 'cbz' ? 'This CBZ exceeds the 100 MiB archive limit; download the original below.' :

@@ -27,12 +27,21 @@ LibraryDownloadarr is a modern, self-hosted web application that provides a beau
 
 ## Library navigation
 
-Home links directly to the available libraries. Books appears under **Libraries**
-alongside Movies, TV Shows, and other Plex libraries when Books is enabled and
-accessible. The two sources load independently: Plex loading or an outage does
-not hide Books, and unavailable Books does not hide Plex.
+Home cards and desktop/mobile library navigation share alphabetical ordering:
+**Books, Ebooks, Movies, Shows** for the standard libraries. Custom and additional
+permission-filtered Plex libraries retain their names and IDs; only the standard
+`TV Shows` navigation label becomes `Shows`. Nothing is renamed on Plex.
+Books contains audio inventory; Ebooks contains ebook inventory, including manga
+and unsupported-but-downloadable originals. Mixed titles appear in both.
+Missing or unplayable originals remain discoverable, not silently reclassified.
+The sources load independently: a Plex outage does not hide Books/Ebooks, and a
+Books provider outage does not hide Plex.
 
-**Recently Added** and the header search are Plex-only; Books has its own search.
+**Recently Added** and the header search are Plex-only; Books and Ebooks each have
+category-scoped search. Both retain independent Read, Listen and original-download
+actions. Existing `/books/items/...` reader/detail links still work; `/ebooks`
+links keep their category through detail, reader and player navigation. These
+categories are views, not new permission boundaries or file migrations.
 Download totals and Settings are compact owner-only Home utilities. Download
 History, Logs, and Settings remain under **Management** in the sidebar.
 
@@ -63,6 +72,25 @@ responses are private/no-store; files use item-scoped opaque identities rather
 than provider paths. Missing optional descriptions or names use placeholders;
 invalid chapters fall back to tracks, and invalid timelines disable listening
 without hiding independently valid ebooks or original downloads.
+
+Catalog requests may supply `category=books|ebooks` and an optional `q` on the
+existing items endpoint. Omitted category preserves the legacy API contract.
+Ebooks and single-/multi-file audio browsing use native filtered pagination.
+All-audio browsing combines ABS's disjoint single/multi file partitions before
+sorting, counting and pagination; `tracks.audio` is not a supported ABS filter.
+The union is sequential and ephemeral: at most 10,000 entries, 102 requests,
+32 MiB aggregate JSON and 20 seconds, with the existing 100-item provider pages,
+8 MiB per-response and 10-second per-response guards unchanged.
+
+Category search preserves ABS 2.30's book matching (title, subtitle, ISBN or ASIN,
+not author-name matching). It requests a complete native response before
+category/source filtering, selected title/author sorting, counting and pagination.
+A full 10,000-match response cannot prove completeness and is rejected, as are
+oversized, inconsistent or unavailable responses. No partial result is presented
+as a complete page or an empty category. Large searches may require a more
+specific query; capacity failures remain explicit. Inventory is refreshed on
+each request; there is no persistent index or catalog cache. Item/file access
+still uses fresh authorization independently of category membership.
 
 Original Books delivery uses same-origin, session-bound per-file tickets and a
 Books-only `HttpOnly; Secure; SameSite=Strict` media cookie. The cookie cannot

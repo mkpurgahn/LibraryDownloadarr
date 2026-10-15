@@ -38,8 +38,11 @@ export interface BookTicketResult {
   error?: { status: number; code: string };
 }
 export interface BooksLibrary { providerInstanceId: string; libraryId: string; name: string }
+export type BookCategory = 'books' | 'ebooks';
 export interface CatalogQuery {
   page: number; limit: number; filter: 'all' | 'ebook' | 'single' | 'multi'; sort: 'title' | 'author'; desc: boolean;
+  category?: BookCategory;
+  q?: string;
 }
 export interface CatalogPage { items: BookSummary[]; page: number; limit: number; total: number }
 export interface BooksSettingsState {

@@ -11,7 +11,8 @@ interface SidebarProps {
 }
 
 export function LibraryIcon({ type }: { type: string }) {
-  const Icon = type === 'movie' ? FilmIcon : type === 'show' ? TvIcon : type === 'artist' ? MusicIcon : FolderIcon;
+  const Icon = type === 'movie' ? FilmIcon : type === 'show' ? TvIcon :
+    type === 'artist' || type === 'books' ? MusicIcon : type === 'ebooks' ? DocumentIcon : FolderIcon;
   return <Icon className="h-5 w-5 flex-none" />;
 }
 
@@ -25,7 +26,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ navigation, ...props }) => nav
   : <ConnectedSidebar {...props} />;
 
 function SidebarContent({ isOpen, onClose, navigation }: SidebarProps & { navigation: LibraryNavigation }) {
-  const { libraries, plexLoading, plexError, booksVisible } = navigation;
+  const { destinations, plexLoading, plexError } = navigation;
   const navigate = useNavigate();
   const location = useLocation();
   const user = useAuthStore(state => state.user);
@@ -54,8 +55,8 @@ function SidebarContent({ isOpen, onClose, navigation }: SidebarProps & { naviga
     };
   }, [isOpen]);
 
-  const active = (path: string) => path === '/books'
-    ? location.pathname === '/books' || location.pathname.startsWith('/books/')
+  const active = (path: string) => path === '/books' || path === '/ebooks'
+    ? location.pathname === path || location.pathname.startsWith(`${path}/`)
     : location.pathname === path;
   const go = (path: string) => { navigate(path); onClose(); };
   const itemClass = (path: string) => `navigation-item ${active(path)
@@ -84,17 +85,13 @@ function SidebarContent({ isOpen, onClose, navigation }: SidebarProps & { naviga
             <div className="space-y-1">
               {plexLoading && <p role="status" className="px-3 py-3 text-sm text-gray-400">Loading Plex libraries...</p>}
               {plexError && <p role="status" className="px-3 py-3 text-sm text-gray-400">Plex libraries unavailable.</p>}
-              {libraries.map(library => (
-                <button key={library.key} onClick={() => go(`/library/${library.key}`)}
-                  aria-current={active(`/library/${library.key}`) ? 'page' : undefined}
-                  className={itemClass(`/library/${library.key}`)}>
+              {destinations.map(library => (
+                <button key={library.key} onClick={() => go(library.path)}
+                  aria-current={active(library.path) ? 'page' : undefined}
+                  className={itemClass(library.path)}>
                   <LibraryIcon type={library.type} /><span className="min-w-0 break-words">{library.title}</span>
                 </button>
               ))}
-              {booksVisible && <button onClick={() => go('/books')}
-                aria-current={active('/books') ? 'page' : undefined} className={itemClass('/books')}>
-                <DocumentIcon className="h-5 w-5 flex-none" /><span>Books</span>
-              </button>}
             </div>
           </section>
           {user?.isAdmin && <section aria-label="Management" className="border-t border-dark-50 pt-6">

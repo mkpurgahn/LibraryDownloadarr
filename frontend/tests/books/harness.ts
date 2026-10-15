@@ -49,7 +49,7 @@ export type BooksApp = App & {
   restart(): Promise<void>;
 };
 
-async function syntheticProvider(longNodeEpub = false, cbzFixtures = false): Promise<Provider> {
+async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, categoryFixtures = false): Promise<Provider> {
   const token = randomUUID();
   let unavailable = false;
   const files = new Map<string, Buffer>();
@@ -89,6 +89,16 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false): Pro
     makeItem('unsupported', 'Download-only Archive', ['azw3']),
     makeItem('collection', 'One Hundred and One Tracks', Array.from({ length: 101 }, () => 'mp3')),
   ];
+  if (categoryFixtures) {
+    for (let index = 0; index < 1655; index++) {
+      const number = String(index).padStart(4, '0');
+      items.push(
+        makeItem(`generated-ebook-${index}`, `Generated ${number} ebook`, [index % 2 ? 'epub' : 'azw3']),
+        makeItem(`generated-single-${index}`, `Generated ${number} single`, ['mp3']),
+        makeItem(`generated-mixed-${index}`, `Generated ${number} mixed`, ['cbz', 'mp3', 'mp3'])
+      );
+    }
+  }
   const { buildCbzFixture, comicPanel } = await import('../../../backend/dist/books/proof/cbzFixture.js');
   const manga = cbzFixtures ? makeItem('manga', 'The Paper Observatory', ['cbz', 'cbz']) : undefined;
   if (manga) {
@@ -140,17 +150,33 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false): Pro
     if (url.pathname === `/api/libraries/${libraryId}`) { json({ id: libraryId, name: 'Fixture Books', mediaType: 'book' }); return; }
     if (url.pathname === `/api/libraries/${libraryId}/items`) {
       const filter = url.searchParams.get('filter') ?? '';
+      const [group, encoded] = filter.split('.');
+      const value = Buffer.from(encoded ?? '', 'base64').toString();
       const selected = items.filter(item =>
-        filter.startsWith('ebooks.') ? Boolean(item.media.ebookFile) :
-        filter === 'tracks.c2luZ2xl' ? item.media.numTracks === 1 :
-        filter === 'tracks.bXVsdGk=' ? item.media.numTracks > 1 : true);
+        group === 'ebooks' ? value === 'ebook' ? Boolean(item.media.ebookFile) : !item.media.ebookFile :
+        group === 'tracks' ? value === 'none' ? item.media.numAudioFiles === 0 :
+          value === 'multi' ? item.media.numAudioFiles > 1 : item.media.numAudioFiles === 1 : true);
+      selected.sort((a, b) => {
+        const author = url.searchParams.get('sort') === 'media.metadata.authorName';
+        const order = (author ? a.media.metadata.authors[0].name.localeCompare(b.media.metadata.authors[0].name, 'en') : 0) ||
+          a.media.metadata.title.localeCompare(b.media.metadata.title, 'en');
+        return url.searchParams.get('desc') === '1' ? -order : order;
+      });
       const limit = Number(url.searchParams.get('limit') ?? 50);
       const page = Number(url.searchParams.get('page') ?? 0);
       json({ results: selected.slice(page * limit, (page + 1) * limit), total: selected.length, page, limit }); return;
     }
     if (url.pathname === `/api/libraries/${libraryId}/search`) {
       const query = (url.searchParams.get('q') ?? '').toLowerCase();
-      json({ book: items.filter(item => `${item.media.metadata.title} Fixture Author`.toLowerCase().includes(query)).map(libraryItem => ({ libraryItem })) }); return;
+      const limit = Number(url.searchParams.get('limit') ?? 12);
+      json({ book: items.filter(item => item.media.metadata.title.toLowerCase().includes(query))
+        .slice(0, limit).map(item => ({ libraryItem: {
+          ...item,
+          media: {
+            metadata: item.media.metadata, ebookFile: item.media.ebookFile,
+            audioFiles: item.media.audioFiles, tracks: item.media.tracks, chapters: item.media.chapters,
+          },
+        } })) }); return;
     }
     const match = /^\/api\/items\/([^/]+)(?:\/file\/([^/]+)(?:\/download)?)?$/.exec(url.pathname);
     const item = match ? items.find(item => item.id === match[1]) : undefined;
@@ -253,15 +279,16 @@ async function verifiedFixtureTls(origin: string, cert: Buffer): Promise<void> {
   });
 }
 
-export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean; reverseProxy: boolean; canonicalOrigin: boolean; cbzFixtures: boolean }>({
+export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean; reverseProxy: boolean; canonicalOrigin: boolean; cbzFixtures: boolean; categoryFixtures: boolean }>({
   cbzFixtures: [false, { option: true }],
+  categoryFixtures: [false, { option: true }],
   liveProvider: [false, { option: true }],
   controlledReaderClock: [false, { option: true }],
   externalApp: [false, { option: true }],
   longNodeEpub: [false, { option: true }],
   reverseProxy: [false, { option: true }],
   canonicalOrigin: [true, { option: true }],
-  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub, reverseProxy, canonicalOrigin, cbzFixtures }, use, testInfo) => {
+  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub, reverseProxy, canonicalOrigin, cbzFixtures, categoryFixtures }, use, testInfo) => {
     if (externalApp) {
       const fixture = await loadExternalFixture(repoRoot);
       await use(fixture);
@@ -289,7 +316,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
     let clockOffset = 0;
     const readerNow = () => Date.now() + clockOffset;
     try {
-      if (!liveProvider) provider = await syntheticProvider(longNodeEpub, cbzFixtures);
+      if (!liveProvider) provider = await syntheticProvider(longNodeEpub, cbzFixtures, categoryFixtures);
       const absOrigin = provider?.origin ?? process.env.BOOKS_TEST_ABS_ORIGIN;
       const selectedLibrary = provider?.libraryId ?? process.env.BOOKS_PROOF_LIBRARY_ID;
       if (!absOrigin || !selectedLibrary) throw new Error('Isolated ABS fixture inputs are required');

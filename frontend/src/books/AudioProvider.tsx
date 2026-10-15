@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { booksApi, aborted, booksErrorMessage, BooksApiError, BOOKS_CHANGED_EVENT } from './api';
-import { AudioLocator, BookItem } from './types';
+import { AudioLocator, BookCategory, BookItem } from './types';
 import { ProgressClient, SaveState } from './progress';
 import { audioDuration, resolveAudioTime, validateChapters } from './audioTimeline';
 import { SESSION_CHANGED_EVENT } from '../stores/authStore';
@@ -8,6 +8,7 @@ import { SESSION_CHANGED_EVENT } from '../stores/authStore';
 export type AudioStatus = 'closed' | 'closing' | 'loading' | 'choose-position' | 'paused' | 'playing' | 'needs-gesture' | 'finished' | 'error';
 export interface AudioState {
   item?: BookItem;
+  category?: BookCategory;
   fileId?: string;
   status: AudioStatus;
   position: number;
@@ -23,7 +24,7 @@ const initial = (): AudioState => ({
   status: 'closed', position: 0, duration: 0, speed: 1, wantsPlaying: false, compatible: true, hasSaved: false, saveState: 'unsaved',
 });
 interface AudioContextValue extends AudioState {
-  open(item: BookItem): Promise<void>;
+  open(item: BookItem, category?: BookCategory): Promise<void>;
   play(): Promise<void>;
   pause(): void;
   seek(seconds: number): Promise<void>;
@@ -125,10 +126,10 @@ class OriginalAudioPlayer {
     this.stopSource();
     this.update({ status: 'error', wantsPlaying: false, error: booksErrorMessage(error) });
   }
-  async open(requested: BookItem): Promise<void> {
+  async open(requested: BookItem, category: BookCategory = 'books'): Promise<void> {
     this.close();
     const epoch = ++this.epoch;
-    this.update({ item: requested, status: 'loading', error: undefined });
+    this.update({ item: requested, category, status: 'loading', error: undefined });
     try {
       await this.pendingClose;
       if (epoch !== this.epoch) return;
@@ -296,7 +297,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return () => { player.dispose(); engine.current = undefined; };
   }, []);
   const actions = useMemo(() => ({
-    open: (item: BookItem) => engine.current!.open(item),
+    open: (item: BookItem, category?: BookCategory) => engine.current!.open(item, category),
     play: () => engine.current!.play(),
     pause: () => engine.current!.pause(),
     seek: (seconds: number) => engine.current!.seek(seconds),

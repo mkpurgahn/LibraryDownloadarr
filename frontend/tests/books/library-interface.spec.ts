@@ -96,12 +96,15 @@ test('books_belongs_to_libraries_and_home_destinations_are_real', async ({ page,
   await home(page, app);
   const destinations = page.locator('main').getByRole('region', { name: 'Libraries', exact: true });
   await expect(destinations.getByRole('link', { name: 'Movies', exact: true })).toHaveAttribute('href', '/library/fixture-movies');
-  await expect(destinations.getByRole('link', { name: 'TV Shows', exact: true })).toHaveAttribute('href', '/library/fixture-tv');
+  await expect(destinations.getByRole('link', { name: 'Shows', exact: true })).toHaveAttribute('href', '/library/fixture-tv');
   await expect(destinations.getByRole('link', { name: 'Books', exact: true })).toHaveAttribute('href', '/books');
+  await expect(destinations.getByRole('link', { name: 'Ebooks', exact: true })).toHaveAttribute('href', '/ebooks');
+  await expect(destinations.getByRole('link')).toHaveText(['Books→', 'Ebooks→', 'Movies→', 'Shows→']);
   expect(observations.requests.filter(value => value === 'GET /api/libraries')).toHaveLength(1);
   expect(observations.requests.filter(value => value === 'GET /api/books/libraries')).toHaveLength(1);
   const navigation = await openNavigation(page);
   const group = navigation.getByRole('region', { name: 'Libraries', exact: true });
+  await expect(group.getByRole('button')).toHaveText(['Books', 'Ebooks', 'Movies', 'Shows']);
   await expect(group.getByRole('button', { name: 'Books', exact: true })).toHaveCount(1);
   await expect(navigation.getByRole('button', { name: 'Books', exact: true })).toHaveCount(1);
   await group.getByRole('button', { name: 'Books', exact: true }).click();
@@ -133,6 +136,7 @@ test('books_configuration_change_discards_pending_navigation_without_refetching_
       await route.fulfill({ json: [{ providerInstanceId: 'fixture-provider', libraryId: 'fixture-library', name: 'Books' }] });
     } else await route.fulfill({ json: [] });
   });
+
   try {
     await home(page, app);
     await requested;
@@ -141,9 +145,28 @@ test('books_configuration_change_discards_pending_navigation_without_refetching_
     release();
     const navigation = await openNavigation(page);
     await expect(navigation.getByRole('button', { name: 'Books', exact: true })).toHaveCount(0);
+    await expect(navigation.getByRole('button', { name: 'Ebooks', exact: true })).toHaveCount(0);
     await expect(navigation.getByRole('button', { name: 'Movies', exact: true })).toBeVisible();
     expect(observations.requests.filter(value => value === 'GET /api/libraries')).toHaveLength(1);
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
+});
+
+test('alphabetical_navigation_preserves_custom_plex_names_and_permission_filtered_ids', async ({ page, app }) => {
+  await plexFixture(page);
+  await page.route('**/api/libraries', route => route.fulfill({ json: { libraries: [
+    { key: 'custom-tv', title: 'Weekend TV Shows', type: 'show' },
+    { key: 'custom-movies', title: 'Archive', type: 'movie' },
+    { key: 'custom-music', title: 'Music', type: 'artist' },
+    ...libraries,
+  ] } }));
+  await home(page, app, false);
+  const homeLibraries = page.locator('main').getByRole('region', { name: 'Libraries', exact: true });
+  await expect(homeLibraries.getByRole('link')).toHaveText(['Archive→', 'Books→', 'Ebooks→', 'Movies→', 'Music→', 'Shows→', 'Weekend TV Shows→']);
+  await expect(homeLibraries.getByRole('link', { name: 'Weekend TV Shows', exact: true })).toHaveAttribute('href', '/library/custom-tv');
+  const navigation = await openNavigation(page);
+  await expect(navigation.getByRole('region', { name: 'Libraries', exact: true }).getByRole('button'))
+    .toHaveText(['Archive', 'Books', 'Ebooks', 'Movies', 'Music', 'Shows', 'Weekend TV Shows']);
+  await expect(navigation.getByRole('region', { name: 'Management', exact: true })).toHaveCount(0);
 });
 
 test('layout_survives_small_intermediate_wide_and_enlarged_text', async ({ page, app }, info) => {
@@ -200,10 +223,11 @@ for (const state of ['empty', 'disabled', 'denied', 'outage'] as const) {
     await page.goto(`${app.origin}/`);
     const destinations = page.locator('main').getByRole('region', { name: 'Libraries', exact: true });
     await expect(destinations.getByRole('link', { name: 'Movies', exact: true })).toBeVisible();
-    await expect(destinations.getByRole('link', { name: 'TV Shows', exact: true })).toBeVisible();
+    await expect(destinations.getByRole('link', { name: 'Shows', exact: true })).toBeVisible();
     const navigation = await openNavigation(page);
     await expect(navigation.getByRole('button', { name: 'Books', exact: true })).toHaveCount(state === 'outage' ? 1 : 0);
-    await navigation.getByRole('button', { name: 'TV Shows', exact: true }).click();
+    await expect(navigation.getByRole('button', { name: 'Ebooks', exact: true })).toHaveCount(state === 'outage' ? 1 : 0);
+    await navigation.getByRole('button', { name: 'Shows', exact: true }).click();
     await expect(page).toHaveURL(`${app.origin}/library/fixture-tv`);
   });
 }

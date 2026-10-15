@@ -164,6 +164,8 @@ export const booksApi = {
   async catalog(libraryId: string, query: CatalogQuery, signal?: AbortSignal) {
     const params = new URLSearchParams({
       page: String(query.page), limit: String(query.limit), filter: query.filter, sort: query.sort, desc: String(query.desc),
+      ...(query.category ? { category: query.category } : {}),
+      ...(query.q ? { q: query.q } : {}),
     });
     return parseCatalog(await booksRequest(`/libraries/${id(libraryId)}/items?${params}`, {}, signal));
   },

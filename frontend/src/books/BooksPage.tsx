@@ -6,7 +6,7 @@ import { DocumentIcon } from '../components/Icons';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 import { useAuthStore } from '../stores/authStore';
 import { booksApi, aborted, booksErrorMessage, BOOKS_CHANGED_EVENT } from './api';
-import { BookSummary, CatalogQuery } from './types';
+import { BookCategory, BookSummary, CatalogQuery } from './types';
 
 export function BookCover({ itemId, title }: { itemId: string; title: string }) {
   const [missing, setMissing] = useState(false);
@@ -23,7 +23,8 @@ export function BookCover({ itemId, title }: { itemId: string; title: string }) 
   );
 }
 
-export const BooksPage: React.FC = () => {
+export const BooksPage: React.FC<{ category: BookCategory }> = ({ category }) => {
+  const label = category === 'ebooks' ? 'Ebooks' : 'Books';
   const menu = useMobileMenu();
   const sessionRevision = useAuthStore(state => state.sessionRevision);
   const [items, setItems] = useState<BookSummary[]>([]);
@@ -44,21 +45,23 @@ export const BooksPage: React.FC = () => {
 
   useEffect(() => {
     const controller = new AbortController();
-    setLoading(true); setError(''); setItems([]);
+    setLoading(true); setError(''); setItems([]); setTotal(0);
     void (async () => {
       const libraries = await booksApi.libraries(controller.signal);
+      if (controller.signal.aborted) return;
       if (!libraries.length) { setTotal(0); return; }
       const library = libraries[0];
-      if (search) setItems(await booksApi.search(library.libraryId, search, controller.signal));
-      else {
-        const result = await booksApi.catalog(library.libraryId, query, controller.signal);
-        if (controller.signal.aborted) return;
-        setItems(result.items); setTotal(result.total);
+      const result = await booksApi.catalog(library.libraryId, { ...query, category, ...(search ? { q: search } : {}) }, controller.signal);
+      if (controller.signal.aborted) return;
+      if (query.page > 0 && query.page * query.limit >= result.total) {
+        setQuery(current => ({ ...current, page: Math.max(0, Math.ceil(result.total / query.limit) - 1) }));
+        return;
       }
-    })().catch(error => { if (!aborted(error)) setError(booksErrorMessage(error)); })
+      setItems(result.items); setTotal(result.total);
+    })().catch(error => { if (!controller.signal.aborted && !aborted(error)) setError(booksErrorMessage(error)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [query, search, refresh, sessionRevision]);
+  }, [query, search, refresh, sessionRevision, category]);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -68,25 +71,28 @@ export const BooksPage: React.FC = () => {
         <main className="min-w-0 flex-1 overflow-y-auto p-4 pb-24 md:p-8">
           <div className="mx-auto max-w-7xl">
             <div className="mb-6">
-              <h1 ref={heading} tabIndex={-1} className="text-2xl font-bold outline-none md:text-3xl">Books</h1>
-              <p className="mt-2 text-sm text-gray-400">Read, listen, or keep the original. One collection, independent formats.</p>
+              <h1 ref={heading} tabIndex={-1} className="text-2xl font-bold outline-none md:text-3xl">{label}</h1>
+              <p className="mt-2 text-sm text-gray-400">{category === 'ebooks'
+                ? 'Ebooks and manga, including download-only originals. Titles with audio also appear in Books.'
+                : 'Books with audio originals. Titles with ebooks also appear in Ebooks.'}</p>
             </div>
-            <form className="mb-6 grid gap-3 lg:grid-cols-[minmax(15rem,1fr)_14rem_10rem_auto]" onSubmit={event => {
+            <form className={`mb-6 grid gap-3 ${category === 'books'
+              ? 'lg:grid-cols-[minmax(15rem,1fr)_14rem_10rem_auto]' : 'lg:grid-cols-[minmax(15rem,1fr)_10rem_auto]'}`} onSubmit={event => {
               event.preventDefault(); setSearch(input.trim()); setQuery(current => ({ ...current, page: 0 }));
             }}>
-              <label className="text-sm">Search books
-                <input className="input mt-1 min-h-11" value={input} maxLength={200} placeholder="Title or author"
+              <label className="text-sm">Search {category}
+                <input className="input mt-1 min-h-11" value={input} maxLength={200} placeholder="Title, subtitle, ISBN or ASIN"
                   onChange={event => setInput(event.target.value)} />
               </label>
-              <label className="text-sm">Available sources
-                <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={query.filter} disabled={Boolean(search)}
+              {category === 'books' && <label className="text-sm">Available sources
+                <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={query.filter}
                   onChange={event => setQuery(current => ({ ...current, page: 0, filter: event.target.value as CatalogQuery['filter'] }))}>
-                  <option value="all">All</option><option value="ebook">Has ebook</option>
+                  <option value="all">All audio</option>
                   <option value="single">Single-track audio</option><option value="multi">Multi-track audio</option>
                 </select>
-              </label>
+              </label>}
               <label className="text-sm">Sort
-                <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={query.sort} disabled={Boolean(search)}
+                <select className="input mt-1 min-h-11" style={{ colorScheme: 'dark' }} value={query.sort}
                   onChange={event => setQuery(current => ({ ...current, page: 0, sort: event.target.value as CatalogQuery['sort'] }))}>
                   <option value="title">Title</option><option value="author">Author</option>
                 </select>
@@ -94,17 +100,17 @@ export const BooksPage: React.FC = () => {
               <button className="btn-primary min-h-11 self-end" type="submit">Search</button>
             </form>
             {search && <div className="mb-4 flex flex-wrap items-center gap-3 text-sm text-gray-400">
-              <span>Search results. Inventory filters and pagination do not apply to search.</span>
-              <button className="btn-secondary min-h-11" onClick={() => { setInput(''); setSearch(''); }}>Clear search</button>
+              <span>Search results in {label}. Source filters, sorting and pagination still apply.</span>
+              <button className="btn-secondary min-h-11" onClick={() => { setInput(''); setSearch(''); setQuery(current => ({ ...current, page: 0 })); }}>Clear search</button>
             </div>}
             {error && <div role="alert" className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-red-200">
               <p>{error}</p>
-              <button className="btn-secondary mt-3 min-h-11" onClick={() => setRefresh(value => value + 1)}>Retry Books</button>
+              <button className="btn-secondary mt-3 min-h-11" onClick={() => setRefresh(value => value + 1)}>Retry {label}</button>
             </div>}
-            {loading ? <p role="status" className="py-12 text-center text-gray-400">Loading Books...</p> :
-              !error && !items.length ? <p role="status" className="py-12 text-center text-gray-400">No books found</p> :
+            {loading ? <p role="status" className="py-12 text-center text-gray-400">Loading {label}...</p> :
+              !error && !items.length ? <p role="status" className="py-12 text-center text-gray-400">No {category} found</p> :
                 <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-                  {items.map(item => <Link key={`${item.providerInstanceId}:${item.itemId}`} to={`/books/items/${item.itemId}`} tabIndex={0}
+                  {items.map(item => <Link key={`${item.providerInstanceId}:${item.itemId}`} to={`/${category}/items/${item.itemId}`} tabIndex={0}
                     aria-label={`Open ${item.title}`} className="group rounded-xl p-2 outline-none transition-colors hover:bg-white/5 focus-visible:ring-2 focus-visible:ring-primary-500">
                     <BookCover itemId={item.itemId} title={item.title} />
                     <h2 className="mt-3 line-clamp-2 text-sm font-semibold group-hover:text-primary-300">{item.title}</h2>
@@ -116,8 +122,8 @@ export const BooksPage: React.FC = () => {
                     </div>
                   </Link>)}
                 </div>}
-            {!search && !error && !loading && <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
-              <p className="text-sm text-gray-400">{total} books - Page {query.page + 1}</p>
+            {!error && !loading && <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-gray-400">{total} {category} - Page {query.page + 1}</p>
               <div className="flex gap-2">
                 <button className="btn-secondary min-h-11" disabled={query.page === 0} onClick={() => setQuery(current => ({ ...current, page: current.page - 1 }))}>Previous page</button>
                 <button className="btn-secondary min-h-11" disabled={(query.page + 1) * query.limit >= total} onClick={() => setQuery(current => ({ ...current, page: current.page + 1 }))}>Next page</button>
