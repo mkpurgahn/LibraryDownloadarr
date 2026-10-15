@@ -12,6 +12,7 @@ import { Readable } from 'node:stream';
 import { buildPdfFixture, PdfFixtureMode } from './pdfFixture';
 import { audioFixtures, AudioFixtureMode } from './audioFixture';
 import { loadExternalFixture, ExternalBinding, ExternalCandidate, ExternalFileMap } from './externalFixture';
+import { proofClock, TransferPhase, TransferRequest, TransferChunk, TransferTimeline, ByteReceipt } from './cbzByteProof';
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 process.chdir(repoRoot);
@@ -51,9 +52,10 @@ export type BooksApp = App & {
   restart(): Promise<void>;
 };
 export interface CbzTransfer {
-  start(options?: { ignoreEntryRanges?: boolean }): void;
+  start(options?: { ignoreEntryRanges?: boolean; phase?: string }): void;
   release(): void;
-  snapshot(): { bytes: number; requests: number; active: number; held: boolean; elapsedMs: number };
+  snapshot(): ByteReceipt & { active: number; held: boolean; elapsedMs: number };
+  timeline(): TransferTimeline;
 }
 
 async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, categoryFixtures = false): Promise<Provider> {
@@ -65,14 +67,22 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
   let throttledCbz = false, holdCbz = true, sentCbz = 0, requestsCbz = 0, activeCbz = 0, cbzStarted = 0;
   let ignoreEntryRanges = false;
   const heldCbz = new Set<() => void>();
+  const phases: TransferPhase[] = [], requests: TransferRequest[] = [], chunks: TransferChunk[] = [];
   const cbzTransfer: CbzTransfer = {
     start(options) {
       if (activeCbz) throw new Error('Previous controlled source request is still active');
       throttledCbz = true; holdCbz = true; sentCbz = 0; requestsCbz = 0; cbzStarted = performance.now();
+      phases.push({ id: phases.length + 1, label: options?.phase ?? `phase-${phases.length + 1}`, reset: proofClock() });
       ignoreEntryRanges = options?.ignoreEntryRanges === true;
     },
     release() { holdCbz = false; for (const send of [...heldCbz]) send(); },
-    snapshot: () => ({ bytes: sentCbz, requests: requestsCbz, active: activeCbz, held: holdCbz, elapsedMs: performance.now() - cbzStarted }),
+    snapshot: () => ({ bytes: sentCbz, requests: requestsCbz, active: activeCbz, held: holdCbz,
+      elapsedMs: performance.now() - cbzStarted, phaseId: phases.length, sampled: proofClock() }),
+    timeline: () => {
+      const captured = proofClock();
+      return structuredClone({ captured, phases, requests, chunks,
+        receipt: { phaseId: phases.length, bytes: sentCbz, requests: requestsCbz, sampled: captured } });
+    },
   };
   const makeItem = (id: string, title: string, extensions: string[]) => {
     const manifest = extensions.map((ext, index) => {
@@ -234,6 +244,8 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
       const [heldStart, lastStart] = cbzOffsets.get(data) ?? [0, 0];
       if (heldStart <= 0 || lastStart <= heldStart || total !== data.length) throw new Error('Controlled transfer needs the243page fixture');
       requestsCbz++; activeCbz++;
+      const request: TransferRequest = { id: requests.length + 1, phaseId: phases.length, opened: proofClock(), start, end: end + 1 };
+      requests.push(request);
       let offset = start;
       let timer: NodeJS.Timeout | undefined;
       const send = () => {
@@ -244,8 +256,12 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
         timer = setTimeout(() => {
           if (res.destroyed) return;
           const chunk = data.subarray(offset, stop);
+          const record: TransferChunk = { sequence: chunks.length + 1, requestId: request.id, phaseId: phases.length,
+            start: offset, end: stop, before: proofClock() };
+          chunks.push(record);
           sentCbz += chunk.length; offset = stop;
           const writable = res.write(chunk);
+          record.after = proofClock();
           if (offset > end) res.end();
           else if (writable) send(); else res.once('drain', send);
         }, (stop - offset) / (8 * 1024 * 1024) * 1000);
