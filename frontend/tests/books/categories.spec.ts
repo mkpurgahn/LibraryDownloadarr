@@ -1,7 +1,11 @@
 import fs from 'node:fs/promises';
-import { test, expect, signIn, capture } from './harness';
+import { createHash } from 'node:crypto';
+import { test, expect, signIn, capture, originalDownload } from './harness';
 
 test('categories_keep_mixed_titles_and_download_only_ebooks_in_distinct_destinations', async ({ page, app }, info) => {
+  test.skip(process.platform === 'win32' && info.project.name.startsWith('webkit-'),
+    'Positive native audio decoding requires Linux WebKit; Windows codec limitation is unchanged.');
+  await app.setAudio('normal');
   await signIn(page, app);
   await expect(page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Open One Hundred and One Tracks', exact: true })).toBeVisible();
@@ -20,18 +24,59 @@ test('categories_keep_mixed_titles_and_download_only_ebooks_in_distinct_destinat
   await expect(page.getByRole('navigation').getByRole('button', { name: 'Books', exact: true })).not.toHaveAttribute('aria-current', 'page');
   if (await toggle.isVisible()) await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Listen', exact: true })).toBeEnabled();
+  await page.getByTestId('books-audio').evaluate(element => {
+    if (element instanceof HTMLAudioElement) element.volume = 0;
+  });
   await page.getByRole('button', { name: 'Listen', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Audiobook player' }).getByRole('link')).toHaveAttribute('href', '/ebooks/items/dual');
+  await expect(async () => {
+    const resume = page.getByRole('button', { name: 'Tap to resume', exact: true });
+    if (await resume.isVisible()) await resume.click();
+    const audio = await page.getByTestId('books-audio').evaluate(element => {
+      if (!(element instanceof HTMLAudioElement)) throw new Error('Native audio element missing');
+      return { time: element.currentTime, ready: element.readyState, paused: element.paused, error: element.error?.code };
+    });
+    expect(audio.error).toBeUndefined();
+    expect(audio.paused).toBe(false);
+    expect(audio.ready).toBeGreaterThanOrEqual(2);
+    expect(audio.time).toBeGreaterThan(0.15);
+  }).toPass({ timeout: 10000 });
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  const audioSaved = page.waitForResponse(response => response.request().method() === 'PUT' &&
+    response.url().endsWith('/progress/audio') && response.status() === 200 &&
+    response.request().postDataJSON().op === 'save');
   await page.getByRole('button', { name: 'Close audiobook', exact: true }).click();
+  expect((await (await audioSaved).json()).progress.locator.globalSeconds).toBeGreaterThan(0.1);
   await expect(page.getByRole('link', { name: 'Read', exact: true })).toHaveAttribute('href', /\/ebooks\/items\/dual\/read\//);
   await capture(page, 'ebooks-mixed-detail', info);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expect(page.getByRole('link', { name: 'Back to book', exact: true })).toHaveAttribute('href', '/ebooks/items/dual');
+  const reader = page.frameLocator('iframe[title="EPUB reader"]');
+  await expect(reader.getByRole('heading', { name: 'First section', exact: true })).toBeVisible();
+  await reader.getByRole('button', { name: 'Next section', exact: true }).click();
+  await expect(reader.getByRole('heading', { name: 'Second section', exact: true })).toBeVisible();
+  await expect(page.getByText('Position saved', { exact: true })).toBeVisible();
+  await capture(page, 'ebooks-rendered-saved-original', info);
+  await page.getByRole('link', { name: 'Back to book', exact: true }).click();
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+  await expect(reader.getByRole('heading', { name: 'Second section', exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'Back to book', exact: true }).click();
   await page.getByRole('link', { name: 'Back to Ebooks', exact: true }).click();
   await page.getByRole('link', { name: 'Open Download-only Archive', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Read', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: /Download original/ })).toBeEnabled();
+  const original = await originalDownload(page, () =>
+    page.getByRole('button', { name: /Download original/ }).click(), info);
+  await original.saveAs(info.outputPath('category-unsupported-original.bin'));
+  expect(await original.failure()).toBeNull();
+  const bytes = await fs.readFile(info.outputPath('category-unsupported-original.bin'));
+  expect(bytes).toEqual(Buffer.from('Generated authorized original unsupported 0\n'.repeat(32)));
+  await fs.writeFile(info.outputPath('category-original-preservation.json'), JSON.stringify({
+    generatedInputs: true, decodedAudioAndSaved: true, renderedEpubAndResumedSecondSection: true,
+    unsupportedDownloadBytes: bytes.length, unsupportedDownloadSha256: createHash('sha256').update(bytes).digest('hex'),
+    appearanceAccepted: false,
+  }, null, 2));
   await page.goto(`${app.origin}/books/items/unsupported`);
   await expect(page.getByRole('heading', { name: 'Download-only Archive', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Back to Books', exact: true })).toHaveAttribute('href', '/books');

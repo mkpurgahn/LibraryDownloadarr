@@ -10,6 +10,8 @@ import {
 
 type Json = Record<string, unknown>;
 type MetadataBudget = { bytes: number; requests: number };
+const metadataCapacity = () =>
+  new BooksError(503, 'BOOKS_CATEGORY_CAPACITY', 'The category exceeds the safe catalog metadata budget.');
 const optionalObject = (value: unknown): Json | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
 const object = (value: unknown): Json => {
@@ -93,18 +95,25 @@ export class AbsClient {
     }
     if (status !== 200) { response.destroy(); throw new BooksError(status >= 500 ? 503 : 502, 'ABS_UNAVAILABLE'); }
   }
-  private async body(response: IncomingMessage, max: number): Promise<Buffer> {
+  private async body(response: IncomingMessage, max: number, budget?: MetadataBudget): Promise<Buffer> {
     this.checkStatus(response);
     const encoding = response.headers['content-encoding'];
     if (encoding && encoding !== 'identity') { response.destroy(); throw new BooksError(502, 'ABS_ENCODED_RESPONSE'); }
     if (Number(response.headers['content-length']) > max) { response.destroy(); throw new BooksError(502, 'ABS_RESPONSE_TOO_LARGE'); }
+    if (budget && Number(response.headers['content-length']) > BOOKS_LIMITS.categoryBytes - budget.bytes) {
+      response.destroy(); throw metadataCapacity();
+    }
     const chunks: Buffer[] = [];
     let size = 0;
     try {
       for await (const chunk of response) {
         const bytes: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (size + bytes.length > max) { response.destroy(); throw new BooksError(502, 'ABS_RESPONSE_TOO_LARGE'); }
+        if (budget && budget.bytes + bytes.length > BOOKS_LIMITS.categoryBytes) {
+          response.destroy(); throw metadataCapacity();
+        }
         size += bytes.length;
-        if (size > max) { response.destroy(); throw new BooksError(502, 'ABS_RESPONSE_TOO_LARGE'); }
+        if (budget) budget.bytes += bytes.length;
         chunks.push(bytes);
       }
     } catch (error) {
@@ -114,6 +123,7 @@ export class AbsClient {
     return Buffer.concat(chunks, size);
   }
   private async json(path: string, signal: AbortSignal, budget?: MetadataBudget): Promise<Json> {
+    if (budget && budget.bytes >= BOOKS_LIMITS.categoryBytes) throw metadataCapacity();
     if (budget && ++budget.requests > BOOKS_LIMITS.categoryRequests) {
       throw new BooksError(503, 'BOOKS_CATEGORY_CAPACITY', 'The category exceeds the safe catalog request budget.');
     }
@@ -124,13 +134,7 @@ export class AbsClient {
     const timeout = setTimeout(cancel, BOOKS_LIMITS.metadataTimeoutMs);
     try {
       const response = await this.request(path, 'GET', abort.signal);
-      const body = await this.body(response, BOOKS_LIMITS.metadataBytes);
-      if (budget) {
-        budget.bytes += body.length;
-        if (budget.bytes > BOOKS_LIMITS.categoryBytes) {
-          throw new BooksError(503, 'BOOKS_CATEGORY_CAPACITY', 'The category exceeds the safe catalog metadata budget.');
-        }
-      }
+      const body = await this.body(response, BOOKS_LIMITS.metadataBytes, budget);
       try { return object(JSON.parse(body.toString('utf8'))); }
       catch { throw new BooksError(502, 'ABS_INVALID_RESPONSE'); }
     } finally {

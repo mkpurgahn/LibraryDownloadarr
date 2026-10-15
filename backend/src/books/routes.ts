@@ -83,6 +83,40 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
       next();
     }).catch(error => booksError(error, res));
   };
+  const catalogHandler = (
+    handler: (req: AuthRequest, signal: AbortSignal, identity: BooksPrincipal) => Promise<unknown>
+  ) => bookHandler(async (req, res, signal) => {
+    const identity = principals.get(req);
+    if (!identity || req.user?.id !== identity.userId) throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
+    const generation = catalog.current().config.configGeneration;
+    const check = () => {
+      const session = db.getSessionById(identity.sessionId);
+      if (!session || session.userId !== identity.userId || identity.expiresAt <= Date.now()) {
+        throw new BooksError(401, 'BOOKS_SESSION_REQUIRED');
+      }
+      if (db.books.readConfig()?.configGeneration !== generation) {
+        throw new BooksError(409, 'BOOKS_CONFIGURATION_CHANGED');
+      }
+    };
+    check();
+    const controller = new AbortController();
+    const unsubscribeSession = db.onSessionRevoked(id => { if (id === identity.sessionId) controller.abort(); });
+    const unsubscribeConfig = db.books.onConfigChanged(() => controller.abort());
+    const expiry = setTimeout(() => controller.abort(), Math.max(0, Math.min(2147483647, identity.expiresAt - Date.now())));
+    expiry.unref();
+    const combined = AbortSignal.any([signal, controller.signal]);
+    try {
+      const result = await handler(req, combined, identity);
+      check();
+      if (combined.aborted) throw new BooksError(503, 'ABS_UNAVAILABLE');
+      return res.json(result);
+    } catch (error) {
+      check();
+      throw error;
+    } finally {
+      clearTimeout(expiry); unsubscribeSession(); unsubscribeConfig();
+    }
+  });
   router.delete('/media-session', bookHandler(async (req, res) => {
     const principal = principals.get(req)!;
     auth.clear(res, principal);
@@ -104,12 +138,12 @@ export function createBooksRouter(db: DatabaseService, dependencies: { plex?: Pl
     const target = bookTarget({ itemId: req.params.itemId, fileId: req.params.fileId, contentVersion: req.query.version });
     await relay.relayOriginal(req, res, principals.get(req)!, target, 'inline');
   }));
-  router.get('/libraries', bookHandler(async (_req, res, signal) => res.json(await catalog.libraries(signal))));
-  router.get('/libraries/:libraryId/items', bookHandler(async (req, res, signal) =>
-    res.json(await catalog.list(req.user!.id, req.params.libraryId, boundedQuery(req.query), signal))));
-  router.get('/libraries/:libraryId/search', bookHandler(async (req, res, signal) => {
+  router.get('/libraries', catalogHandler(async (_req, signal) => catalog.libraries(signal)));
+  router.get('/libraries/:libraryId/items', catalogHandler(async (req, signal, identity) =>
+    catalog.list(identity.userId, req.params.libraryId, boundedQuery(req.query), signal)));
+  router.get('/libraries/:libraryId/search', catalogHandler(async (req, signal, identity) => {
     if (Object.keys(req.query).some(key => key !== 'q') || typeof req.query.q !== 'string') throw invalidInput();
-    return res.json({ items: await catalog.search(req.user!.id, req.params.libraryId, req.query.q, signal) });
+    return { items: await catalog.search(identity.userId, req.params.libraryId, req.query.q, signal) };
   }));
   router.get('/items/:itemId', bookHandler(async (req, res, signal) =>
     res.json((await catalog.authorizeItem(req.user!.id, req.params.itemId, signal)).item)));

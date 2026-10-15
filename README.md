@@ -79,8 +79,17 @@ Ebooks and single-/multi-file audio browsing use native filtered pagination.
 All-audio browsing combines ABS's disjoint single/multi file partitions before
 sorting, counting and pagination; `tracks.audio` is not a supported ABS filter.
 The union is sequential and ephemeral: at most 10,000 entries, 102 requests,
-32 MiB aggregate JSON and 20 seconds, with the existing 100-item provider pages,
+32 MiB aggregate accepted JSON bytes and 20 seconds, with the existing 100-item provider pages,
 8 MiB per-response and 10-second per-response guards unchanged.
+The remaining aggregate allowance is enforced before buffering each body chunk,
+including responses without a reliable Content-Length. An over-budget chunk is
+discarded and the upstream response is destroyed; Node/OS transport buffers may
+already contain additional bytes. This is not a universal wire-byte or total
+process-memory ceiling. Catalog list/search/library operations bind the current
+session, expiry and configuration generation: revocation, expiry, configuration
+changes or client disconnect cancel pending provider work, and identity and
+generation are rechecked before delivery. Operation listeners and timers are
+removed on success and failure.
 
 Category search preserves ABS 2.30's book matching (title, subtitle, ISBN or ASIN,
 not author-name matching). It requests a complete native response before

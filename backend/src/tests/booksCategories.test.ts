@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { AbsClient } from '../books/absClient';
 import { boundedQuery } from '../books/limits';
 import { BooksConfig } from '../books/types';
@@ -37,6 +38,8 @@ async function provider(count = 121) {
   const requests: URL[] = [];
   let bytes = 0;
   let maximumResponseBytes = 0;
+  let completedResponses = 0;
+  let abortedResponses = 0;
   let requested!: () => void;
   const received = new Promise<void>(resolve => { requested = resolve; });
   // ABS 2.30 LibraryController.getLibraryItems + getMediaGroupQuery:
@@ -51,10 +54,21 @@ async function provider(count = 121) {
     res.setHeader('Content-Type', 'application/json');
     if (mode === 'oversized') { res.end('x'.repeat(8 * 1024 * 1024 + 1)); return; }
     const json = (value: unknown) => {
-      const body = JSON.stringify(value);
-      bytes += Buffer.byteLength(body);
-      maximumResponseBytes = Math.max(maximumResponseBytes, Buffer.byteLength(body));
-      res.end(body);
+      const body = Buffer.from(JSON.stringify(value));
+      maximumResponseBytes = Math.max(maximumResponseBytes, body.length);
+      if (mode !== 'aggregate') {
+        bytes += body.length; completedResponses++; res.end(body);
+      } else {
+        res.once('close', () => { if (!res.writableFinished) abortedResponses++; });
+        void (async () => {
+          for (let offset = 0; offset < body.length && !res.destroyed; offset += 65536) {
+            const chunk = body.subarray(offset, offset + 65536);
+            bytes += chunk.length; res.write(chunk);
+            await delay(1);
+          }
+          if (!res.destroyed) { completedResponses++; res.end(); }
+        })();
+      }
     };
     if (url.pathname === `/api/libraries/${libraryId}/search`) {
       if (mode === 'malformed-search') { json({ authors: [] }); return; }
@@ -126,6 +140,7 @@ async function provider(count = 121) {
   const client = new AbsClient(config, 'owned-fixture-only', { fileId: () => 'unused-file' });
   return {
     client, requests, received, get bytes() { return bytes; }, get maximumResponseBytes() { return maximumResponseBytes; },
+    get completedResponses() { return completedResponses; }, get abortedResponses() { return abortedResponses; },
     setMode(value: typeof mode) { mode = value; },
     remove(id: string) { items = items.filter(item => item.id !== id); },
     async close() {
@@ -268,6 +283,10 @@ test('category_aggregate_budget_stops_sequential_work_without_relaxing_per_respo
     await assert.rejects(f.client.list(boundedQuery({ category: 'books' }), signal()), { code: 'BOOKS_CATEGORY_CAPACITY' });
     assert.equal(f.requests.length, 6);
     assert.ok(f.maximumResponseBytes < 8 * 1024 * 1024);
+    await delay(10);
+    assert.equal(f.completedResponses, 5, 'The aggregate-crossing page must not finish');
+    assert.equal(f.abortedResponses, 1);
+    assert.ok(f.bytes < 34 * 1024 * 1024, 'Terminate near the boundary, not after another full 6 MB page');
   } finally { await f.close(); }
 });
 
