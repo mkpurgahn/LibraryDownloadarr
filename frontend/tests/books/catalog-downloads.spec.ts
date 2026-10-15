@@ -266,7 +266,7 @@ test('books_outage_does_not_erase_plex_authentication', async ({ page, app }, in
   await expect(page.getByRole('heading', { name: 'Audiobooks', exact: true })).toBeVisible();
   app.setUnavailable(true);
   await page.getByRole('combobox', { name: 'Available sources' }).selectOption('multi');
-  await expect(page.getByRole('alert')).toContainText('Books');
+  await expect(page.getByRole('alert').getByRole('button', { name: 'Retry Audiobooks', exact: true })).toBeVisible();
   expect(await page.evaluate(() => Boolean(localStorage.getItem('token')))).toBe(true);
   await capture(page, 'provider-unavailable', info);
 });
