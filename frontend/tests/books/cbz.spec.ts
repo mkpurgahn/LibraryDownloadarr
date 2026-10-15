@@ -60,12 +60,89 @@ async function setViewOption(page: Page, label: 'Page fit' | 'Zoom', value: stri
   await options.click();
 }
 
-async function toggleComicDirection(page: Page) {
+async function setComicDirection(page: Page, direction: 'rtl' | 'ltr') {
   const options = page.getByRole('button', { name: 'View options', exact: true });
   if (await options.getAttribute('aria-expanded') === 'false') await options.click();
-  await page.getByRole('button', { name: /^Reading direction:/ }).click();
+  await page.getByRole('combobox', { name: 'Reading direction', exact: true }).selectOption(direction);
   await options.click();
 }
+
+test('CBZ reading direction choice is explicit and preserves page and bookmark', async ({ page, app }, info) => {
+  await signIn(page, app);
+  await openComic(page);
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await expectPanel(page, 1, 1);
+  const view = page.getByRole('button', { name: 'View options', exact: true });
+  const next = page.getByRole('button', { name: 'Next page', exact: true });
+  const previous = page.getByRole('button', { name: 'Previous page', exact: true });
+  await expect(next).toBeEnabled();
+  await expect.poll(() => next.evaluate(element => getComputedStyle(element).opacity)).toBe('1');
+  await view.click();
+  await capture(page, 'cbz-direction-view-rtl', info);
+  const direction = page.getByRole('combobox', { name: 'Reading direction', exact: true });
+  await expect(direction).toHaveValue('rtl');
+  await expect(direction.locator('option')).toHaveText(['Right to left', 'Left to right']);
+  const initialSize = page.viewportSize()!;
+  const geometry: object[] = [];
+  for (const width of [320, initialSize.width]) {
+    await page.setViewportSize({ ...initialSize, width });
+    const options = (await page.getByRole('region', { name: 'Reading options', exact: true }).boundingBox())!;
+    for (const control of await page.getByRole('region', { name: 'Reading options', exact: true }).getByRole('combobox').all()) {
+      const box = (await control.boundingBox())!;
+      expect(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.x).toBeGreaterThanOrEqual(options.x);
+      expect(box.x + box.width).toBeLessThanOrEqual(options.x + options.width + 1);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect((await page.getByRole('region', { name: 'Comic page', exact: true }).boundingBox())!.height).toBeGreaterThan(300);
+    geometry.push({ width, controlsContained: true, minimumControlHeight: 44, documentOverflow: false });
+  }
+  await direction.selectOption('ltr');
+  await expect(direction).toHaveValue('ltr');
+  await expect(page.getByText('Tap the right page edge for next, left for previous.', { exact: true })).toBeVisible();
+  expect((await next.boundingBox())!.x).toBeGreaterThan((await previous.boundingBox())!.x);
+  await expectPanel(page, 1, 1);
+  expect(await savedComicPage(page)).toBe(1);
+  await expect.poll(() => next.evaluate(element => getComputedStyle(element).opacity)).toBe('1');
+  await capture(page, 'cbz-direction-view-ltr', info);
+  await view.click();
+  await setViewOption(page, 'Zoom', '300');
+  const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
+  await viewport.evaluate(element => {
+    element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.6;
+    element.scrollLeft = (element.scrollWidth - element.clientWidth) * 0.6;
+  });
+  await view.click();
+  for (const mode of ['rtl', 'ltr']) {
+    await direction.selectOption(mode);
+    await expect(direction).toHaveValue(mode);
+    await expectPanel(page, 1, 1);
+    await expectFraction(viewport, 'vertical', 0.6);
+    await expectFraction(viewport, 'horizontal', 0.6);
+    expect(await savedComicPage(page)).toBe(1);
+  }
+  await page.getByRole('link', { name: 'Back to book' }).click();
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+  await expectPanel(page, 1, 1);
+  await setViewOption(page, 'Zoom', '300');
+  await expectFraction(viewport, 'vertical', 0.6);
+  await expectFraction(viewport, 'horizontal', 0.6);
+  await setViewOption(page, 'Page fit', 'page');
+  await setComicDirection(page, 'ltr');
+  const edge = await pageEdge(page, 'right');
+  await page.mouse.click(edge.x, edge.y);
+  await expectPanel(page, 2, 2);
+  expect(await savedComicPage(page)).toBe(2);
+  await setComicDirection(page, 'rtl');
+  expect((await next.boundingBox())!.x).toBeLessThan((await previous.boundingBox())!.x);
+  await expectPanel(page, 2, 2);
+  expect(await savedComicPage(page)).toBe(2);
+  await fs.writeFile(info.outputPath('direction-choice.json'), JSON.stringify({
+    default: 'rtl', explicitChoices: ['rtl', 'ltr'], directionChangesPreservedPageAndBothFractions: true,
+    savedReopenFractions: { vertical: 0.6, horizontal: 0.6 }, chosenLtrRightEdgeSavedPage: 2, geometry,
+  }, null, 2));
+});
 
 type ComicContact = { id: number; x: number; y: number };
 type ComicTouchEvent = {
@@ -318,7 +395,7 @@ test.describe('visible page-edge navigation', () => {
       else await page.mouse.click(edge.x, edge.y);
       await expectPanel(page, 2, 2);
       await expect(page.getByLabel('Page number', { exact: true })).toHaveValue('2');
-      await toggleComicDirection(page);
+      await setComicDirection(page, 'ltr');
       const forward = await pageEdge(page, 'right');
       if (input === 'touch') await page.touchscreen.tap(forward.x, forward.y);
       else await page.mouse.click(forward.x, forward.y);
@@ -499,7 +576,7 @@ test('CBZ same-input detail and real numbered pages', async ({ page, app }, info
   await page.keyboard.press('ArrowLeft');
   await expect(page.getByRole('img', { name: 'Comic page 2 of 3', exact: true })).toBeVisible();
   await expectPanel(page, 2, 2);
-  await toggleComicDirection(page);
+  await setComicDirection(page, 'ltr');
   await page.getByRole('region', { name: 'Comic page' }).focus();
   await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('img', { name: 'Comic page 3 of 3', exact: true })).toBeVisible();
@@ -779,7 +856,7 @@ test.describe('touch-enabled comic reader', () => {
   await viewport.dispatchEvent('touchstart', { touches: [{ identifier: 0, clientX: 80, clientY: 80 }] });
   await viewport.dispatchEvent('touchend', { changedTouches: [{ identifier: 0, clientX: 220, clientY: 80 }] });
   await expectPanel(page, 2, 2);
-  await toggleComicDirection(page);
+  await setComicDirection(page, 'ltr');
   await viewport.dispatchEvent('touchstart', { touches: [{ identifier: 0, clientX: 220, clientY: 80 }] });
   await viewport.dispatchEvent('touchend', { changedTouches: [{ identifier: 0, clientX: 80, clientY: 80 }] });
   await expectPanel(page, 3, 10);

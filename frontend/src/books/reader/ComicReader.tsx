@@ -330,8 +330,12 @@ export const ComicReader: React.FC<{
           {[50, 75, 100, 125, 150, 200, 300].map(value => <option key={value} value={value}>{value}%</option>)}
         </select>
       </label>
-      <button className="btn-secondary min-h-11 px-2 text-xs sm:text-sm" aria-label={`Reading direction: ${rtl ? 'right to left' : 'left to right'}`}
-        onClick={() => setRtl(value => !value)}>{rtl ? 'Right to left' : 'Left to right'}</button>
+      <label className="min-w-0">Reading direction
+        <select className="input mt-1 min-h-11 px-2" style={{ colorScheme: 'dark' }} value={rtl ? 'rtl' : 'ltr'}
+          onChange={event => setRtl(event.target.value === 'rtl')}>
+          <option value="rtl">Right to left</option><option value="ltr">Left to right</option>
+        </select>
+      </label>
     </div>}
     <p id="comic-navigation-help" className="text-xs text-gray-400">
       {total === 1 ? 'This original has one page.' : page === total ? `End of this original. Tap the ${rtl ? 'right' : 'left'} edge to go back.` :

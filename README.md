@@ -113,7 +113,8 @@ The center and empty margins do not turn pages. Dragging, scrolling, selections,
 and long presses do not activate the edges; a swipe never also counts as a tap.
 Multi-contact and cancelled touch gestures do not turn or save another page,
 including when a second contact starts on the heading or controls.
-**View** contains fit-page, fit-width, 50-300% manual zoom, and reading direction.
+**View** contains fit-page, fit-width, 50-300% manual zoom, and a labeled
+**Reading direction** selector with explicit Right to left and Left to right choices.
 Arrow keys and horizontal swipes remain available (swipes turn pages only when
 the page is not horizontally scrollable). Reading direction defaults to
 right-to-left and has an explicit left-to-right toggle. Arrows and page edges
