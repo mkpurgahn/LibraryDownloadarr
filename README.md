@@ -117,7 +117,7 @@ including when a second contact starts on the heading or controls.
 **Reading direction** selector with explicit Right to left and Left to right choices.
 Arrow keys and horizontal swipes remain available (swipes turn pages only when
 the page is not horizontally scrollable). Reading direction defaults to
-right-to-left and has an explicit left-to-right toggle. Arrows and page edges
+right-to-left and has an explicit left-to-right choice. Arrows and page edges
 follow that direction, not a different semantic page order. Navigation pauses
 while a page loads and never treats the end of an original as the next chapter.
 The selected original's filename is
