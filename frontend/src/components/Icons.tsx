@@ -73,6 +73,24 @@ export function MusicIcon({ className }: IconProps) {
   );
 }
 
+export function BookIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={iconClass(className)}>
+      <path d="M6 3h14v18H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 18a3 3 0 0 1 3-3h14M9 3v7l2-1 2 1V3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function BookWavesIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={iconClass(className)}>
+      <path d="M5 3h8v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 19a2 2 0 0 1 2-2h8M6 3v14M16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function FolderIcon({ className }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className={iconClass(className)}>

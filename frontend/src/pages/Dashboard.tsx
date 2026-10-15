@@ -72,7 +72,7 @@ export const Dashboard: React.FC = () => {
               {navigation.plexError && <p role="status" className="mt-3 text-sm text-gray-400">Plex libraries unavailable. Reload to try again.</p>}
               {!navigation.plexLoading && !navigation.plexError && !navigation.libraries.length &&
                 <p className="mt-3 text-sm text-gray-400">No Plex libraries available.</p>}
-              {navigation.booksUnavailable && <p role="status" className="mt-3 text-sm text-gray-400">Books and Ebooks are temporarily unavailable. Open either category to retry.</p>}
+              {navigation.booksUnavailable && <p role="status" className="mt-3 text-sm text-gray-400">Audiobooks and Books are temporarily unavailable. Open either category to retry.</p>}
             </section>
 
             {user?.isAdmin && <section aria-label="Management"

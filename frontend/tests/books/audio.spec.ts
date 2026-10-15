@@ -1,8 +1,14 @@
 import fs from 'node:fs/promises';
 import type { Page } from '@playwright/test';
-import { test, expect, signIn, capture, BooksApp } from './harness';
+import { test, expect, signIn as signInBooks, capture, BooksApp } from './harness';
 import { resolveAudioTime, validateChapters } from '../../src/books/audioTimeline';
 import { AudioFixtureMode } from './audioFixture';
+
+async function signIn(page: Page, app: BooksApp, index = 0) {
+  await signInBooks(page, app, index);
+  await page.goto(`${app.origin}/audiobooks`);
+  await expect(page.getByRole('heading', { name: 'Audiobooks', exact: true })).toBeVisible();
+}
 
 const media = (page: Page) => page.getByTestId('books-audio').evaluate(element => {
   if (!(element instanceof HTMLAudioElement)) throw new Error('Native audio element missing');

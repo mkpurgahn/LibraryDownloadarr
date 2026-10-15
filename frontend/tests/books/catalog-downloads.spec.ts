@@ -27,21 +27,22 @@ test('dual_capability_item_is_one_card', async ({ page, app }, info) => {
     (getComputedStyle(element).color.match(/\d+/g) ?? []).slice(0, 3).map(Number)));
   expect((Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05)).toBeGreaterThanOrEqual(4.5);
   await expect(page.getByRole('link', { name: 'Read', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Listen', exact: true })).toBeEnabled();
-  await expect(page.getByRole('button', { name: /Download original/ })).toHaveCount(4);
+  await expect(page.getByRole('button', { name: 'Listen', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Download original/ })).toHaveCount(2);
   await capture(page, 'dual-detail', info);
 });
 
 test('inventory_filters_are_not_codec_promises', async ({ page, app }, info) => {
   await signIn(page, app);
+  await page.goto(`${app.origin}/audiobooks`);
   const filter = page.getByRole('combobox', { name: 'Available sources' });
   await expect(filter.locator('option')).toHaveText(['All audio', 'Single-track audio', 'Multi-track audio']);
   await filter.selectOption('single');
-  await expect(page.getByText('No books found', { exact: true })).toBeVisible();
-  await page.goto(`${app.origin}/ebooks`);
+  await expect(page.getByText('No audiobooks found', { exact: true })).toBeVisible();
+  await page.goto(`${app.origin}/books`);
   await expect(page.getByRole('link', { name: 'Open Download-only Archive', exact: true })).toBeVisible();
-  await page.getByRole('textbox', { name: 'Search ebooks' }).fill('Two Formats');
-  await page.getByRole('textbox', { name: 'Search ebooks' }).press('Enter');
+  await page.getByRole('textbox', { name: 'Search books' }).fill('Two Formats');
+  await page.getByRole('textbox', { name: 'Search books' }).press('Enter');
   await expect(page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Next page' })).toBeDisabled();
   await capture(page, 'catalog-search', info);
@@ -87,6 +88,7 @@ test('book_download_never_uses_plex_adapter', async ({ page, app }, info) => {
     if (/^\/api\/media\/.*(?:download|burn|compatible|zip)/.test(pathname)) plexDownloads += 1;
   });
   await signIn(page, app);
+  await page.goto(`${app.origin}/audiobooks`);
   await page.getByRole('link', { name: 'Open One Hundred and One Tracks', exact: true }).click();
   const downloading = page.waitForEvent('download', { timeout: 10000 });
   await page.getByRole('button', { name: 'Prepare all downloads' }).click();
@@ -99,7 +101,7 @@ test('book_download_never_uses_plex_adapter', async ({ page, app }, info) => {
   expect(new URL(file.url()).origin).toBe(app.origin);
   await expect.poll(() => batches).toEqual([100, 1]);
   expect(plexDownloads).toBe(0);
-  await expect(page).toHaveURL(`${app.origin}/books/items/collection`);
+  await expect(page).toHaveURL(`${app.origin}/audiobooks/items/collection`);
   await expect(page.getByRole('heading', { name: 'One Hundred and One Tracks', exact: true })).toBeVisible();
   const rows = page.getByRole('complementary', { name: 'Download activity' }).locator('section');
   await expect(rows).toHaveCount(101);
@@ -116,7 +118,7 @@ test('book_download_never_uses_plex_adapter', async ({ page, app }, info) => {
   await capture(page, 'batch-handoff', info);
   await page.getByRole('button', { name: 'Dismiss Books download', exact: true }).first().click();
   await expect(rows).toHaveCount(100);
-  await expect(page).toHaveURL(`${app.origin}/books/items/collection`);
+  await expect(page).toHaveURL(`${app.origin}/audiobooks/items/collection`);
   expect(nativeDownloads).toBe(1);
   await fs.writeFile(info.outputPath('batch-native-contract.json'), JSON.stringify({
     bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
@@ -126,6 +128,7 @@ test('book_download_never_uses_plex_adapter', async ({ page, app }, info) => {
 
 test('blocked_automatic_original_has_safe_explicit_save_recovery', async ({ page, app }, info) => {
   await signIn(page, app);
+  await page.goto(`${app.origin}/audiobooks`);
   await page.getByRole('link', { name: 'Open One Hundred and One Tracks', exact: true }).click();
   let nativeDownloads = 0;
   page.on('download', () => { nativeDownloads += 1; });
@@ -143,7 +146,7 @@ test('blocked_automatic_original_has_safe_explicit_save_recovery', async ({ page
   await expect(rows).toHaveCount(101);
   await expect(rows.first().getByText('Your browser needs a direct click. Use Save file below.', { exact: true })).toBeVisible();
   await expect(page.getByText('Started', { exact: true })).toHaveCount(0);
-  await expect(page).toHaveURL(`${app.origin}/books/items/collection`);
+  await expect(page).toHaveURL(`${app.origin}/audiobooks/items/collection`);
   expect(await page.evaluate(() => document.documentElement.dataset.blockedBooksHandoffs)).toBe('1');
   expect(nativeDownloads).toBe(0);
   const downloading = page.waitForEvent('download', { timeout: 10000 });
@@ -154,7 +157,7 @@ test('blocked_automatic_original_has_safe_explicit_save_recovery', async ({ page
   const bytes = await fs.readFile(info.outputPath('recovered-original.bin'));
   expect(bytes.length).toBe(1376);
   expect(createHash('sha256').update(bytes).digest('hex')).toBe('336ecdb8b42605af02328146db964bb04d1ab3981d2c13b8bf3fdda99c6b682c');
-  await expect(page).toHaveURL(`${app.origin}/books/items/collection`);
+  await expect(page).toHaveURL(`${app.origin}/audiobooks/items/collection`);
   await expect(page.getByRole('heading', { name: 'One Hundred and One Tracks', exact: true })).toBeVisible();
   await expect(rows).toHaveCount(101);
   await expect(rows.first().getByText('Started', { exact: true })).toBeVisible();
@@ -207,15 +210,15 @@ test('prepared_original_has_an_explicit_native_save_action', async ({ page, app,
   expect(head.headers()['content-length']).toBe('2764');
   const rows = page.getByRole('complementary', { name: 'Download activity' }).locator('section');
   await expect(rows.nth(1).getByText('Started', { exact: true })).toBeVisible();
-  await expect(rows.nth(2).getByText('Ready to save', { exact: true })).toBeVisible();
-  await expect(rows.nth(3).getByText('Ready to save', { exact: true })).toBeVisible();
+  await expect(rows).toHaveCount(2);
+  await expect(rows.getByText('Ready to save', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Started', { exact: true })).toHaveCount(2);
   await expect(page.getByText('Complete', { exact: true })).toHaveCount(0);
   await expect(page).toHaveURL(`${app.origin}/books/items/dual`);
   await fs.writeFile(info.outputPath('manual-download-contract.json'), JSON.stringify({
     sourceBasename: 'A Tale in Two Formats 2.pdf', suggestedFilename: file.suggestedFilename(),
     contentDisposition: head.headers()['content-disposition'], bytes: bytes.length, sha256,
-    appRetained: true, startedRows: 2, readyRows: 2,
+    appRetained: true, startedRows: 2, readyRows: 0,
   }, null, 2));
   await capture(page, 'manual-original-started', info);
 });
@@ -259,7 +262,8 @@ test('user_change_clears_book_state', async ({ page, context, app }, info) => {
 
 test('books_outage_does_not_erase_plex_authentication', async ({ page, app }, info) => {
   await signIn(page, app);
-  await expect(page.getByRole('heading', { name: 'Books', exact: true })).toBeVisible();
+  await page.goto(`${app.origin}/audiobooks`);
+  await expect(page.getByRole('heading', { name: 'Audiobooks', exact: true })).toBeVisible();
   app.setUnavailable(true);
   await page.getByRole('combobox', { name: 'Available sources' }).selectOption('multi');
   await expect(page.getByRole('alert')).toContainText('Books');

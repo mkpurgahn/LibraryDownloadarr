@@ -7,7 +7,7 @@ import { parseReader } from '../../src/books/types';
 test.use({ cbzFixtures: true, controlledReaderClock: true, reverseProxy: true });
 
 async function openComic(page: Page) {
-  await page.goto(new URL('/ebooks', page.url()).href);
+  await page.goto(new URL('/books', page.url()).href);
   const card = page.getByRole('link', { name: 'Open The Paper Observatory', exact: true });
   await card.scrollIntoViewIfNeeded();
   // The fixture's absent cover must not remove the pointer target during the click.

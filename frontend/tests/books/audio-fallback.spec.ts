@@ -4,6 +4,7 @@ test('windows_webkit_reports_unsupported_originals_without_transcoding', async (
   test.skip(process.platform !== 'win32' || browserName !== 'webkit', 'This is the recorded Windows WebKit codec limitation, not a positive playback test.');
   await app.setAudio('normal');
   await signIn(page, app);
+  await page.goto(`${app.origin}/audiobooks`);
   await page.getByRole('link', { name: 'A Tale in Two Formats' }).click();
   const transformations: string[] = [];
   page.on('request', request => {

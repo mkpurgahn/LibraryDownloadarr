@@ -61,7 +61,7 @@ export function useLibraryNavigation() {
   }));
   if (booksVisible) destinations.push(
     { key: 'books', path: '/books', title: 'Books', type: 'books' },
-    { key: 'ebooks', path: '/ebooks', title: 'Ebooks', type: 'ebooks' }
+    { key: 'audiobooks', path: '/audiobooks', title: 'Audiobooks', type: 'audiobooks' }
   );
   destinations.sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base' }) || a.key.localeCompare(b.key));
   return { libraries, destinations, plexLoading, plexError, booksVisible, booksUnavailable };

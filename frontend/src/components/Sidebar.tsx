@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useLibraryNavigation, LibraryNavigation } from '../hooks/useLibraryNavigation';
-import { DocumentIcon, FilmIcon, FolderIcon, HistoryIcon, HomeIcon, MusicIcon, SettingsIcon, TvIcon } from './Icons';
+import { BookIcon, BookWavesIcon, DocumentIcon, FilmIcon, FolderIcon, HistoryIcon, HomeIcon, MusicIcon, SettingsIcon, TvIcon } from './Icons';
 
 interface SidebarProps {
   isOpen: boolean;
@@ -12,7 +12,7 @@ interface SidebarProps {
 
 export function LibraryIcon({ type }: { type: string }) {
   const Icon = type === 'movie' ? FilmIcon : type === 'show' ? TvIcon :
-    type === 'artist' || type === 'books' ? MusicIcon : type === 'ebooks' ? DocumentIcon : FolderIcon;
+    type === 'artist' ? MusicIcon : type === 'books' ? BookIcon : type === 'audiobooks' ? BookWavesIcon : FolderIcon;
   return <Icon className="h-5 w-5 flex-none" />;
 }
 
@@ -55,7 +55,7 @@ function SidebarContent({ isOpen, onClose, navigation }: SidebarProps & { naviga
     };
   }, [isOpen]);
 
-  const active = (path: string) => path === '/books' || path === '/ebooks'
+  const active = (path: string) => path === '/books' || path === '/audiobooks'
     ? location.pathname === path || location.pathname.startsWith(`${path}/`)
     : location.pathname === path;
   const go = (path: string) => { navigate(path); onClose(); };

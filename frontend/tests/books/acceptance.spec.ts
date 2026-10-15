@@ -157,6 +157,7 @@ test.describe('frozen managed consumer', () => {
   test('managed_dual_original_mp3_decodes_seeks_and_resumes', async ({ page, app, browserName }, info) => {
     test.skip(process.platform === 'win32' && browserName === 'webkit', 'Positive decode uses the capable Linux WebKit runtime; Windows fallback is separately verified.');
     const { item, handoffSha256 } = await managedDual(page, app);
+    await page.goto(`${app.origin}/audiobooks/items/${item.itemId}`);
     const audio = page.getByTestId('books-audio');
     await audio.evaluate(element => { if (element instanceof HTMLMediaElement) element.volume = 0; });
     await page.getByRole('button', { name: 'Listen', exact: true }).click();

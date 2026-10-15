@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 import { api } from './services/api';
 import { Setup } from './pages/Setup';
@@ -18,6 +18,14 @@ import { BookDetail } from './books/BookDetail';
 import { AudioProvider } from './books/AudioProvider';
 import { AudioPlayer } from './books/AudioPlayer';
 const ReaderPage = React.lazy(() => import('./books/ReaderPage').then(module => ({ default: module.ReaderPage })));
+
+const LegacyBookRedirect: React.FC<{ reader?: boolean }> = ({ reader = false }) => {
+  const { itemId, fileId } = useParams();
+  const { search, hash } = useLocation();
+  const path = reader ? `/books/items/${itemId}/read/${fileId}` :
+    itemId ? `/audiobooks/items/${itemId}` : '/audiobooks';
+  return <Navigate replace to={`${path}${search}${hash}`} />;
+};
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { token, user } = useAuthStore();
@@ -99,11 +107,13 @@ const App: React.FC = () => {
         <>
           <Route path="/login" element={<Login />} />
           <Route path="/books" element={<ProtectedRoute><BooksPage key="books" category="books" /></ProtectedRoute>} />
-          <Route path="/ebooks" element={<ProtectedRoute><BooksPage key="ebooks" category="ebooks" /></ProtectedRoute>} />
-          <Route path="/books/items/:itemId" element={<ProtectedRoute><BookDetail /></ProtectedRoute>} />
-          <Route path="/ebooks/items/:itemId" element={<ProtectedRoute><BookDetail /></ProtectedRoute>} />
+          <Route path="/audiobooks" element={<ProtectedRoute><BooksPage key="audiobooks" category="audiobooks" /></ProtectedRoute>} />
+          <Route path="/ebooks" element={<ProtectedRoute><LegacyBookRedirect /></ProtectedRoute>} />
+          <Route path="/books/items/:itemId" element={<ProtectedRoute><BookDetail key="books" /></ProtectedRoute>} />
+          <Route path="/audiobooks/items/:itemId" element={<ProtectedRoute><BookDetail key="audiobooks" /></ProtectedRoute>} />
+          <Route path="/ebooks/items/:itemId" element={<ProtectedRoute><LegacyBookRedirect /></ProtectedRoute>} />
           <Route path="/books/items/:itemId/read/:fileId" element={<ProtectedRoute><React.Suspense fallback={<p role="status" className="p-6">Opening reader...</p>}><ReaderPage /></React.Suspense></ProtectedRoute>} />
-          <Route path="/ebooks/items/:itemId/read/:fileId" element={<ProtectedRoute><React.Suspense fallback={<p role="status" className="p-6">Opening reader...</p>}><ReaderPage /></React.Suspense></ProtectedRoute>} />
+          <Route path="/ebooks/items/:itemId/read/:fileId" element={<ProtectedRoute><LegacyBookRedirect reader /></ProtectedRoute>} />
           <Route
             path="/"
             element={

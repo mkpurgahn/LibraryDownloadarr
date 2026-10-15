@@ -149,8 +149,9 @@ test('oversized_pdf_retains_download_but_allocates_no_worker', async ({ page, ap
   expect(contents).toEqual([]);
   await expect(page.getByTestId('pdf-reader')).toHaveCount(0);
   await page.getByRole('link', { name: 'Back to Books' }).click();
+  await page.goto(`${app.origin}/audiobooks`);
   await page.getByRole('link', { name: 'Open One Hundred and One Tracks', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Read', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Read', exact: true })).toHaveCount(0);
   await expect(page.getByText('This original exceeds the in-app reader size limit; download it below.')).toHaveCount(0);
 });
 

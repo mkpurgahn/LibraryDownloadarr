@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { test, expect, capture, signIn } from './harness';
 import type { Library, MediaItem } from '../../src/types';
 
@@ -91,6 +91,84 @@ test('matched_library_home_capture', async ({ page, app }, info) => {
   expect(observations.errors).toEqual([]);
 });
 
+test('library_icons_match_book_and_book_with_waves_across_home_and_navigation', async ({ page, app }, info) => {
+  await plexFixture(page);
+  await home(page, app);
+  const expected = {
+    Books: '<path d="M6 3h14v18H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z" stroke-linecap="round" stroke-linejoin="round"></path><path d="M3 18a3 3 0 0 1 3-3h14M9 3v7l2-1 2 1V3" stroke-linecap="round" stroke-linejoin="round"></path>',
+    Audiobooks: '<path d="M5 3h8v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke-linecap="round" stroke-linejoin="round"></path><path d="M3 19a2 2 0 0 1 2-2h8M6 3v14M16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14" stroke-linecap="round" stroke-linejoin="round"></path>',
+    Movies: '<rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M7 5v14M17 5v14M3 9h4m10 0h4M3 15h4m10 0h4"></path>',
+    Shows: '<rect x="3" y="6" width="18" height="14" rx="2"></rect><path d="m8 3 4 3 4-3" stroke-linecap="round" stroke-linejoin="round"></path>',
+    Music: '<path d="M9 18V6l10-2v12" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="6" cy="18" r="3"></circle><circle cx="16" cy="16" r="3"></circle>',
+    Photos: '<path d="M3 6h7l2 2h9v11H3z" stroke-linecap="round" stroke-linejoin="round"></path>',
+    Logs: '<path d="M6 3h9l3 3v15H6z" stroke-linecap="round" stroke-linejoin="round"></path><path d="M15 3v4h4M9 12h6M9 16h6" stroke-linecap="round"></path>',
+  };
+  const observations: Array<{ state: string; label: keyof typeof expected; shape: string }> = [];
+  const inspect = async (target: Locator, label: keyof typeof expected, state: string) => {
+    const svg = target.locator('svg');
+    await expect(svg).toHaveAttribute('aria-hidden', 'true');
+    const rendered = await svg.evaluate(element => {
+      const box = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return { width: box.width, height: box.height, stroke: style.stroke, color: style.color,
+        fill: style.fill, strokeWidth: style.strokeWidth, shape: element.innerHTML };
+    });
+    expect(rendered).toMatchObject({ width: 20, height: 20, fill: 'none', strokeWidth: '2px' });
+    expect(rendered.stroke).toBe(rendered.color);
+    observations.push({ state, label, shape: rendered.shape });
+    if (label === 'Books' || label === 'Audiobooks') await svg.screenshot({ path: info.outputPath(`${state}-${label}-20px.png`) });
+  };
+  const homeLibraries = page.locator('main').getByRole('region', { name: 'Libraries', exact: true });
+  for (const label of ['Audiobooks', 'Books', 'Movies', 'Shows'] as const) {
+    await inspect(homeLibraries.getByRole('link', { name: label, exact: true }), label, 'home');
+  }
+  await homeLibraries.screenshot({ path: info.outputPath('icons-home.png') });
+  let navigation = await openNavigation(page);
+  const group = navigation.getByRole('region', { name: 'Libraries', exact: true });
+  for (const label of ['Audiobooks', 'Books', 'Movies', 'Shows'] as const) {
+    await inspect(group.getByRole('button', { name: label, exact: true }), label, 'normal');
+  }
+  await inspect(navigation.getByRole('button', { name: 'Logs', exact: true }), 'Logs', 'normal');
+  await group.screenshot({ path: info.outputPath('icons-sidebar-normal.png') });
+  for (const label of ['Books', 'Audiobooks'] as const) {
+    await navigation.getByRole('button', { name: label, exact: true }).click();
+    await expect(page).toHaveURL(`${app.origin}/${label.toLowerCase()}`);
+    await expect(page.getByRole('heading', { name: label, exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Open A Tale in Two Formats', exact: true })).toBeVisible();
+    navigation = await openNavigation(page);
+    await expect(navigation.getByRole('button', { name: label, exact: true })).toHaveAttribute('aria-current', 'page');
+    for (const name of ['Books', 'Audiobooks'] as const) {
+      await inspect(navigation.getByRole('button', { name: name, exact: true }), name, `selected-${label}`);
+    }
+    await navigation.getByRole('region', { name: 'Libraries', exact: true })
+      .screenshot({ path: info.outputPath(`icons-sidebar-selected-${label}.png`) });
+  }
+  await page.route('**/api/libraries', route => route.fulfill({ json: { libraries: [
+    ...libraries, { key: 'music', title: 'Music', type: 'artist' },
+    { key: 'photos', title: 'Photos', type: 'photo' },
+    { key: 'custom-tv', title: 'Weekend TV Shows', type: 'show' },
+  ] } }));
+  await home(page, app);
+  await expect(homeLibraries.getByRole('link', { name: 'Weekend TV Shows', exact: true }))
+    .toHaveAttribute('href', '/library/custom-tv');
+  for (const label of ['Music', 'Photos'] as const) {
+    await inspect(homeLibraries.getByRole('link', { name: label, exact: true }), label, 'custom-home');
+  }
+  await inspect(homeLibraries.getByRole('link', { name: 'Weekend TV Shows', exact: true }), 'Shows', 'custom-home');
+  navigation = await openNavigation(page);
+  for (const label of ['Music', 'Photos'] as const) {
+    await inspect(navigation.getByRole('button', { name: label, exact: true }), label, 'custom-sidebar');
+  }
+  await inspect(navigation.getByRole('button', { name: 'Weekend TV Shows', exact: true }), 'Shows', 'custom-sidebar');
+  await fs.writeFile(info.outputPath('icon-contract.json'), JSON.stringify({
+    inputs: 'Owned synthetic library-interface-v1; real protected Books catalog and routes',
+    requestedBooks: 'recognizable book, not headphones/music', requestedAudiobooks: 'book with outward sound waves',
+    appearance: 'User-directed pairing; rendered appearance not yet human approved',
+    geometry: '20x20,currentColor,stroke2,decorative', observations,
+  }, null, 2));
+  for (const observed of observations) expect(observed.shape, `${observed.state}: ${observed.label}`).toBe(expected[observed.label]);
+});
+
 test('books_belongs_to_libraries_and_home_destinations_are_real', async ({ page, app }, info) => {
   const observations = await plexFixture(page);
   await home(page, app);
@@ -98,13 +176,13 @@ test('books_belongs_to_libraries_and_home_destinations_are_real', async ({ page,
   await expect(destinations.getByRole('link', { name: 'Movies', exact: true })).toHaveAttribute('href', '/library/fixture-movies');
   await expect(destinations.getByRole('link', { name: 'Shows', exact: true })).toHaveAttribute('href', '/library/fixture-tv');
   await expect(destinations.getByRole('link', { name: 'Books', exact: true })).toHaveAttribute('href', '/books');
-  await expect(destinations.getByRole('link', { name: 'Ebooks', exact: true })).toHaveAttribute('href', '/ebooks');
-  await expect(destinations.getByRole('link')).toHaveText(['Books→', 'Ebooks→', 'Movies→', 'Shows→']);
+  await expect(destinations.getByRole('link', { name: 'Audiobooks', exact: true })).toHaveAttribute('href', '/audiobooks');
+  await expect(destinations.getByRole('link')).toHaveText(['Audiobooks→', 'Books→', 'Movies→', 'Shows→']);
   expect(observations.requests.filter(value => value === 'GET /api/libraries')).toHaveLength(1);
   expect(observations.requests.filter(value => value === 'GET /api/books/libraries')).toHaveLength(1);
   const navigation = await openNavigation(page);
   const group = navigation.getByRole('region', { name: 'Libraries', exact: true });
-  await expect(group.getByRole('button')).toHaveText(['Books', 'Ebooks', 'Movies', 'Shows']);
+  await expect(group.getByRole('button')).toHaveText(['Audiobooks', 'Books', 'Movies', 'Shows']);
   await expect(group.getByRole('button', { name: 'Books', exact: true })).toHaveCount(1);
   await expect(navigation.getByRole('button', { name: 'Books', exact: true })).toHaveCount(1);
   await group.getByRole('button', { name: 'Books', exact: true }).click();
@@ -145,7 +223,7 @@ test('books_configuration_change_discards_pending_navigation_without_refetching_
     release();
     const navigation = await openNavigation(page);
     await expect(navigation.getByRole('button', { name: 'Books', exact: true })).toHaveCount(0);
-    await expect(navigation.getByRole('button', { name: 'Ebooks', exact: true })).toHaveCount(0);
+    await expect(navigation.getByRole('button', { name: 'Audiobooks', exact: true })).toHaveCount(0);
     await expect(navigation.getByRole('button', { name: 'Movies', exact: true })).toBeVisible();
     expect(observations.requests.filter(value => value === 'GET /api/libraries')).toHaveLength(1);
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
@@ -161,11 +239,11 @@ test('alphabetical_navigation_preserves_custom_plex_names_and_permission_filtere
   ] } }));
   await home(page, app, false);
   const homeLibraries = page.locator('main').getByRole('region', { name: 'Libraries', exact: true });
-  await expect(homeLibraries.getByRole('link')).toHaveText(['Archive→', 'Books→', 'Ebooks→', 'Movies→', 'Music→', 'Shows→', 'Weekend TV Shows→']);
+  await expect(homeLibraries.getByRole('link')).toHaveText(['Archive→', 'Audiobooks→', 'Books→', 'Movies→', 'Music→', 'Shows→', 'Weekend TV Shows→']);
   await expect(homeLibraries.getByRole('link', { name: 'Weekend TV Shows', exact: true })).toHaveAttribute('href', '/library/custom-tv');
   const navigation = await openNavigation(page);
   await expect(navigation.getByRole('region', { name: 'Libraries', exact: true }).getByRole('button'))
-    .toHaveText(['Archive', 'Books', 'Ebooks', 'Movies', 'Music', 'Shows', 'Weekend TV Shows']);
+    .toHaveText(['Archive', 'Audiobooks', 'Books', 'Movies', 'Music', 'Shows', 'Weekend TV Shows']);
   await expect(navigation.getByRole('region', { name: 'Management', exact: true })).toHaveCount(0);
 });
 
@@ -226,7 +304,7 @@ for (const state of ['empty', 'disabled', 'denied', 'outage'] as const) {
     await expect(destinations.getByRole('link', { name: 'Shows', exact: true })).toBeVisible();
     const navigation = await openNavigation(page);
     await expect(navigation.getByRole('button', { name: 'Books', exact: true })).toHaveCount(state === 'outage' ? 1 : 0);
-    await expect(navigation.getByRole('button', { name: 'Ebooks', exact: true })).toHaveCount(state === 'outage' ? 1 : 0);
+    await expect(navigation.getByRole('button', { name: 'Audiobooks', exact: true })).toHaveCount(state === 'outage' ? 1 : 0);
     await navigation.getByRole('button', { name: 'Shows', exact: true }).click();
     await expect(page).toHaveURL(`${app.origin}/library/fixture-tv`);
   });

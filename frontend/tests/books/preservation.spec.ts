@@ -59,6 +59,7 @@ test.describe('durable reader lifecycle', () => {
       'Positive active-audio revocation is covered on Linux WebKit; Windows codec fallback is tested separately.');
     await app.setAudio('m4b');
     await signIn(page, app, 2);
+    await page.goto(`${app.origin}/audiobooks`);
     await page.getByTestId('books-audio').evaluate(element => { if (element instanceof HTMLMediaElement) element.volume = 0; });
     await page.getByRole('link', { name: 'A Tale in Two Formats' }).click();
     await page.getByRole('button', { name: 'Listen', exact: true }).click();
