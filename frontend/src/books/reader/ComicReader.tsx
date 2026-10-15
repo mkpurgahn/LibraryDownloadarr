@@ -16,7 +16,6 @@ export const ComicReader: React.FC<{
   const [jump, setJump] = useState(String(initial.page));
   const [fit, setFit] = useState<Fit>('page');
   const [zoom, setZoom] = useState(100);
-  const [rtl, setRtl] = useState(true);
   const [options, setOptions] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -186,7 +185,7 @@ export const ComicReader: React.FC<{
         image.current = decoded;
         slot.current!.replaceChildren(decoded);
         if (anchor.current.page !== page) anchor.current = {
-          kind: 'cbz', page, offset: 0, horizontal: rtl ? 1 : 0, policyVersion: descriptor.policyVersion,
+          kind: 'cbz', page, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion,
         };
         progress.location = anchor.current;
         setResource(entry);
@@ -227,9 +226,10 @@ export const ComicReader: React.FC<{
     cancelGesture();
     position(); save(); setLoading(true); setPage(next);
   };
+  const turn = (delta: -1 | 1) => go((page - 1 + delta + total) % total + 1);
   const key = (event: React.KeyboardEvent) => {
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-      event.preventDefault(); go(page + ((event.key === 'ArrowLeft') === rtl ? 1 : -1));
+      event.preventDefault(); turn(event.key === 'ArrowRight' ? 1 : -1);
     } else if (event.key === 'Home' || event.key === 'End') {
       event.preventDefault(); go(event.key === 'Home' ? 1 : total);
     }
@@ -261,9 +261,7 @@ export const ComicReader: React.FC<{
   };
   const pointerMove = (event: React.PointerEvent) => {
     const side = edgeAt(event.clientX, event.clientY);
-    const forward = (side === 'left') === rtl;
-    if (image.current) image.current.style.cursor = side && !loading && !blocked.current &&
-      !(forward ? page === total : page === 1) ? 'pointer' : 'default';
+    if (image.current) image.current.style.cursor = side && !loading && !blocked.current && total > 1 ? 'pointer' : 'default';
     const start = pointer.current;
     if (start && (event.pointerId !== start.id || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8)) {
       pointer.current = undefined;
@@ -280,15 +278,15 @@ export const ComicReader: React.FC<{
     const start = pointer.current; pointer.current = undefined;
     if (!start?.ready || start.page !== page || start.image !== image.current || event.target !== image.current ||
         event.detail === 0 || hasSelection() || edgeAt(event.clientX, event.clientY) !== start.side) return;
-    go(page + ((start.side === 'left') === rtl ? 1 : -1));
+    turn(start.side === 'right' ? 1 : -1);
   };
   const pageButton = (side: 'left' | 'right') => {
-    const forward = (side === 'left') === rtl;
-    const disabled = loading || blocked.current || (forward ? page === total : page === 1);
+    const forward = side === 'right';
+    const disabled = loading || blocked.current || total === 1;
     return <button type="button" aria-label={forward ? 'Next page' : 'Previous page'}
       title={forward ? 'Next page' : 'Previous page'} disabled={disabled}
       className={`${forward ? 'btn-primary' : 'btn-secondary'} flex h-11 w-11 shrink-0 items-center justify-center p-0 disabled:cursor-not-allowed disabled:opacity-40`}
-      onClick={() => go(page + (forward ? 1 : -1))}>
+      onClick={() => turn(forward ? 1 : -1)}>
       <svg viewBox="0 0 24 24" aria-hidden="true" className={`h-5 w-5 fill-none stroke-current stroke-2 ${side === 'right' ? 'rotate-180' : ''}`}>
         <path d="m14 6-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
@@ -317,7 +315,7 @@ export const ComicReader: React.FC<{
         className="min-h-11 min-w-11 shrink-0 rounded-lg px-2 text-sm text-gray-300 hover:bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300"
         onClick={() => { position(); setOptions(value => !value); }}>View</button>
     </div>
-    {options && <div id="comic-view-options" role="region" aria-label="Reading options" className="grid grid-cols-3 items-end gap-2 text-sm">
+    {options && <div id="comic-view-options" role="region" aria-label="Reading options" className="grid grid-cols-2 items-end gap-2 text-sm">
       <label className="min-w-0">Page fit
         <select className="input mt-1 min-h-11 px-2" style={{ colorScheme: 'dark' }} value={fit}
           onChange={event => { position(); setFit(event.target.value as Fit); }}>
@@ -330,16 +328,9 @@ export const ComicReader: React.FC<{
           {[50, 75, 100, 125, 150, 200, 300].map(value => <option key={value} value={value}>{value}%</option>)}
         </select>
       </label>
-      <label className="min-w-0">Reading direction
-        <select className="input mt-1 min-h-11 px-2" style={{ colorScheme: 'dark' }} value={rtl ? 'rtl' : 'ltr'}
-          onChange={event => setRtl(event.target.value === 'rtl')}>
-          <option value="rtl">Right to left</option><option value="ltr">Left to right</option>
-        </select>
-      </label>
     </div>}
     <p id="comic-navigation-help" className="text-xs text-gray-400">
-      {total === 1 ? 'This original has one page.' : page === total ? `End of this original. Tap the ${rtl ? 'right' : 'left'} edge to go back.` :
-        `Tap the ${rtl ? 'left' : 'right'} page edge for next, ${rtl ? 'right' : 'left'} for previous.`}
+      {total === 1 ? 'This original has one page.' : 'Left: previous. Right: next. First and last pages connect within this original.'}
     </p>
     {error && <p role="alert" className="rounded bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
     <div ref={viewport} role="region" aria-label="Comic page" aria-busy={loading} tabIndex={0}
@@ -369,7 +360,7 @@ export const ComicReader: React.FC<{
         const dx = end.clientX - start.x; const dy = end.clientY - start.y;
         if (Math.hypot(dx, dy) > 8) pointer.current = undefined;
         if (element.scrollWidth > element.clientWidth + 1 || hasSelection()) return;
-        if (Math.abs(dx) > 60 && Math.abs(dy) < 40) go(page + ((dx > 0) === rtl ? 1 : -1));
+        if (Math.abs(dx) > 60 && Math.abs(dy) < 40) turn(dx < 0 ? 1 : -1);
       }}>
       {loading && <p role="status" className="p-4 text-sm text-gray-300">Loading page {page} of {total}...</p>}
       <div ref={slot} className="mx-auto w-fit" />

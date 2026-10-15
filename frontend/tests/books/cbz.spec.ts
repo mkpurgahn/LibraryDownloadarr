@@ -15,8 +15,8 @@ async function openComic(page: Page) {
   await expect(page.getByLabel('Ebook original').locator('option')).toHaveCount(2);
 }
 
-async function expectPanel(page: Page, position: number, panel: number, chapter = 1) {
-  const image = page.getByRole('img', { name: `Comic page ${position} of 3`, exact: true });
+async function expectPanel(page: Page, position: number, panel: number, chapter = 1, total = 3) {
+  const image = page.getByRole('img', { name: `Comic page ${position} of ${total}`, exact: true });
   await expect(image).toBeVisible();
   await expect(page.getByRole('region', { name: 'Comic page', exact: true })).toHaveAttribute('aria-busy', 'false');
   const { comicPanel } = await import('../../../backend/dist/books/proof/cbzFixture.js');
@@ -60,14 +60,7 @@ async function setViewOption(page: Page, label: 'Page fit' | 'Zoom', value: stri
   await options.click();
 }
 
-async function setComicDirection(page: Page, direction: 'rtl' | 'ltr') {
-  const options = page.getByRole('button', { name: 'View options', exact: true });
-  if (await options.getAttribute('aria-expanded') === 'false') await options.click();
-  await page.getByRole('combobox', { name: 'Reading direction', exact: true }).selectOption(direction);
-  await options.click();
-}
-
-test('CBZ reading direction choice is explicit and preserves page and bookmark', async ({ page, app }, info) => {
+test('CBZ View has only fit and zoom and preserves page and bookmark', async ({ page, app }, info) => {
   await signIn(page, app);
   await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
@@ -78,10 +71,9 @@ test('CBZ reading direction choice is explicit and preserves page and bookmark',
   await expect(next).toBeEnabled();
   await expect.poll(() => next.evaluate(element => getComputedStyle(element).opacity)).toBe('1');
   await view.click();
-  await capture(page, 'cbz-direction-view-rtl', info);
-  const direction = page.getByRole('combobox', { name: 'Reading direction', exact: true });
-  await expect(direction).toHaveValue('rtl');
-  await expect(direction.locator('option')).toHaveText(['Right to left', 'Left to right']);
+  await capture(page, 'cbz-loop-view', info);
+  await expect(page.getByRole('combobox', { name: 'Reading direction', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Reading options', exact: true }).getByRole('combobox')).toHaveCount(2);
   const initialSize = page.viewportSize()!;
   const geometry: object[] = [];
   for (const width of [320, initialSize.width]) {
@@ -97,14 +89,11 @@ test('CBZ reading direction choice is explicit and preserves page and bookmark',
     expect((await page.getByRole('region', { name: 'Comic page', exact: true }).boundingBox())!.height).toBeGreaterThan(300);
     geometry.push({ width, controlsContained: true, minimumControlHeight: 44, documentOverflow: false });
   }
-  await direction.selectOption('ltr');
-  await expect(direction).toHaveValue('ltr');
-  await expect(page.getByText('Tap the right page edge for next, left for previous.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Left: previous. Right: next. First and last pages connect within this original.', { exact: true })).toBeVisible();
   expect((await next.boundingBox())!.x).toBeGreaterThan((await previous.boundingBox())!.x);
   await expectPanel(page, 1, 1);
   expect(await savedComicPage(page)).toBe(1);
   await expect.poll(() => next.evaluate(element => getComputedStyle(element).opacity)).toBe('1');
-  await capture(page, 'cbz-direction-view-ltr', info);
   await view.click();
   await setViewOption(page, 'Zoom', '300');
   const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
@@ -113,9 +102,8 @@ test('CBZ reading direction choice is explicit and preserves page and bookmark',
     element.scrollLeft = (element.scrollWidth - element.clientWidth) * 0.6;
   });
   await view.click();
-  for (const mode of ['rtl', 'ltr']) {
-    await direction.selectOption(mode);
-    await expect(direction).toHaveValue(mode);
+  for (let toggle = 0; toggle < 2; toggle++) {
+    await view.click();
     await expectPanel(page, 1, 1);
     await expectFraction(viewport, 'vertical', 0.6);
     await expectFraction(viewport, 'horizontal', 0.6);
@@ -129,18 +117,17 @@ test('CBZ reading direction choice is explicit and preserves page and bookmark',
   await expectFraction(viewport, 'vertical', 0.6);
   await expectFraction(viewport, 'horizontal', 0.6);
   await setViewOption(page, 'Page fit', 'page');
-  await setComicDirection(page, 'ltr');
   const edge = await pageEdge(page, 'right');
   await page.mouse.click(edge.x, edge.y);
   await expectPanel(page, 2, 2);
   expect(await savedComicPage(page)).toBe(2);
-  await setComicDirection(page, 'rtl');
-  expect((await next.boundingBox())!.x).toBeLessThan((await previous.boundingBox())!.x);
+  await view.click();
+  expect((await next.boundingBox())!.x).toBeGreaterThan((await previous.boundingBox())!.x);
   await expectPanel(page, 2, 2);
   expect(await savedComicPage(page)).toBe(2);
-  await fs.writeFile(info.outputPath('direction-choice.json'), JSON.stringify({
-    default: 'rtl', explicitChoices: ['rtl', 'ltr'], directionChangesPreservedPageAndBothFractions: true,
-    savedReopenFractions: { vertical: 0.6, horizontal: 0.6 }, chosenLtrRightEdgeSavedPage: 2, geometry,
+  await fs.writeFile(info.outputPath('loop-view.json'), JSON.stringify({
+    directionControlAbsent: true, viewPreservedPageAndBothFractions: true,
+    savedReopenFractions: { vertical: 0.6, horizontal: 0.6 }, rightEdgeSavedPage: 2, geometry,
   }, null, 2));
 });
 
@@ -169,20 +156,119 @@ async function savedComicPage(page: Page) {
   return (await (await saved).json()).progress.locator.page as number;
 }
 
-test('CBZ explicit Next button advances one actual decoded page and respects the end', async ({ page, app }) => {
+async function swipeComic(page: Page, session: CDPSession | undefined, forward: boolean) {
+  const image = page.getByRole('img', { name: /Comic page/ });
+  const start = { ...await pageEdge(page, forward ? 'right' : 'left'), id: 61 };
+  const end = { ...await pageEdge(page, forward ? 'left' : 'right'), id: 61 };
+  await comicTouch(session, image, 'touchStart', [start], [start]);
+  for (let step = 1; step <= 5; step++) {
+    const moved = { ...start, x: start.x + (end.x - start.x) * step / 5 };
+    await comicTouch(session, image, 'touchMove', [moved], [moved]);
+  }
+  await comicTouch(session, image, 'touchEnd', [], [end]);
+}
+
+test.describe('circular comic navigation', () => {
+  test.use({ hasTouch: true });
+  for (const input of ['button', 'mouse edge', 'touch edge', 'keyboard', 'swipe'] as const) {
+    for (const firstWrap of ['backward', 'forward'] as const) {
+      test(`CBZ circular ${input} wraps ${firstWrap} then cycles within the selected original`, async ({ page, app, browserName }, info) => {
+        await signIn(page, app);
+        await openComic(page);
+        await page.getByRole('link', { name: 'Read', exact: true }).click();
+        await expectPanel(page, 1, 1);
+        const readerUrl = page.url();
+        if (firstWrap === 'forward') {
+          await page.getByLabel('Page number', { exact: true }).fill('3');
+          await page.getByRole('button', { name: 'Go to page', exact: true }).click();
+          await expectPanel(page, 3, 10);
+        }
+        const session = input === 'swipe' && browserName === 'chromium' ? await page.context().newCDPSession(page) : undefined;
+        const sequence = firstWrap === 'backward'
+          ? [[false, 3], [true, 1], [true, 2], [true, 3], [true, 1], [false, 3], [false, 2], [false, 1], [false, 3]] as const
+          : [[true, 1], [false, 3], [false, 2], [false, 1], [false, 3], [true, 1], [true, 2], [true, 3], [true, 1]] as const;
+        const observations: object[] = [];
+        try {
+          for (const [forward, expected] of sequence) {
+            if (input === 'button') await page.getByRole('button', { name: forward ? 'Next page' : 'Previous page', exact: true }).click({ timeout: 2000 });
+            else if (input === 'keyboard') {
+              await page.getByRole('region', { name: 'Comic page', exact: true }).focus();
+              await page.keyboard.press(forward ? 'ArrowRight' : 'ArrowLeft');
+            } else if (input === 'swipe') await swipeComic(page, session, forward);
+            else {
+              const edge = await pageEdge(page, forward ? 'right' : 'left');
+              if (input === 'touch edge') await page.touchscreen.tap(edge.x, edge.y);
+              else await page.mouse.click(edge.x, edge.y);
+            }
+            await expectPanel(page, expected, expected === 3 ? 10 : expected);
+            expect(await savedComicPage(page)).toBe(expected);
+            await expect(page.getByLabel('Page number', { exact: true })).toHaveValue(String(expected));
+            await expect(page).toHaveURL(readerUrl);
+            await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled();
+            await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeEnabled();
+            observations.push({ action: forward ? 'next' : 'previous', decodedAndSavedPage: expected });
+          }
+          const expected = firstWrap === 'backward' ? 3 : 1;
+          await capture(page, `cbz-loop-${firstWrap}-${input.replace(/ /g, '-')}`, info);
+          await page.getByRole('link', { name: 'Back to book' }).click();
+          await page.getByRole('link', { name: 'Read', exact: true }).click();
+          await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+          await expectPanel(page, expected, expected === 3 ? 10 : expected);
+          await fs.writeFile(info.outputPath('circular-navigation.json'), JSON.stringify({
+            input, firstWrap, observations, resumedPage: expected, sameOriginal: true,
+            swipe: input === 'swipe' ? (session ? 'trusted native Chromium CDP' : 'synthetic TouchEvent handler') : null,
+          }, null, 2));
+        } finally { await session?.detach(); }
+      });
+    }
+  }
+
+  test('CBZ one-page original stays on its only decoded and saved page', async ({ page, app, browserName }, info) => {
+    await app.setCbz('single');
+    await signIn(page, app);
+    await openComic(page);
+    await page.getByRole('link', { name: 'Read', exact: true }).click();
+    await expectPanel(page, 1, 1, 1, 1);
+    await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeDisabled();
+    await expect(page.getByText('This original has one page.', { exact: true })).toBeVisible();
+    const session = browserName === 'chromium' ? await page.context().newCDPSession(page) : undefined;
+    try {
+      for (const forward of [false, true]) {
+        const edge = await pageEdge(page, forward ? 'right' : 'left');
+        await page.mouse.click(edge.x, edge.y);
+        await page.touchscreen.tap(edge.x, edge.y);
+        await page.getByRole('region', { name: 'Comic page', exact: true }).focus();
+        await page.keyboard.press(forward ? 'ArrowRight' : 'ArrowLeft');
+        await swipeComic(page, session, forward);
+        await expectPanel(page, 1, 1, 1, 1);
+        expect(await savedComicPage(page)).toBe(1);
+      }
+      await capture(page, 'cbz-one-page', info);
+    } finally { await session?.detach(); }
+  });
+});
+
+test('CBZ direct page jumps stay literal and reject invalid values instead of wrapping', async ({ page, app }) => {
   await signIn(page, app);
   await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expectPanel(page, 1, 1);
-  const next = page.getByRole('button', { name: 'Next page', exact: true });
-  await next.click();
+  const jump = page.getByLabel('Page number', { exact: true });
+  const submit = page.getByRole('button', { name: 'Go to page', exact: true });
+  await jump.fill('2'); await submit.click();
   await expectPanel(page, 2, 2);
-  await expect(page.getByLabel('Page number', { exact: true })).toHaveValue('2');
-  await next.click();
-  await expectPanel(page, 3, 10);
-  await expect(next).toBeDisabled();
-  await page.getByRole('button', { name: 'Previous page', exact: true }).click();
-  await expectPanel(page, 2, 2);
+  for (const invalid of ['0', '4', '1.5', '']) {
+    await jump.fill(invalid); await submit.click();
+    await expectPanel(page, 2, 2);
+    // Also exercise the application guard independently of native input validation.
+    await jump.locator('..').dispatchEvent('submit');
+    await expect(page.getByRole('alert')).toHaveText('Choose a page from 1 to 3.');
+    expect(await savedComicPage(page)).toBe(2);
+  }
+  await jump.fill('3'); await submit.click(); await expectPanel(page, 3, 10);
+  await jump.fill('1'); await submit.click(); await expectPanel(page, 1, 1);
+  expect(await savedComicPage(page)).toBe(1);
 });
 
 test.describe('visible page-edge navigation', () => {
@@ -257,13 +343,13 @@ test.describe('visible page-edge navigation', () => {
           expect.soft(savedPage).toBe(1);
           await expectPanel(page, 1, 1);
         }
-        const edge = await pageEdge(page, 'left');
+        const edge = await pageEdge(page, 'right');
         await page.touchscreen.tap(edge.x, edge.y);
         await expectPanel(page, 2, 2);
         const tapSaved = await savedComicPage(page);
         expect(tapSaved).toBe(2);
-        const a = { ...await pageEdge(page, 'left'), id: 33 };
-        const end = await pageEdge(page, 'right');
+        const a = { ...await pageEdge(page, 'right'), id: 33 };
+        const end = await pageEdge(page, 'left');
         await comicTouch(session, image, 'touchStart', [a], [a]);
         for (let step = 1; step <= 5; step++) {
           const moved = { ...a, x: a.x + (end.x - a.x) * step / 5 };
@@ -297,7 +383,7 @@ test.describe('visible page-edge navigation', () => {
       await comicTouch(undefined, image, 'touchEnd', [], [end]);
       expect(await savedComicPage(page)).toBe(1);
       await expectPanel(page, 1, 1);
-      const edge = await pageEdge(page, 'left');
+      const edge = await pageEdge(page, 'right');
       await page.touchscreen.tap(edge.x, edge.y);
       await expectPanel(page, 2, 2);
       expect(await savedComicPage(page)).toBe(2);
@@ -320,7 +406,8 @@ test.describe('visible page-edge navigation', () => {
     await comicTouch(undefined, image, 'touchEnd', [], [unrelated]);
     expect(await savedComicPage(page)).toBe(1);
     await expectPanel(page, 1, 1);
-    await page.touchscreen.tap(a.x, a.y);
+    const edge = await pageEdge(page, 'right');
+    await page.touchscreen.tap(edge.x, edge.y);
     await expectPanel(page, 2, 2);
     expect(await savedComicPage(page)).toBe(2);
   });
@@ -332,8 +419,8 @@ test.describe('visible page-edge navigation', () => {
     await expectPanel(page, 1, 1);
     const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
     const session = browserName === 'chromium' ? await page.context().newCDPSession(page) : undefined;
-    const start = await pageEdge(page, 'left');
-    const end = await pageEdge(page, 'right');
+    const start = await pageEdge(page, 'right');
+    const end = await pageEdge(page, 'left');
     const swipe = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
       if (session) {
         await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...from, id: 0 }] });
@@ -349,7 +436,7 @@ test.describe('visible page-edge navigation', () => {
     try {
       await swipe(start, end);
       await expectPanel(page, 2, 2);
-      const nextEdge = await pageEdge(page, 'left');
+      const nextEdge = await pageEdge(page, 'right');
       await page.getByRole('img', { name: /Comic page/ }).dispatchEvent('click',
         { detail: 1, button: 0, clientX: nextEdge.x, clientY: nextEdge.y });
       await expectPanel(page, 2, 2);
@@ -390,26 +477,27 @@ test.describe('visible page-edge navigation', () => {
       if (page.viewportSize()!.width >= 1000) {
         expect((await image.boundingBox())!.width).toBeLessThan((await viewport.boundingBox())!.width * 0.65);
       }
-      const edge = await pageEdge(page, 'left');
+      const edge = await pageEdge(page, 'right');
       if (input === 'touch') await page.touchscreen.tap(edge.x, edge.y);
       else await page.mouse.click(edge.x, edge.y);
       await expectPanel(page, 2, 2);
       await expect(page.getByLabel('Page number', { exact: true })).toHaveValue('2');
-      await setComicDirection(page, 'ltr');
       const forward = await pageEdge(page, 'right');
       if (input === 'touch') await page.touchscreen.tap(forward.x, forward.y);
       else await page.mouse.click(forward.x, forward.y);
       await expectPanel(page, 3, 10);
-      await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeDisabled();
-      await expect(page.getByText('End of this original.', { exact: false })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled();
       if (input === 'touch') await page.touchscreen.tap(forward.x, forward.y);
       else await page.mouse.click(forward.x, forward.y);
-      await expectPanel(page, 3, 10);
+      await expectPanel(page, 1, 1);
       const back = await pageEdge(page, 'left');
       if (input === 'touch') await page.touchscreen.tap(back.x, back.y);
       else await page.mouse.click(back.x, back.y);
+      await expectPanel(page, 3, 10);
+      if (input === 'touch') await page.touchscreen.tap(back.x, back.y);
+      else await page.mouse.click(back.x, back.y);
       await expectPanel(page, 2, 2);
-      await capture(page, `cbz-${input}-edge-LTR-page-2`, info);
+      await capture(page, `cbz-${input}-edge-page-2`, info);
       await page.getByRole('link', { name: 'Back to book' }).click();
       await page.getByRole('link', { name: 'Read', exact: true }).click();
       await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
@@ -466,7 +554,7 @@ test('CBZ edge activation ignores center margins drag scroll selection and long 
   await expect.poll(() => viewport.evaluate(element => element.scrollTop)).toBeCloseTo(scrollTop + 200, 0);
   await page.mouse.up();
   await expectPanel(page, 1, 1);
-  const cleanEdge = await pageEdge(page, 'left');
+  const cleanEdge = await pageEdge(page, 'right');
   await page.mouse.click(cleanEdge.x, cleanEdge.y);
   await expectPanel(page, 2, 2);
 });
@@ -474,7 +562,7 @@ test('CBZ edge activation ignores center margins drag scroll selection and long 
 test.describe('actual-clock page selection', () => {
   test.use({ controlledReaderClock: false });
   test('CBZ Next and edge remain selected through delayed real saves resources and autosave', async ({ page, app }, info) => {
-    test.setTimeout(65000);
+    test.setTimeout(115000);
     await signIn(page, app);
     await openComic(page);
     const prepared = page.waitForResponse(response => response.request().method() === 'POST' &&
@@ -487,7 +575,7 @@ test.describe('actual-clock page selection', () => {
     expect(descriptor.policyVersion).toBe('cbz-pages-v1');
     await expectPanel(page, 1, 1); await firstSaved;
     const observations: object[] = [];
-    for (const [from, to] of [[1, 2], [2, 1]]) {
+    for (const [from, to, action] of [[1, 2, 'next'], [2, 1, 'left'], [1, 3, 'previous'], [3, 1, 'right']] as const) {
       let heldSave: Route | undefined; let heldResource: Route | undefined;
       let saveHeld = false; let resourceHeld = false;
       await page.route('**/progress/ebook', route => {
@@ -507,19 +595,21 @@ test.describe('actual-clock page selection', () => {
       const saved = page.waitForResponse(response => response.request().method() === 'PUT' &&
         response.url().endsWith('/progress/ebook') && response.status() === 200 &&
         response.request().postDataJSON().locator.page === to);
-      if (to === 2) await page.getByRole('button', { name: 'Next page', exact: true }).click();
+      if (action === 'next' || action === 'previous') {
+        await page.getByRole('button', { name: action === 'next' ? 'Next page' : 'Previous page', exact: true }).click();
+      }
       else {
-        const edge = await pageEdge(page, 'right'); await page.mouse.click(edge.x, edge.y);
+        const edge = await pageEdge(page, action); await page.mouse.click(edge.x, edge.y);
       }
       await expect.poll(() => Boolean(heldSave && heldResource)).toBe(true);
       await expect(page.getByRole('region', { name: 'Comic page', exact: true })).toHaveAttribute('aria-busy', 'true');
       await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeDisabled();
       await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeDisabled();
       await heldResource!.continue();
-      await expectPanel(page, to, to);
+      await expectPanel(page, to, to === 3 ? 10 : to);
       await heldSave!.continue();
       expect((await (await saved).json()).progress.locator.page).toBe(to);
-      await expectPanel(page, to, to);
+      await expectPanel(page, to, to === 3 ? 10 : to);
       await page.unroute('**/progress/ebook');
       await page.unroute('**/readers/*/resources/*');
       const after = Date.now() + 8000;
@@ -527,9 +617,9 @@ test.describe('actual-clock page selection', () => {
         response.url().endsWith('/progress/ebook') && response.status() === 200 &&
         response.request().timing().startTime >= after, { timeout: 25000 });
       expect((await autosave.json()).progress.locator.page).toBe(to);
-      await expectPanel(page, to, to);
+      await expectPanel(page, to, to === 3 ? 10 : to);
       await expect(page.getByLabel('Page number', { exact: true })).toHaveValue(String(to));
-      observations.push({ action: to === 2 ? 'explicit Next' : 'actual image right edge', selectedPage: to,
+      observations.push({ action, from, selectedPage: to,
         delayedOldSaveReleasedAfterNewImage: true, realPeriodicSavePage: to });
     }
     await fs.writeFile(info.outputPath('actual-clock-turns.json'), JSON.stringify(observations, null, 2));
@@ -550,8 +640,8 @@ test('CBZ same-input detail and real numbered pages', async ({ page, app }, info
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBe(480);
   await expectPanel(page, 1, 1);
-  await expect(page.getByText('Tap the left page edge for next, right for previous.', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeDisabled();
+  await expect(page.getByText('Left: previous. Right: next. First and last pages connect within this original.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeEnabled();
   const next = page.getByRole('button', { name: 'Next page', exact: true });
   await expect(next).toBeEnabled();
   await expect.poll(() => next.evaluate(element => getComputedStyle(element).opacity)).toBe('1');
@@ -573,15 +663,14 @@ test('CBZ same-input detail and real numbered pages', async ({ page, app }, info
   }
   await fs.writeFile(info.outputPath('compact-controls-geometry.json'), JSON.stringify(geometry, null, 2));
   await page.getByRole('region', { name: 'Comic page' }).focus();
-  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('img', { name: 'Comic page 2 of 3', exact: true })).toBeVisible();
   await expectPanel(page, 2, 2);
-  await setComicDirection(page, 'ltr');
   await page.getByRole('region', { name: 'Comic page' }).focus();
   await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('img', { name: 'Comic page 3 of 3', exact: true })).toBeVisible();
   await expectPanel(page, 3, 10);
-  await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled();
   await page.getByLabel('Page number', { exact: true }).fill('1');
   await page.getByRole('button', { name: 'Go to page', exact: true }).click();
   await expect(image).toBeVisible();
@@ -672,6 +761,8 @@ test('CBZ cancels abandoned turns and releases every page URL on configuration r
   await expect(page.getByRole('img', { name: /Comic page/ })).toHaveCount(1);
   await expect.poll(() => page.evaluate(() => Reflect.get(window, 'comicObjectUrls'))).toBe(1);
   await page.evaluate(() => window.dispatchEvent(new Event('librarydownloadarr:books-changed')));
+  await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeDisabled();
   await expect(page.getByRole('img', { name: /Comic page/ })).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => Reflect.get(window, 'comicObjectUrls'))).toBe(0);
 });
@@ -817,7 +908,7 @@ test('CBZ movement in the restoration frame survives resize and page transition'
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
   await expectPanel(page, 2, 2);
   await expectFraction(viewport, 'vertical', 0);
-  await expectFraction(viewport, 'horizontal', 1);
+  await expectFraction(viewport, 'horizontal', 0);
 });
 
 test('CBZ replaced originals retain incompatible history and failed saves retry without losing a rewind', async ({ page, app }) => {
@@ -847,16 +938,15 @@ test('CBZ replaced originals retain incompatible history and failed saves retry 
 
 test.describe('touch-enabled comic reader', () => {
   test.use({ hasTouch: true });
-  test('CBZ touch turning and page bounds preserve semantic page order', async ({ page, app }) => {
+  test('CBZ touch turning and literal page jumps preserve semantic page order', async ({ page, app }) => {
   await signIn(page, app);
   await openComic(page);
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expectPanel(page, 1, 1);
   const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
-  await viewport.dispatchEvent('touchstart', { touches: [{ identifier: 0, clientX: 80, clientY: 80 }] });
-  await viewport.dispatchEvent('touchend', { changedTouches: [{ identifier: 0, clientX: 220, clientY: 80 }] });
+  await viewport.dispatchEvent('touchstart', { touches: [{ identifier: 0, clientX: 220, clientY: 80 }] });
+  await viewport.dispatchEvent('touchend', { changedTouches: [{ identifier: 0, clientX: 80, clientY: 80 }] });
   await expectPanel(page, 2, 2);
-  await setComicDirection(page, 'ltr');
   await viewport.dispatchEvent('touchstart', { touches: [{ identifier: 0, clientX: 220, clientY: 80 }] });
   await viewport.dispatchEvent('touchend', { changedTouches: [{ identifier: 0, clientX: 80, clientY: 80 }] });
   await expectPanel(page, 3, 10);

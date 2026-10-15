@@ -113,13 +113,17 @@ The center and empty margins do not turn pages. Dragging, scrolling, selections,
 and long presses do not activate the edges; a swipe never also counts as a tap.
 Multi-contact and cancelled touch gestures do not turn or save another page,
 including when a second contact starts on the heading or controls.
-**View** contains fit-page, fit-width, 50-300% manual zoom, and a labeled
-**Reading direction** selector with explicit Right to left and Left to right choices.
-Arrow keys and horizontal swipes remain available (swipes turn pages only when
-the page is not horizontally scrollable). Reading direction defaults to
-right-to-left and has an explicit left-to-right choice. Arrows and page edges
-follow that direction, not a different semantic page order. Navigation pauses
-while a page loads and never treats the end of an original as the next chapter.
+**View** contains fit-page, fit-width and 50-300% manual zoom; there is no direction
+setting. The left arrow, left image edge and Left Arrow key go to the previous
+page; the right equivalents go to the next page. Swipe left for next or right
+for previous (only when the page is not horizontally scrollable).
+Relative navigation loops within the selected original: previous on page 1
+opens its last page, and next on its last page opens page 1. A one-page original
+stays on page 1 with disabled arrows. Page jumps require a valid literal page
+number and never wrap invalid values. Pages are not mirrored or reordered.
+Navigation pauses while a page loads, never crosses to another chapter, and
+never advances automatically. A newly selected page starts at its top-left;
+resuming a saved page retains its saved position.
 The selected original's filename is
 shown in the reader; separate chapter files never borrow another file's pages
 or saved position. Vertical and horizontal within-page fractions survive zoom,

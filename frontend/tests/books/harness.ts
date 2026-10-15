@@ -29,7 +29,7 @@ type Provider = {
   libraryId: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
-  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized'): Promise<void>;
+  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized' | 'single'): Promise<void>;
   setPdf(mode: PdfFixtureMode): void;
   setAudio(mode: AudioFixtureMode): Promise<void>;
   stop(): Promise<void>;
@@ -42,7 +42,7 @@ export type BooksApp = App & {
   certificatePin: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
-  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized'): Promise<void>;
+  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized' | 'single'): Promise<void>;
   setPdf(mode: PdfFixtureMode): void;
   setAudio(mode: AudioFixtureMode): Promise<void>;
   advanceReaderTime(milliseconds: number): void;
@@ -99,7 +99,7 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false): Pro
   const setCbz: Provider['setCbz'] = async mode => {
     if (!manga) throw new Error('CBZ fixtures are not enabled');
     for (let chapter = 1; chapter <= 2; chapter++) {
-      const entries = [10, 2, 1].map(number => ({
+      const entries = (mode === 'single' ? [1] : [10, 2, 1]).map(number => ({
         name: `Pages/${number}.png`,
         data: mode === 'corrupt' && number === 2 ? Buffer.from('Damaged generated page') :
           comicPanel(mode === 'replacement' ? number + 1 : number, chapter),
