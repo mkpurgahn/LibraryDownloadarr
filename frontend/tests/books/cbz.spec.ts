@@ -861,6 +861,13 @@ test('CBZ originals keep independent private progress across handles cache and b
 });
 
 test('CBZ corrupt pages fail honestly and original bytes still download unchanged', async ({ page, app }, info) => {
+  const writes: Array<{ status: number; op: string; page: number }> = [];
+  page.on('response', response => {
+    if (response.request().method() === 'PUT' && response.url().endsWith('/progress/ebook')) {
+      const body = response.request().postDataJSON();
+      writes.push({ status: response.status(), op: body.op, page: body.locator.page });
+    }
+  });
   await app.setCbz('corrupt');
   await signIn(page, app);
   await openComic(page);
@@ -874,8 +881,25 @@ test('CBZ corrupt pages fail honestly and original bytes still download unchange
   const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
   expect(hash(await fs.readFile(downloaded!))).toBe(hash(expected));
   await page.getByRole('link', { name: 'Read', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: /CBZ.*download/i })).toBeVisible();
-  await expect(page.getByRole('img', { name: /Comic page/ })).toHaveCount(0);
+  await expect(page.getByRole('alert').filter({ hasText: /Preparation stopped.*1 of 3 pages are ready/ })).toBeVisible();
+  await expectPanel(page, 1, 1);
+  const hit = await page.getByRole('button', { name: 'Next page', exact: true }).evaluate(element => {
+    const box = element.getBoundingClientRect();
+    const target = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    return { downloadActivityAtButton: Boolean(target?.closest('[aria-label="Download activity"]')) };
+  });
+  await fs.writeFile(info.outputPath('download-activity-hit-test.json'), JSON.stringify(hit, null, 2));
+  await capture(page, 'cbz-validated-prefix-before-dismiss', info);
+  await page.getByRole('button', { name: 'Dismiss Books download', exact: true }).click();
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await expect(page.getByRole('img', { name: 'Comic page 2 of 3', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('alert').filter({ hasText: /cannot be displayed safely/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Previous page', exact: true }).click();
+  await expectPanel(page, 1, 1);
+  expect(await savedComicPage(page)).toBe(1);
+  expect(writes.every(write => write.page === 1 && write.status === 200)).toBe(true);
+  await fs.writeFile(info.outputPath('partial-progress.json'), JSON.stringify({ writes }, null, 2));
+  await capture(page, 'cbz-partial-failure-retains-validated-page', info);
 });
 
 test('CBZ cancels abandoned turns and releases every page URL on configuration revocation', async ({ page, app }) => {

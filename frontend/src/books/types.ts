@@ -156,6 +156,40 @@ export interface ComicDescriptor extends ReaderManifest {
   resources: ComicResource[];
 }
 export type ReaderDescriptor = EpubDescriptor | ComicDescriptor;
+export interface ProgressiveComicDescriptor {
+  protocol: 'cbz-progressive-v1'; policyVersion: 'cbz-pages-v1';
+  readerId: string; contentVersion: string; revision: number;
+  state: 'preparing' | 'complete' | 'failed'; mode: 'range' | 'full-download';
+  spine: string[]; resources: ComicResource[];
+  pages: Array<{ resourceId: string; state: 'pending' | 'validating' | 'ready' | 'failed' }>;
+  reason?: string;
+}
+export function parseProgressiveComic(value: unknown): ProgressiveComicDescriptor {
+  const raw = record(value);
+  if (raw.protocol !== 'cbz-progressive-v1' || raw.policyVersion !== 'cbz-pages-v1' ||
+      (raw.state !== 'preparing' && raw.state !== 'complete' && raw.state !== 'failed') ||
+      (raw.mode !== 'range' && raw.mode !== 'full-download')) throw invalidResponse();
+  const entries = list(raw.resources, COMIC_LIMITS.pages);
+  const ready = parseReader({ ...raw, state: 'preparing', spine: entries.map(e => record(e).resourceId), toc: [] });
+  if (ready.policyVersion !== 'cbz-pages-v1') throw invalidResponse();
+  const spine = list(raw.spine, COMIC_LIMITS.pages).map(id);
+  const ids = new Set(spine);
+  if (ids.size !== spine.length || spine.some(id => !/^[a-f0-9]{64}$/.test(id)) ||
+      ready.resources.some(r => !ids.has(r.resourceId)) ||
+      (raw.state === 'complete' && (!spine.length || ready.resources.length !== spine.length))) throw invalidResponse();
+  const pages = list(raw.pages, COMIC_LIMITS.pages).map((value, index): ProgressiveComicDescriptor['pages'][number] => {
+    const page = record(value);
+    if (page.resourceId !== spine[index] ||
+        (page.state !== 'pending' && page.state !== 'validating' && page.state !== 'ready' && page.state !== 'failed') ||
+        (page.state === 'ready') !== ready.resources.some(r => r.resourceId === page.resourceId)) throw invalidResponse();
+    return { resourceId: id(page.resourceId), state: page.state };
+  });
+  if (pages.length !== spine.length) throw invalidResponse();
+  return { protocol: raw.protocol, policyVersion: raw.policyVersion, readerId: ready.readerId,
+    contentVersion: ready.contentVersion, revision: integer(raw.revision), spine, resources: ready.resources, pages,
+    state: raw.state, mode: raw.mode,
+    ...(raw.reason === undefined ? {} : { reason: text(raw.reason, 500) }) };
+}
 export function parseReader(value: unknown): ReaderDescriptor {
   const raw = record(value);
   if ((raw.state !== 'preparing' && raw.state !== 'ready' && raw.state !== 'download-only') ||

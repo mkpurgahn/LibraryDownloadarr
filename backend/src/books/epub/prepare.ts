@@ -7,7 +7,7 @@ import { Worker } from 'node:worker_threads';
 import { BooksError, notFound, opaqueSegment } from '../limits';
 import {
   ArchiveFormat, ArchiveResult, CBZ_DOWNLOAD_ONLY_REASON, CBZ_POLICY, DOWNLOAD_ONLY_REASON, EPUB_LIMITS,
-  EPUB_POLICY, ReaderDescriptor, archiveCompressedLimit, cbzContentVersion, epubContentVersion,
+  EPUB_POLICY, ReaderDescriptor, UnsafeEpub, archiveCompressedLimit, cbzContentVersion, epubContentVersion,
 } from './manifest';
 import { DatabaseService } from '../../models/database';
 import { BooksCatalog } from '../catalog';
@@ -19,6 +19,9 @@ import { logger } from '../../utils/logger';
 import { ensurePlexMembership } from '../../services/membershipService';
 import { PlexService } from '../../services/plexService';
 import { config } from '../../config';
+import { ProgressiveComic } from './progressive';
+import { RangeSpool } from './rangeSpool';
+import { ProgressiveDescriptor } from './progressiveTypes';
 
 export async function runArchiveWorker(
   source: string, output: string, signal: AbortSignal,
@@ -86,11 +89,16 @@ interface CacheEntry {
   createdAt: number;
   usedAt: number;
   readers: number;
+  progressive?: {
+    job: ProgressiveComic; owner: string;
+    cancel(): Promise<void>;
+  };
 }
 interface Handle {
   principal: BooksPrincipal;
   entry?: CacheEntry;
   expiresAt: number;
+  polling?: boolean;
 }
 let preparing = false;
 const expiredReader = () => new BooksError(410, 'BOOK_READER_EXPIRED', 'Reader expired; open the book again.');
@@ -98,11 +106,13 @@ const expiredReader = () => new BooksError(410, 'BOOK_READER_EXPIRED', 'Reader e
 export class EpubPreparation {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly handles = new Map<string, Handle>();
-  private readonly active = new Set<{ principal: BooksPrincipal; controller: AbortController }>();
+  private readonly active = new Set<{ principal: BooksPrincipal; controller: AbortController; entry?: CacheEntry; closed: Promise<void> }>();
   private initialization?: Promise<void>;
   private stopped = false;
   private readonly timer: NodeJS.Timeout;
   private maintenance: Promise<void> = Promise.resolve();
+  private readonly cleanup = new Set<Promise<void>>();
+  private cleanupFailure?: unknown;
 
   constructor(
     private readonly db: DatabaseService,
@@ -114,19 +124,35 @@ export class EpubPreparation {
     db.onSessionRevoked(id => this.revokeSession(id));
     db.books.onConfigChanged(() => {
       for (const operation of this.active) operation.controller.abort();
+      for (const entry of this.cache.values()) entry.progressive?.cancel();
       this.handles.clear();
     });
     db.onBooksStopped(() => {
       this.stopped = true; clearInterval(this.timer);
       for (const operation of this.active) operation.controller.abort();
+      for (const entry of this.cache.values()) entry.progressive?.cancel();
       this.handles.clear();
+      return this.drain();
     });
     this.timer = setInterval(() => {
       void this.prune(0).catch(() => logger.error('Books reader cache maintenance failed', { code: 'EPUB_CACHE_IO' }));
     }, 60000);
     this.timer.unref();
   }
+  private track(promise: Promise<void>): void {
+    this.cleanup.add(promise);
+    void promise.then(() => this.cleanup.delete(promise), error => {
+      this.cleanup.delete(promise); this.cleanupFailure = error;
+    });
+  }
+  private async drain(): Promise<void> {
+    await Promise.all([...this.active].map(operation => operation.closed));
+    while (this.cleanup.size) await Promise.all([...this.cleanup]);
+    await this.maintenance;
+    if (this.cleanupFailure) throw this.cleanupFailure;
+  }
   revokeSession(id: string): void {
+    for (const entry of this.cache.values()) if (entry.progressive?.owner === id && entry.progressive.job.state !== 'complete') entry.progressive.cancel();
     for (const [key, handle] of this.handles) if (handle.principal.sessionId === id) this.handles.delete(key);
     for (const operation of this.active) if (operation.principal.sessionId === id) operation.controller.abort();
   }
@@ -158,6 +184,10 @@ export class EpubPreparation {
     const run = async () => {
       const now = this.now();
       for (const handle of this.handles.values()) if (handle.expiresAt <= now) handle.entry = undefined;
+      for (const entry of [...this.cache.values()]) {
+        if (entry.progressive && entry.progressive.job.state !== 'complete' &&
+            ![...this.handles.values()].some(handle => handle.entry === entry)) await entry.progressive.cancel();
+      }
       let bytes = [...this.cache.values()].reduce((sum, entry) => sum + entry.bytes, 0);
       for (const entry of [...this.cache.values()].sort((a, b) => a.usedAt - b.usedAt)) {
         const outdated = entry.createdAt + EPUB_LIMITS.cacheTtlMs <= now;
@@ -173,14 +203,18 @@ export class EpubPreparation {
     this.maintenance = result.catch(() => {});
     return result;
   }
-  private operation(principal: BooksPrincipal, signal: AbortSignal) {
+  private operation(principal: BooksPrincipal, signal: AbortSignal, entry?: CacheEntry) {
     this.session(principal);
     const controller = new AbortController();
     const abort = () => controller.abort();
-    const record = { principal, controller };
+    let finish!: () => void;
+    const closed = new Promise<void>(resolve => { finish = resolve; });
+    const record = { principal, controller, entry, closed };
     this.active.add(record);
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort();
+    const expiry = setTimeout(abort, Math.max(1, Math.min(2147483647, principal.expiresAt - this.now())));
+    expiry.unref();
     let timer: NodeJS.Timeout;
     const schedule = () => {
       timer = setTimeout(() => {
@@ -195,7 +229,8 @@ export class EpubPreparation {
     schedule();
     return {
       signal: controller.signal,
-      close: () => { clearTimeout(timer); signal.removeEventListener('abort', abort); this.active.delete(record); controller.abort(); },
+      detach: () => signal.removeEventListener('abort', abort),
+      close: () => { clearTimeout(timer); clearTimeout(expiry); signal.removeEventListener('abort', abort); this.active.delete(record); controller.abort(); finish(); },
     };
   }
   private describe(principal: BooksPrincipal, entry: CacheEntry): ReaderDescriptor {
@@ -227,6 +262,11 @@ export class EpubPreparation {
     await this.prune(0);
     const cached = this.cache.get(key);
     if (cached) {
+      if (cached.progressive && cached.progressive.job.state !== 'complete') {
+        throw new BooksError(cached.progressive.job.state === 'preparing' ? 429 : 422,
+          cached.progressive.job.state === 'preparing' ? 'EPUB_PREPARATION_BUSY' : 'BOOK_DOWNLOAD_ONLY',
+          'This book is not fully prepared. Reopen the reader or download the original.');
+      }
       if (cached.createdAt + EPUB_LIMITS.cacheTtlMs <= this.now()) throw new BooksError(429, 'EPUB_CACHE_BUSY', 'An active read is finishing; try again shortly.');
       cached.usedAt = this.now(); return this.describe(principal, cached);
     }
@@ -263,6 +303,168 @@ export class EpubPreparation {
       finally { preparing = false; }
     }
   }
+  private progressiveDescriptor(readerId: string, entry: CacheEntry): ProgressiveDescriptor {
+    const job = entry.progressive?.job;
+    const ready = new Set(entry.result.resources.map(r => r.resourceId));
+    return {
+      protocol: 'cbz-progressive-v1', revision: job?.revision ?? 0,
+      readerId, policyVersion: CBZ_POLICY, contentVersion: cbzContentVersion(entry.target.contentVersion),
+      state: job?.state ?? 'complete', mode: job?.spool.mode ?? 'full-download',
+      spine: [...entry.result.spine], resources: [...entry.result.resources],
+      pages: entry.result.spine.map((resourceId, index) => ({ resourceId,
+        state: ready.has(resourceId) ? 'ready' : job?.state === 'failed' ? 'failed'
+          : job?.activePage === index + 1 ? 'validating' : 'pending' })),
+      ...(job?.activePage ? { activePage: job.activePage } : {}),
+      ...(job?.reason ? { reason: job.reason } : {}),
+    };
+  }
+  async prepareProgressive(principal: BooksPrincipal, target: BookTarget, page: number, signal: AbortSignal) {
+    const initial = this.operation(principal, signal);
+    let checked: Awaited<ReturnType<BooksRelay['inspect']>>;
+    try {
+      await this.initialize();
+      checked = await this.relay.inspect(principal, target, initial.signal);
+    } finally { initial.close(); }
+    if (checked.file.extension !== 'cbz' || checked.file.role !== 'ebook') throw new BooksError(422, 'BOOK_DOWNLOAD_ONLY');
+    if (checked.file.size > archiveCompressedLimit('cbz')) throw new BooksError(413, 'CBZ_TOO_LARGE', CBZ_DOWNLOAD_ONLY_REASON);
+    signal.throwIfAborted();
+    const key = this.key(target, 'cbz');
+    await this.prune(0);
+    const cached = this.cache.get(key);
+    if (cached?.result.state === 'ready' && (!cached.progressive || cached.progressive.job.state === 'complete')) {
+      if (cached.createdAt + EPUB_LIMITS.cacheTtlMs <= this.now()) throw new BooksError(429, 'EPUB_CACHE_BUSY', 'An active read is finishing; try again shortly.');
+      const { readerId } = this.describe(principal, cached);
+      return { descriptor: this.progressiveDescriptor(readerId, cached),
+        handoff: () => {}, cancel: () => { this.handles.delete(readerId); } };
+    }
+    if (preparing || cached?.progressive?.job.state === 'preparing') throw new BooksError(429, 'EPUB_PREPARATION_BUSY', 'Another book is being prepared; try again shortly.');
+    if (cached) throw new BooksError(422, 'BOOK_DOWNLOAD_ONLY', cached.result.reason ?? CBZ_DOWNLOAD_ONLY_REASON);
+    const operation = this.operation(principal, signal);
+    preparing = true;
+    const work = path.join(this.db.booksCacheDir, `work-${randomUUID()}`);
+    const directory = path.join(this.db.booksCacheDir, `prepared-${key}`);
+    let started = false;
+    let source: Awaited<ReturnType<typeof fs.open>> | undefined;
+    try {
+      const reserve = EPUB_LIMITS.expandedBytes + archiveCompressedLimit('cbz');
+      await this.prune(reserve);
+      await fs.mkdir(work, { mode: 0o700 });
+      await fs.mkdir(directory, { mode: 0o700 });
+      const filename = path.join(work, 'original');
+      source = await fs.open(filename, 'wx+', 0o600);
+      await source.truncate(checked.file.size);
+      operation.signal.throwIfAborted();
+      const entry: CacheEntry = {
+        key, format: 'cbz', target, directory, generation: checked.configGeneration,
+        bytes: reserve, createdAt: this.now(), usedAt: this.now(), readers: 1,
+        result: { state: 'download-only', spine: [], resources: [], toc: [],
+          metrics: { entries: 0, expandedBytes: 0, peakTrackedBytes: 0, elapsedMs: 0 } },
+      };
+      this.cache.set(key, entry);
+      const { readerId } = this.describe(principal, entry);
+      let invalidated = false;
+      let finished: Promise<void>;
+      let removal: Promise<void> | undefined;
+      const cancel = (): Promise<void> => {
+        invalidated = true;
+        for (const [id, handle] of this.handles) if (handle.entry === entry) this.handles.delete(id);
+        job.cancel();
+        if (removal) return removal;
+        entry.readers++;
+        const reads = [...this.active].filter(operation => operation.entry === entry);
+        for (const read of reads) read.controller.abort();
+        removal = Promise.resolve().then(async () => {
+          await finished;
+          await Promise.all(reads.map(read => read.closed));
+          await fs.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+          this.cache.delete(key);
+        }).catch(error => {
+          logger.error('Progressive CBZ retained-data cleanup failed', { code: 'CBZ_CACHE_IO' }); throw error;
+        });
+        this.track(removal);
+        return removal;
+      };
+      const check = () => {
+        operation.signal.throwIfAborted(); this.session(principal);
+        if (entry.generation !== this.catalog.current().config.configGeneration) throw new BooksError(409, 'BOOKS_CONFIGURATION_CHANGED');
+      };
+      const spool = new RangeSpool(source, checked.representation, async (requestSignal, range, ifRange) => {
+        check();
+        return checked.client.openFile(target.itemId, checked.ino, {
+          method: 'GET', attachment: false, signal: requestSignal, range, ifRange,
+        });
+      }, operation.signal);
+      const job = new ProgressiveComic(spool, filename, directory, page, operation.signal, check, () => {
+        check();
+        entry.result.resources = [...job.resources];
+        entry.result.spine = [...job.spine];
+        entry.result.state = job.state === 'complete' ? 'ready' : 'download-only';
+      }, error => {
+        invalidated ||= operation.signal.aborted || (error instanceof Error && error.name === 'AbortError') ||
+          (error instanceof BooksError && [401, 403, 409].includes(error.status));
+        if (invalidated) {
+          cancel();
+        }
+        logger.warn('Progressive CBZ preparation stopped', {
+          code: error instanceof BooksError ? error.code : invalidated ? 'CBZ_CANCELLED' : 'UNSAFE_CBZ',
+          readyPages: job.resources.length,
+          reason: error instanceof UnsafeEpub ? error.message : undefined,
+        });
+      }, async () => { await this.relay.inspect(principal, target, operation.signal); check(); });
+      entry.progressive = { job, owner: principal.sessionId, cancel };
+      started = true;
+      const original = source;
+      let workerCleaned = false;
+      finished = job.done.then(() => { workerCleaned = true; }).finally(async () => {
+        await original.close();
+        await fs.rm(work, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        if (workerCleaned) {
+          entry.bytes = entry.result.resources.reduce((sum, r) => sum + r.size, 0);
+          entry.readers--;
+        }
+      }).catch(error => {
+        logger.error('Progressive CBZ cleanup failed', { code: 'CBZ_CACHE_IO' });
+        entry.result.state = 'download-only'; job.state = 'failed';
+        this.handles.delete(readerId);
+        throw error;
+      }).finally(() => { operation.close(); preparing = false; });
+      this.track(finished);
+      return { descriptor: this.progressiveDescriptor(readerId, entry), handoff: operation.detach, cancel };
+    } finally {
+      if (!started) {
+        operation.close();
+        await source?.close();
+        try {
+          await fs.rm(work, { recursive: true, force: true });
+          await fs.rm(directory, { recursive: true, force: true });
+        } finally { this.cache.delete(key); preparing = false; }
+      }
+    }
+  }
+  async progressiveStatus(principal: BooksPrincipal, readerId: string, page: number | undefined, signal: AbortSignal): Promise<ProgressiveDescriptor> {
+    const { entry } = this.handle(principal, readerId);
+    if (entry.format !== 'cbz') throw notFound();
+    const current = entry.progressive;
+    const handle = this.handles.get(readerId)!;
+    if (current && current.owner !== principal.sessionId && current.job.state !== 'complete') throw notFound();
+    if (handle.polling) throw new BooksError(429, 'CBZ_STATUS_BUSY');
+    if (page !== undefined && entry.result.spine.length && page > entry.result.spine.length) throw new BooksError(400, 'INVALID_BOOKS_REQUEST');
+    handle.polling = true;
+    try {
+      await this.relay.inspect(principal, entry.target, signal);
+      this.handle(principal, readerId);
+      if (current) {
+        current.job.renew();
+        if (page !== undefined) current.job.prioritize(page);
+        await current.job.wait(page, signal);
+      }
+      this.handle(principal, readerId);
+      return this.progressiveDescriptor(readerId, entry);
+    } catch (error) {
+      if (error instanceof BooksError && [401, 403, 409].includes(error.status)) current?.cancel();
+      throw error;
+    } finally { handle.polling = false; }
+  }
   private handle(principal: BooksPrincipal, readerId: string): Handle & { entry: CacheEntry } {
     this.session(principal);
     const handle = this.handles.get(opaqueSegment(readerId));
@@ -275,9 +477,13 @@ export class EpubPreparation {
     const handle = this.handle(principal, readerId);
     const entry = handle.entry;
     const resource = entry.result.resources.find(resource => resource.resourceId === opaqueSegment(resourceId));
-    if (!resource || entry.result.state !== 'ready') throw notFound();
+    if (!resource && entry.progressive && entry.result.spine.includes(resourceId)) {
+      if (entry.progressive.job.state === 'failed') throw new BooksError(422, 'CBZ_PAGE_FAILED', 'This page could not be validated; download the original.');
+      throw new BooksError(425, 'CBZ_PAGE_PENDING', 'This page has not been validated yet.');
+    }
+    if (!resource || (entry.result.state !== 'ready' && !entry.progressive)) throw notFound();
     if (entry.readers >= 8 || this.active.size >= 16) throw new BooksError(429, 'EPUB_RESOURCE_BUSY');
-    const operation = this.operation(principal, signal);
+    const operation = this.operation(principal, signal, entry);
     entry.readers += 1;
     let handedOff = false;
     const release = () => { entry.readers -= 1; operation.close(); };
@@ -289,6 +495,9 @@ export class EpubPreparation {
       stream.once('close', release);
       entry.usedAt = this.now(); handedOff = true;
       return stream;
+    } catch (error) {
+      if (error instanceof BooksError && [401, 403, 409].includes(error.status)) entry.progressive?.cancel();
+      throw error;
     } finally { if (!handedOff) release(); }
   }
   resourceSize(principal: BooksPrincipal, readerId: string, resourceId: string): number {
@@ -297,7 +506,8 @@ export class EpubPreparation {
     return resource.size;
   }
   release(principal: BooksPrincipal, readerId: string): void {
-    this.handle(principal, readerId); this.handles.delete(readerId);
+    const { entry } = this.handle(principal, readerId); this.handles.delete(readerId);
+    if (entry.progressive && entry.progressive.job.state !== 'complete') entry.progressive.cancel();
   }
   async validateLocator(principal: BooksPrincipal, target: BookTarget, locator: EbookLocator, signal: AbortSignal): Promise<boolean> {
     if ((locator.kind !== 'epub' || locator.policyVersion !== EPUB_POLICY) &&
@@ -305,8 +515,12 @@ export class EpubPreparation {
     const checked = await this.relay.inspect(principal, target, signal);
     if (checked.file.extension !== locator.kind) return false;
     const entry = this.cache.get(this.key(target, locator.kind));
-    if (!entry || entry.result.state !== 'ready' || entry.createdAt + EPUB_LIMITS.cacheTtlMs <= this.now()) return false;
-    if (locator.kind === 'cbz') return locator.page <= entry.result.spine.length;
+    if (!entry || (entry.result.state !== 'ready' && !entry.progressive) || entry.createdAt + EPUB_LIMITS.cacheTtlMs <= this.now()) return false;
+    if (locator.kind === 'cbz') {
+      if (entry.progressive && entry.progressive.job.state !== 'complete' &&
+          ![...this.handles.values()].some(h => h.entry === entry && h.principal.sessionId === principal.sessionId && h.expiresAt > this.now())) return false;
+      return entry.result.resources.some(r => r.resourceId === entry.result.spine[locator.page - 1]);
+    }
     const resource = entry.result.resources.find(resource => resource.resourceId === locator.resourceId);
     return Boolean(resource && entry.result.spine.includes(resource.resourceId) &&
       resource.textLength !== undefined && locator.textOffset <= resource.textLength);

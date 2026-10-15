@@ -203,12 +203,14 @@ preparation runs at a time. The separate database-scoped cache is limited to
 again, but does not erase durable progress. Unsafe/encrypted/fixed-layout books
 remain explicitly original-download-only.
 
-CBZ uses that **same** preparation slot, ZIP validation, worker watchdog,
+CBZ uses that **same** preparation slot, ZIP validation, worker budget,
 authenticated resource broker and 1 GiB cache, not another resource pool.
 CBZ originals may be up to **256 MiB compressed**; EPUB retains its **100 MiB**
 limit. Originals stream to private disk and the worker reads bounded chunks,
 not one whole-archive memory buffer. The 512 MiB expanded, 32 MiB entry,
-100:1 ratio, 256 MiB tracked-memory and 30-second worker limits remain unchanged.
+100:1 ratio and 256 MiB tracked-memory limits remain unchanged. Progressive CBZ
+work has one cumulative 30-second processing budget, including directory parsing,
+inflation, CRC and raster validation; changing pages or polling never resets it.
 Preparation reserves the format's compressed allowance plus the expanded
 allowance before downloading: at most 768 MiB for CBZ, leaving 256 MiB within
 the existing 1 GiB cache budget for other entries. This is per-preparation
@@ -216,11 +218,35 @@ accounting, not a guarantee of free filesystem space or total process RSS.
 The original copy rejects actual streamed bytes beyond its declared size or
 allowance; a short or changed response is not accepted as a complete archive.
 Additional CBZ limits are **1,000 pages**, **16,000,000 decoded pixels per page**, and
-**8,192 pixels per side**. Static JPEG, PNG and WebP are supported. Every page
-is fully decoded and checked before an archive becomes readable; one damaged,
-encrypted, unsupported or oversized page makes the whole CBZ download-only
-rather than silently skipping pages. CBR/RAR, GIF, APNG, animated WebP, SVG,
+**8,192 pixels per side**. Static JPEG, PNG and WebP are supported. New CBZ readers
+validate the whole ZIP directory first, then prioritize the first ten pages, or
+the saved/requested page and its nearby window. Each page is fully CRC-checked
+and decoded before it becomes readable; remaining pages prepare serially in the
+background. Pending pages cannot replace the last rendered saved position.
+Late corruption stops preparation with a persistent partial-failure warning:
+validated pages may remain available, but unvalidated pages never do and the
+book is not reported complete. Retained pages stay charged to the same cache.
+Old clients keep the complete, all-or-nothing preparation endpoint.
+CBR/RAR, GIF, APNG, animated WebP, SVG,
 HTML and nested archives are not supported. Originals are never modified.
+
+Incremental startup requires exact conditional HTTP ranges from the source.
+The broker checks response identity, range boundaries, length and complete EOF,
+and spools at most 256 KiB per range. It allows at most 8,192 source requests and
+the original's size plus 16 MiB of cumulative received-body allowance, including
+interrupted requests. These are application body budgets, not TCP wire-byte
+guarantees. Missing range support/validators or an ignored initial range may use
+one explicitly labeled full-download fallback before any page is published;
+changed/malformed responses never qualify. Lost range support after publication
+stops preparation instead of starting a second whole-file transfer.
+
+Network spooling precedes each worker command. A job also has an absolute
+five-minute deadline and an unrenewed 60-second preparing lease. One coalesced
+two-second status/priority wait renews that lease, not the absolute deadline or
+processing budget. Release, session/configuration/source invalidation and shutdown
+cancel work and drain workers/streams before cleanup; revoked readers cannot
+keep delivering even previously validated pages. Files and original progress
+identities are unchanged.
 
 Page order compares NFC-normalized full archive paths case-insensitively,
 using locale-independent numeric runs (`1`, `2`, `10`). Equal numeric runs
@@ -238,7 +264,7 @@ session/configuration changes and close. Its decoded-pixel counter describes
 the single application-owned image, not browser RSS or compositor memory.
 The worker's 256 MiB tracked heap/external budget and V8 heap limits **do not**
 bound native libvips allocations or whole-process RSS. Sampled process-RSS
-evidence is reported separately, not as a hard memory guarantee. The external
+evidence is reported separately, not as a hard memory guarantee. The legacy complete-reader
 30-second hard watchdog first requests cooperative cancellation (up to one
 second for file-handle cleanup), then waits for worker termination before
 releasing its slot and cleaning temporary files. A sub-limit archive can still

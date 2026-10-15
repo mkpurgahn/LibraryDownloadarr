@@ -1,11 +1,12 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
-import { booksApi, booksErrorMessage, aborted } from './api';
-import { BookFile, BookItem, EbookLocator, ReaderDescriptor, READ_LIMITS } from './types';
+import { booksApi, BooksApiError, booksErrorMessage, aborted } from './api';
+import { BookFile, BookItem, ComicLocator, EbookLocator, ProgressiveComicDescriptor, ReaderDescriptor, READ_LIMITS } from './types';
 import { ProgressClient, SaveState } from './progress';
 import { mountEpubReader } from './reader/epubAdapter';
 import { ComicReader } from './reader/ComicReader';
+import { ProgressiveComicSource } from './reader/progressiveComic';
 
 const beginning = (descriptor?: ReaderDescriptor): EbookLocator => descriptor?.policyVersion === 'cbz-pages-v1'
   ? { kind: 'cbz', page: 1, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion }
@@ -23,6 +24,10 @@ export const ReaderPage: React.FC = () => {
   const [error, setError] = useState('');
   const [state, setState] = useState<SaveState>('unsaved');
   const [retry, setRetry] = useState(0);
+  const [source, setSource] = useState<ProgressiveComicSource>();
+  const [preparation, setPreparation] = useState<ProgressiveComicDescriptor>();
+  const [initialComic, setInitialComic] = useState<ComicLocator>();
+  const claimRevision = useRef<number>();
   const frame = useRef<HTMLIFrameElement>(null);
   const pdfContainer = useRef<HTMLDivElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -31,8 +36,11 @@ export const ReaderPage: React.FC = () => {
     const controller = new AbortController();
     let progress: ProgressClient | undefined;
     let reader: ReaderDescriptor | undefined;
+    let comicSource: ProgressiveComicSource | undefined;
+    let unsubscribeSource: (() => void) | undefined;
     let unsubscribe: (() => void) | undefined;
     setItem(undefined); setFile(undefined); setDescriptor(undefined); setClient(undefined); setStarted(false); setError('');
+    setSource(undefined); setPreparation(undefined); setInitialComic(undefined); claimRevision.current = undefined; setState('unsaved');
     void (async () => {
       if (!itemId || !fileId) throw new Error('Book original not found.');
       const item = await booksApi.item(itemId, controller.signal);
@@ -42,20 +50,59 @@ export const ReaderPage: React.FC = () => {
       if (!['epub', 'pdf', 'cbz'].includes(file.extension)) throw new Error('This original is download-only.');
       if (file.extension === 'pdf' && file.size > READ_LIMITS.pdf) throw new Error('PDF exceeds the 512 MiB document limit; download the original.');
       setFile(file);
-      if (file.extension === 'epub' || file.extension === 'cbz') {
-        reader = await booksApi.prepareReader({ itemId, fileId, contentVersion: file.contentVersion }, controller.signal);
-        if ((file.extension === 'cbz') !== (reader.policyVersion === 'cbz-pages-v1')) throw new Error('Reader format does not match this original.');
+      let saved;
+      if (file.extension === 'cbz') {
+        const version = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
+          new TextEncoder().encode(`cbz-pages-v1:${file.contentVersion}`))), byte => byte.toString(16).padStart(2, '0')).join('');
+        progress = new ProgressClient(item, 'ebook', fileId, version);
+        unsubscribe = progress.subscribe(setState);
+        saved = await progress.load();
+        const page = progress.compatible && saved?.locator.kind === 'cbz' ? saved.locator.page : 1;
+        const target = { itemId, fileId, contentVersion: file.contentVersion };
+        try {
+          const partial = await booksApi.prepareProgressive(target, page, controller.signal);
+          if (partial.contentVersion !== version) {
+            await booksApi.releaseReader(partial.readerId);
+            throw new Error('Reader format does not match this original.');
+          }
+          comicSource = new ProgressiveComicSource(partial, target, page, controller.signal);
+          unsubscribeSource = comicSource.subscribe(() => {
+            if (!controller.signal.aborted) {
+              setPreparation(comicSource!.snapshot);
+              if (comicSource!.failure) setError(comicSource!.failure!);
+            }
+          });
+          setPreparation(partial);
+          reader = await comicSource.descriptor(controller.signal);
+          if (controller.signal.aborted) return;
+          setSource(comicSource);
+        } catch (error) {
+          if (!(error instanceof BooksApiError) || error.status !== 404 || error.code !== 'BOOK_NOT_FOUND' || error.readerProtocol) throw error;
+          reader = await booksApi.prepareReader(target, controller.signal);
+          if (reader.policyVersion !== 'cbz-pages-v1') throw new Error('Reader format does not match this original.');
+        }
         if (controller.signal.aborted) return;
         setDescriptor(reader);
-        if (reader.state !== 'ready') return;
+        if (!comicSource && reader.state !== 'ready') return;
+      } else {
+        if (file.extension === 'epub') {
+          reader = await booksApi.prepareReader({ itemId, fileId, contentVersion: file.contentVersion }, controller.signal);
+          if (reader.policyVersion !== 'epub-scroll-v1') throw new Error('Reader format does not match this original.');
+          if (controller.signal.aborted) return;
+          setDescriptor(reader);
+          if (reader.state !== 'ready') return;
+        }
+        progress = new ProgressClient(item, 'ebook', fileId, reader?.contentVersion ?? file.contentVersion);
+        unsubscribe = progress.subscribe(setState);
+        saved = await progress.load();
       }
-      progress = new ProgressClient(item, 'ebook', fileId, reader?.contentVersion ?? file.contentVersion);
-      unsubscribe = progress.subscribe(setState);
-      const saved = await progress.load();
       if (controller.signal.aborted) return;
       if (!saved && progress.compatible) {
         try {
-          await progress.claim(beginning(reader), 0);
+          if (file.extension === 'cbz') {
+            claimRevision.current = progress.revision;
+            setInitialComic({ kind: 'cbz', page: 1, offset: 0, horizontal: 0, policyVersion: 'cbz-pages-v1' });
+          } else await progress.claim(beginning(reader), 0);
         } catch (error) {
           if (!controller.signal.aborted && (progress.current || !progress.compatible)) setClient(progress);
           throw error;
@@ -65,17 +112,26 @@ export const ReaderPage: React.FC = () => {
       if (!controller.signal.aborted) setClient(progress);
     })().catch(error => { if (!aborted(error) && !controller.signal.aborted) setError(booksErrorMessage(error)); });
     return () => {
-      controller.abort(); unsubscribe?.();
+      controller.abort(); unsubscribe?.(); unsubscribeSource?.();
       const current = progress;
       const finish = () => {
         current?.dispose();
-        if (reader) void booksApi.releaseReader(reader.readerId).catch(error => {
+        if (comicSource || reader) void (comicSource ? comicSource.release() : booksApi.releaseReader(reader!.readerId)).catch(error => {
           if (!aborted(error)) console.warn('Books reader release deferred to session expiry.');
         });
       };
       if (current?.location) void current.save(current.location).finally(finish); else finish();
     };
   }, [itemId, fileId, revision, retry]);
+  const comicRendered = useCallback(async (locator: ComicLocator) => {
+    if (!client) return;
+    const revision = claimRevision.current;
+    claimRevision.current = undefined;
+    try {
+      if (revision !== undefined) await client.claim(locator, revision);
+      else await client.save(locator);
+    } catch (error) { if (!aborted(error)) setError(booksErrorMessage(error)); }
+  }, [client]);
   useEffect(() => {
     if (!frame.current || descriptor?.policyVersion !== 'epub-scroll-v1' || !client || !started) return;
     const current = frame.current;
@@ -111,7 +167,10 @@ export const ReaderPage: React.FC = () => {
       const local = here && client.location?.kind === kind ? client.location : undefined;
       const previous = saved && client.compatible && client.current?.locator.kind === kind ? client.current.locator : undefined;
       const locator: EbookLocator = local ?? previous ?? beginning(descriptor);
-      await client.claim(locator, client.revision);
+      if (locator.kind === 'cbz') {
+        claimRevision.current = client.revision;
+        setInitialComic(locator);
+      } else await client.claim(locator, client.revision);
       setStarted(false);
       window.requestAnimationFrame(() => setStarted(true));
     } catch (error) { if (!aborted(error)) setError(booksErrorMessage(error)); }
@@ -130,6 +189,15 @@ export const ReaderPage: React.FC = () => {
     </div>}
     {!client && descriptor?.state !== 'download-only' && !error && <p role="status" className="p-6">Preparing book...</p>}
     {descriptor?.state === 'download-only' && <p role="status" className="p-6">{descriptor.reason}</p>}
+    {preparation && <p role={preparation.state === 'failed' ? 'alert' : 'status'}
+      className={`h-12 shrink-0 overflow-auto text-sm ${preparation.state === 'failed' ? 'text-red-200' : 'text-gray-400'}`}>
+      {preparation.state === 'failed' ? preparation.spine.length ?
+        `Preparation stopped. ${preparation.resources.length} of ${preparation.spine.length} pages are ready; other pages are unavailable. Download the original.` :
+        'The page list could not be validated. Download the original.' :
+        preparation.state === 'complete' ? `All ${preparation.spine.length} pages ready.` :
+          preparation.mode === 'full-download' && !preparation.spine.length ? 'This source requires a full download before pages can be prepared.' :
+            `Preparing pages in the background: ${preparation.resources.length} of ${preparation.spine.length || 'unknown'} ready.`}
+    </p>}
     {client && (!started || state === 'conflict') && <section aria-label="Saved position" className="mb-3 rounded bg-dark-100 p-4">
       <p className="mb-3 text-gray-300">{!client.compatible ? 'The original or reader policy changed. Your previous position is retained, but cannot be applied to this version.' :
         state === 'conflict' ? 'Choose the saved position, or explicitly continue writing from here.' : 'A private saved position is available.'}</p>
@@ -142,7 +210,8 @@ export const ReaderPage: React.FC = () => {
     {started && file?.extension === 'epub' && <iframe ref={frame} title="EPUB reader" sandbox="allow-scripts" className="min-h-0 w-full flex-1 rounded-lg border-0" />}
     {started && file?.extension === 'pdf' && <div ref={pdfContainer} data-testid="pdf-reader" className="min-h-0 w-full flex-1" />}
     {started && client && file?.extension === 'cbz' && descriptor?.policyVersion === 'cbz-pages-v1' && itemId &&
-      <ComicReader key={descriptor.readerId} descriptor={descriptor} progress={client}
+      <ComicReader key={descriptor.readerId} descriptor={descriptor} progress={client} source={source}
+        initialLocator={initialComic} onRendered={comicRendered}
         target={{ itemId, fileId: file.fileId, contentVersion: file.contentVersion }} />}
   </main>;
 };

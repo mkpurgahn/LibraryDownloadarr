@@ -90,7 +90,8 @@ export class DatabaseService {
   readonly booksProgress: BooksProgressRepository;
   readonly booksCacheDir: string;
   private readonly sessionRevokedListeners = new Set<(sessionId: string) => void>();
-  private readonly booksStoppedListeners = new Set<() => void>();
+  private readonly booksStoppedListeners = new Set<() => void | Promise<void>>();
+  private booksShutdown?: Promise<void>;
 
   constructor(dbPath: string, secret = process.env.TOKEN_ENCRYPTION_KEY || '') {
     if (secret.length < 32) {
@@ -491,7 +492,7 @@ export class DatabaseService {
     return () => { this.sessionRevokedListeners.delete(listener); };
   }
 
-  onBooksStopped(listener: () => void): () => void {
+  onBooksStopped(listener: () => void | Promise<void>): () => void {
     this.booksStoppedListeners.add(listener);
     return () => { this.booksStoppedListeners.delete(listener); };
   }
@@ -807,12 +808,18 @@ export class DatabaseService {
   }
 
   close(): void {
-    this.stopBooks();
+    void this.stopBooks();
     this.db.close();
   }
 
-  stopBooks(): void {
-    this.notifyRevoked(this.db.prepare('SELECT id FROM sessions').all() as Array<{ id: string }>);
-    for (const listener of this.booksStoppedListeners) listener();
+  stopBooks(): Promise<void> {
+    if (!this.booksShutdown) {
+      this.notifyRevoked(this.db.prepare('SELECT id FROM sessions').all() as Array<{ id: string }>);
+      this.booksShutdown = Promise.all([...this.booksStoppedListeners].map(listener => {
+        try { return listener(); } catch (error) { return Promise.reject(error); }
+      })).then(() => {});
+      void this.booksShutdown.catch(() => logger.error('Books shutdown cleanup failed', { code: 'BOOKS_SHUTDOWN_FAILED' }));
+    }
+    return this.booksShutdown;
   }
 }

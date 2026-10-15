@@ -81,10 +81,9 @@ export const startServer = async (): Promise<void> => {
     logger.info(`LibraryDownloadarr server started on port ${config.server.port}`);
   });
   const shutdown = (): void => {
-    db.stopBooks();
+    const booksStopped = db.stopBooks();
     server.close(() => {
-      db.close();
-      process.exit(0);
+      void booksStopped.then(() => { db.close(); process.exit(0); }, () => { db.close(); process.exit(1); });
     });
   };
   process.on('SIGTERM', shutdown);

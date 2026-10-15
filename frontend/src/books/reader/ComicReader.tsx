@@ -3,15 +3,17 @@ import { booksApi, BooksApiError, aborted, booksErrorMessage, BOOKS_CHANGED_EVEN
 import { BookTarget, ComicDescriptor, ComicLocator, ComicResource } from '../types';
 import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
+import { ProgressiveComicSource } from './progressiveComic';
 
 type Fit = 'page' | 'width' | 'manual';
 const clamp = (value: number) => Math.max(0, Math.min(1, value));
 
 export const ComicReader: React.FC<{
   descriptor: ComicDescriptor; target: BookTarget; progress: ProgressClient;
-}> = ({ descriptor, target, progress }) => {
-  const initial = progress.location?.kind === 'cbz' ? progress.location :
-    { kind: 'cbz' as const, page: 1, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion };
+  source?: ProgressiveComicSource; initialLocator?: ComicLocator; onRendered?: (locator: ComicLocator) => Promise<void>;
+}> = ({ descriptor, target, progress, source, initialLocator, onRendered }) => {
+  const initial = initialLocator ?? (progress.location?.kind === 'cbz' ? progress.location :
+    { kind: 'cbz' as const, page: 1, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion });
   const [page, setPage] = useState(initial.page);
   const [jump, setJump] = useState(String(initial.page));
   const [fit, setFit] = useState<Fit>('page');
@@ -150,25 +152,31 @@ export const ComicReader: React.FC<{
           if (!entry) throw new Error('This CBZ page is unavailable. Reopen the original.');
           return entry;
         };
-        let entry = current();
+        let entry = source ? await source.page(page, controller.signal) : current();
         let bytes: ArrayBuffer;
         try {
-          bytes = await booksApi.readerResource(manifest.current.readerId, entry.resourceId, entry.size, controller.signal);
+          bytes = await booksApi.readerResource(source?.readerId ?? manifest.current.readerId, entry.resourceId, entry.size, controller.signal);
         } catch (error) {
           if (!(error instanceof BooksApiError) || ![404, 410].includes(error.status)) throw error;
-          const renewed = await booksApi.prepareReader(target, controller.signal);
-          if (controller.signal.aborted) { release(renewed.readerId); return; }
-          if (renewed.policyVersion !== 'cbz-pages-v1' || renewed.state !== 'ready' ||
-              renewed.contentVersion !== descriptor.contentVersion ||
-              JSON.stringify(renewed.spine) !== JSON.stringify(descriptor.spine)) {
-            release(renewed.readerId);
-            throw new Error('The CBZ or reader policy changed. Open it again to choose a position.');
+          if (source) {
+            await source.renew(page, controller.signal);
+            entry = await source.page(page, controller.signal);
+            bytes = await booksApi.readerResource(source.readerId, entry.resourceId, entry.size, controller.signal);
+          } else {
+            const renewed = await booksApi.prepareReader(target, controller.signal);
+            if (controller.signal.aborted) { release(renewed.readerId); return; }
+            if (renewed.policyVersion !== 'cbz-pages-v1' || renewed.state !== 'ready' ||
+                renewed.contentVersion !== descriptor.contentVersion ||
+                JSON.stringify(renewed.spine) !== JSON.stringify(descriptor.spine)) {
+              release(renewed.readerId);
+              throw new Error('The CBZ or reader policy changed. Open it again to choose a position.');
+            }
+            const previous = manifest.current.readerId;
+            manifest.current = renewed;
+            release(previous);
+            entry = current();
+            bytes = await booksApi.readerResource(renewed.readerId, entry.resourceId, entry.size, controller.signal);
           }
-          const previous = manifest.current.readerId;
-          manifest.current = renewed;
-          release(previous);
-          entry = current();
-          bytes = await booksApi.readerResource(renewed.readerId, entry.resourceId, entry.size, controller.signal);
         }
         if (controller.signal.aborted) return;
         url = URL.createObjectURL(new Blob([bytes], { type: entry.mediaType }));
@@ -190,7 +198,7 @@ export const ComicReader: React.FC<{
         progress.location = anchor.current;
         setResource(entry);
         setLoading(false);
-        void progress.save(anchor.current);
+        if (onRendered) void onRendered(anchor.current); else void progress.save(anchor.current);
       } catch (error) {
         if (!aborted(error) && !controller.signal.aborted) {
           clear(); setLoading(false);
@@ -200,7 +208,7 @@ export const ComicReader: React.FC<{
       } finally { if (controller.signal.aborted) clear(); }
     });
     return () => { controller.abort(); clear(); };
-  }, [page, descriptor, progress, target.itemId, target.fileId, target.contentVersion]);
+  }, [page, descriptor, progress, source, onRendered, target.itemId, target.fileId, target.contentVersion]);
 
   // Restore disclosure reflows in this commit, before new user scrolls can reach ResizeObserver.
   useLayoutEffect(() => {
@@ -222,7 +230,7 @@ export const ComicReader: React.FC<{
   }, [resource, fit, zoom, viewportSize, options]);
 
   const go = (next: number) => {
-    if (loading || blocked.current || next === page || next < 1 || next > total || !Number.isSafeInteger(next)) return;
+    if ((loading && !source) || blocked.current || next === page || next < 1 || next > total || !Number.isSafeInteger(next)) return;
     cancelGesture();
     position(); save(); setLoading(true); setPage(next);
   };
@@ -304,10 +312,10 @@ export const ComicReader: React.FC<{
       }}>
         <label htmlFor="comic-page" className="sr-only">Page number</label>
         <input id="comic-page" aria-label="Page number" type="number" inputMode="numeric" min={1} max={total}
-          disabled={loading || blocked.current} className="input min-h-11 w-16 appearance-none px-2 text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none" value={jump}
+          disabled={(loading && !source) || blocked.current} className="input min-h-11 w-16 appearance-none px-2 text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none" value={jump}
           onChange={event => setJump(event.target.value)} />
         <span className="whitespace-nowrap text-gray-400">/ {total}</span>
-        <button type="submit" aria-label="Go to page" disabled={loading || blocked.current}
+        <button type="submit" aria-label="Go to page" disabled={(loading && !source) || blocked.current}
           className="min-h-11 min-w-11 rounded-lg px-2 text-gray-300 hover:bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300 disabled:opacity-40">Go</button>
       </form>
       {pageButton('right')}

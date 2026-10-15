@@ -67,11 +67,17 @@ export function comicOrder(a: string, b: string): number {
   return left.length - right.length || (a < b ? -1 : a > b ? 1 : 0);
 }
 
+export function comicPages(entries: Map<string, StoredEntry>): Array<[string, StoredEntry]> {
+  const pages = [...entries].filter(([name, entry]) => !entry.directory && !ignored(name)).sort(([a], [b]) => comicOrder(a, b));
+  if (!pages.length || pages.length > CBZ_LIMITS.pages) throw new UnsafeEpub('CBZ page count limit');
+  if (pages.some(([name]) => !formats[path.posix.extname(name).toLowerCase()])) throw new UnsafeEpub('Unsupported CBZ page type');
+  return pages;
+}
+
 export async function prepareComic(entries: Map<string, StoredEntry>, output: string, budget: ArchiveBudget): Promise<PreparedResource[]> {
   sharp.cache(false);
   sharp.concurrency(1);
-  const pages = [...entries].filter(([name, entry]) => !entry.directory && !ignored(name)).sort(([a], [b]) => comicOrder(a, b));
-  if (!pages.length || pages.length > CBZ_LIMITS.pages) throw new UnsafeEpub('CBZ page count limit');
+  const pages = comicPages(entries);
   const resources: PreparedResource[] = [];
   for (const [name, entry] of pages) {
     const expected = formats[path.posix.extname(name).toLowerCase()];

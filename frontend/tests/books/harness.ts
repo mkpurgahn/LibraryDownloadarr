@@ -27,6 +27,7 @@ type Provider = {
   origin: string;
   token: string;
   libraryId: string;
+  cbzTransfer: CbzTransfer;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
   setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized' | 'single' | 'large'): Promise<void>;
@@ -35,6 +36,7 @@ type Provider = {
   stop(): Promise<void>;
 };
 export type BooksApp = App & {
+  cbzTransfer?: CbzTransfer;
   binding?: ExternalBinding;
   candidate?: ExternalCandidate;
   fileMap?: ExternalFileMap[];
@@ -48,11 +50,28 @@ export type BooksApp = App & {
   advanceReaderTime(milliseconds: number): void;
   restart(): Promise<void>;
 };
+export interface CbzTransfer {
+  start(): void;
+  release(): void;
+  snapshot(): { bytes: number; requests: number; active: number; held: boolean; elapsedMs: number };
+}
 
 async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, categoryFixtures = false): Promise<Provider> {
   const token = randomUUID();
   let unavailable = false;
   const files = new Map<string, Buffer>();
+  const validators = new WeakMap<Buffer, { size: number; etag: string }>();
+  const cbzOffsets = new WeakMap<Buffer, [number, number]>();
+  let throttledCbz = false, holdCbz = true, sentCbz = 0, requestsCbz = 0, activeCbz = 0, cbzStarted = 0;
+  const heldCbz = new Set<() => void>();
+  const cbzTransfer: CbzTransfer = {
+    start() {
+      if (activeCbz) throw new Error('Previous controlled source request is still active');
+      throttledCbz = true; holdCbz = true; sentCbz = 0; requestsCbz = 0; cbzStarted = performance.now();
+    },
+    release() { holdCbz = false; for (const send of [...heldCbz]) send(); },
+    snapshot: () => ({ bytes: sentCbz, requests: requestsCbz, active: activeCbz, held: holdCbz, elapsedMs: performance.now() - cbzStarted }),
+  };
   const makeItem = (id: string, title: string, extensions: string[]) => {
     const manifest = extensions.map((ext, index) => {
       const ino = `${id}-${index}`;
@@ -116,6 +135,9 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
       }));
       const bytes = mode === 'large' && chapter === 1 ? await buildLargeCbzFixture() : await buildCbzFixture(entries);
       files.set(`manga:manga-${chapter - 1}`, bytes);
+      if (mode === 'large' && chapter === 1) cbzOffsets.set(bytes, [
+        bytes.indexOf(Buffer.from('Pages/11.png')) - 30, bytes.indexOf(Buffer.from('Pages/243.png')) - 30,
+      ]);
       manga.libraryFiles[chapter - 1].metadata.size = mode === 'oversized' ? 256 * 1024 * 1024 + 1 : bytes.length;
       manga.libraryFiles[chapter - 1].metadata.mtimeMs += 1000;
     }
@@ -187,7 +209,12 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
     if (!data || !file) { res.writeHead(404).end(); return; }
     const total = file.metadata.size;
     res.setHeader('Content-Type', file.fileType === 'audio' ? (file.metadata.ext === '.m4b' ? 'audio/mp4' : 'audio/mpeg') : file.metadata.ext === '.pdf' ? 'application/pdf' : 'application/octet-stream');
-    res.setHeader('ETag', `"${createHash('sha256').update(data).update(String(total)).digest('hex')}"`);
+    let validator = validators.get(data);
+    if (!validator || validator.size !== total) {
+      validator = { size: total, etag: `"${createHash('sha256').update(data).update(String(total)).digest('hex')}"` };
+      validators.set(data, validator);
+    }
+    res.setHeader('ETag', validator.etag);
     res.setHeader('Last-Modified', 'Tue, 14 Nov 2023 22:13:20 GMT');
     res.setHeader('Accept-Ranges', 'bytes');
     const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? '');
@@ -199,6 +226,30 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
     }
     res.setHeader('Content-Length', String(end - start + 1));
     if (req.method === 'HEAD') { res.end(); return; }
+    if (throttledCbz && item.id === 'manga' && match[2] === 'manga-0') {
+      if (req.headers.range && req.headers['if-range'] !== validator.etag) throw new Error('Controlled range needs the original validator');
+      const [heldStart, lastStart] = cbzOffsets.get(data) ?? [0, 0];
+      if (heldStart <= 0 || lastStart <= heldStart || total !== data.length) throw new Error('Controlled transfer needs the243page fixture');
+      requestsCbz++; activeCbz++;
+      let offset = start;
+      let timer: NodeJS.Timeout | undefined;
+      const send = () => {
+        heldCbz.delete(send);
+        if (res.destroyed) return;
+        if (holdCbz && offset >= heldStart && offset < lastStart) { heldCbz.add(send); return; }
+        const stop = Math.min(end + 1, offset + 65536, offset < heldStart ? heldStart : end + 1);
+        timer = setTimeout(() => {
+          if (res.destroyed) return;
+          const chunk = data.subarray(offset, stop);
+          sentCbz += chunk.length; offset = stop;
+          const writable = res.write(chunk);
+          if (offset > end) res.end();
+          else if (writable) send(); else res.once('drain', send);
+        }, (stop - offset) / (8 * 1024 * 1024) * 1000);
+      };
+      res.once('close', () => { clearTimeout(timer); heldCbz.delete(send); activeCbz--; });
+      send(); return;
+    }
     if (total === data.length) { res.end(data.subarray(start, end + 1)); return; }
     const stream = Readable.from((function* () {
       for (let offset = start; offset <= end; offset += 65536) {
@@ -213,7 +264,7 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Synthetic ABS listener unavailable');
   return {
-    origin: `http://127.0.0.1:${address.port}`, token, libraryId,
+    origin: `http://127.0.0.1:${address.port}`, token, libraryId, cbzTransfer,
     setCbz,
     setUnavailable(value) { unavailable = value; },
     async replaceEpub() {
@@ -336,7 +387,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
       });
       await verifiedFixtureTls(app.origin, await fs.readFile(certFile));
       const fixture: BooksApp = {
-        ...app, live: liveProvider,
+        ...app, live: liveProvider, cbzTransfer: provider?.cbzTransfer,
         certificatePin: createHash('sha256').update(new X509Certificate(await fs.readFile(certFile)).publicKey.export({ format: 'der', type: 'spki' })).digest('base64'),
         setUnavailable(value) {
           if (!provider) throw new Error('Live fixture outages are not mutated by browser tests');
@@ -428,7 +479,10 @@ async function sourceIdentity() {
     const archive = process.env.BOOKS_TEST_SOURCE_ARCHIVE_SHA256;
     if (!/^[a-f0-9]{40}$/.test(revision) || !archive || !/^[a-f0-9]{64}$/.test(archive) ||
         !['true', 'false'].includes(process.env.BOOKS_TEST_SOURCE_DIRTY ?? '')) throw new Error('Incomplete isolated source snapshot identity');
-    return { baseRevision: revision, workingTreeDirty: process.env.BOOKS_TEST_SOURCE_DIRTY === 'true', sourceArchiveSha256: archive };
+    const backendRevision = process.env.BOOKS_TEST_BACKEND_REVISION;
+    if (backendRevision && !/^[a-f0-9]{40}$/.test(backendRevision)) throw new Error('Invalid isolated backend snapshot identity');
+    return { baseRevision: revision, workingTreeDirty: process.env.BOOKS_TEST_SOURCE_DIRTY === 'true', sourceArchiveSha256: archive,
+      ...(backendRevision ? { backendSourceRevision: backendRevision } : {}) };
   }
   const git = await promisify(execFile)('git', ['rev-parse', 'HEAD'], { cwd: repoRoot });
   const status = await promisify(execFile)('git', ['status', '--porcelain'], { cwd: repoRoot });

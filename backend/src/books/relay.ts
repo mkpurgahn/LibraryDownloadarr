@@ -14,7 +14,7 @@ import { BookStreams } from './streams';
 import { BooksError } from './limits';
 import type { BookTarget } from './tickets';
 
-function inspectHeaders(message: IncomingMessage, allowPartial = false): BookRepresentation {
+export function inspectHeaders(message: IncomingMessage, allowPartial = false): BookRepresentation {
   const status = message.statusCode ?? 502;
   if (status === 401 || status === 403) throw new BooksError(502, 'ABS_CONNECTION_DENIED');
   if (status === 404) throw new BooksError(404, 'BOOK_NOT_FOUND');

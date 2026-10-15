@@ -201,6 +201,7 @@ export async function startFixtureApp(
       async stop() {
         if (stopped) return;
         stopped = true;
+        await db.stopBooks();
         db.close();
         server.closeAllConnections();
         await new Promise<void>(resolve => server.close(() => resolve()));

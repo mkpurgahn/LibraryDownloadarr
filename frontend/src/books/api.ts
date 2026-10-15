@@ -2,11 +2,12 @@ import { useAuthStore, SESSION_CHANGED_EVENT } from '../stores/authStore';
 import {
   BookItem, BooksLibrary, BookTarget, BookTicketResult, BooksSettingsState, CatalogQuery,
   record, id, text, flag, integer, list, parseBookItem, parseBookSummary, parseCatalog, invalidResponse,
-  parseReader, ProgressWrite,
+  parseReader, parseProgressiveComic, ProgressWrite,
 } from './types';
 
 export class BooksApiError extends Error {
-  constructor(public readonly status: number, public readonly code: string, message: string, public readonly canonical?: unknown) {
+  constructor(public readonly status: number, public readonly code: string, message: string, public readonly canonical?: unknown,
+    public readonly retryAfterMs?: number, public readonly readerProtocol?: string) {
     super(message); this.name = 'BooksApiError';
   }
 }
@@ -63,7 +64,9 @@ async function request(path: string, options: RequestInit = {}, signal?: AbortSi
       const error = record(value);
       throw new BooksApiError(
         response.status, typeof error.code === 'string' ? error.code : 'BOOKS_UNAVAILABLE',
-        typeof error.error === 'string' ? error.error : 'Books is temporarily unavailable. Plex remains available.', error.canonical
+        typeof error.error === 'string' ? error.error : 'Books is temporarily unavailable. Plex remains available.', error.canonical,
+        response.status === 429 ? Math.min(60000, Math.max(1000, Number(response.headers.get('retry-after')) * 1000 || 2000)) : undefined,
+        response.headers.get('x-book-reader-protocol') ?? undefined
       );
     }
     return value;
@@ -221,6 +224,14 @@ export const booksApi = {
     return parseReader(await booksRequest(`/items/${id(target.itemId)}/reader`, {
       method: 'POST', body: JSON.stringify({ fileId: target.fileId, contentVersion: target.contentVersion }),
     }, signal));
+  },
+  async prepareProgressive(target: BookTarget, page: number, signal: AbortSignal) {
+    return parseProgressiveComic(await booksRequest(`/items/${id(target.itemId)}/reader-progressive`, {
+      method: 'POST', body: JSON.stringify({ fileId: target.fileId, contentVersion: target.contentVersion, page }),
+    }, signal));
+  },
+  async readerStatus(readerId: string, page: number | undefined, signal: AbortSignal) {
+    return parseProgressiveComic(await booksRequest(`/readers/${id(readerId)}/status${page === undefined ? '' : `?page=${page}`}`, {}, signal));
   },
   async releaseReader(readerId: string) { await booksRequest(`/readers/${id(readerId)}`, { method: 'DELETE' }); },
   async readerResource(readerId: string, resourceId: string, size: number, signal: AbortSignal): Promise<ArrayBuffer> {
