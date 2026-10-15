@@ -17,6 +17,9 @@ import { EpubPreparation } from '../books/epub/prepare';
 import Database from 'better-sqlite3';
 import { ZipWriter, Uint8ArrayReader, Uint8ArrayWriter } from '@zip.js/zip.js';
 
+// Includes generated-archive and SQLite setup; application deadlines are asserted separately.
+const fixtureOptions = { timeout: 60000 };
+
 class Membership extends PlexService {
   gate?: { entered(): void; promise: Promise<void> };
   override async validateExactServerMembership() {
@@ -183,6 +186,7 @@ async function fixture(mode: ProviderMode = 'range', corrupt: boolean | number =
       return response.json() as Promise<Status>;
     },
     async close() {
+      await db.stopBooks();
       db.close(); server.closeAllConnections(); upstream.closeAllConnections();
       await Promise.all([server, upstream].map(s => new Promise<void>(resolve => s.close(() => resolve()))));
       // Background ownership must finish cleanup, not keep the next preparation slot occupied.
@@ -195,7 +199,7 @@ async function fixture(mode: ProviderMode = 'range', corrupt: boolean | number =
   };
 }
 
-test('progressive first ten are usable while a later payload is held; legacy remains complete-only', { timeout: 15000 }, async () => {
+test('progressive first ten are usable while a later payload is held; legacy remains complete-only', fixtureOptions, async () => {
   const f = await fixture();
   try {
     let reader = await f.start();
@@ -214,7 +218,7 @@ test('progressive first ten are usable while a later payload is held; legacy rem
 });
 
 for (const mode of ['malformed', 'changed', 'short'] as const) {
-  test(`invalid ${mode} range never exposes pages or starts a full-file fallback`, { timeout: 10000 }, async () => {
+  test(`invalid ${mode} range never exposes pages or starts a full-file fallback`, fixtureOptions, async () => {
     const f = await fixture(mode);
     try {
       let reader = await f.start();
@@ -229,7 +233,7 @@ for (const mode of ['malformed', 'changed', 'short'] as const) {
   });
 }
 
-test('losing ranges after publication is partial failure, never a second full transfer', { timeout: 15000 }, async () => {
+test('losing ranges after publication is partial failure, never a second full transfer', fixtureOptions, async () => {
   const f = await fixture();
   try {
     let reader = await f.start();
@@ -243,7 +247,7 @@ test('losing ranges after publication is partial failure, never a second full tr
   } finally { await f.close(); }
 });
 
-test('missing validators explicitly downloads the original before publishing pages', { timeout: 15000 }, async () => {
+test('missing validators explicitly downloads the original before publishing pages', fixtureOptions, async () => {
   const f = await fixture('no-validator');
   try {
     let reader = await f.start();
@@ -254,7 +258,7 @@ test('missing validators explicitly downloads the original before publishing pag
   } finally { await f.close(); }
 });
 
-test('a corrupt first page cannot create a readable resource', { timeout: 10000 }, async () => {
+test('a corrupt first page cannot create a readable resource', fixtureOptions, async () => {
   const f = await fixture('range', 1);
   try {
     let reader = await f.start();
@@ -264,7 +268,7 @@ test('a corrupt first page cannot create a readable resource', { timeout: 10000 
   } finally { await f.close(); }
 });
 
-test('valid held-auth startup disconnect performs zero provider operations after authentication releases', { timeout: 10000 }, async () => {
+test('valid held-auth startup disconnect performs zero provider operations after authentication releases', fixtureOptions, async () => {
   const f = await fixture();
   let release!: () => void;
   try {
@@ -328,7 +332,7 @@ function jobClock(context: TestContext) {
     return workers;
   }
 
-  test('unexpected idle worker exit terminates held background work and preserves only validated pages', { timeout: 15000 }, async context => {
+  test('unexpected idle worker exit terminates held background work and preserves only validated pages', fixtureOptions, async context => {
     const f = await fixture();
     const workers = observeWorkers(context);
     try {
@@ -344,7 +348,7 @@ function jobClock(context: TestContext) {
     } finally { await f.close(); }
   });
 
-  test('three eleven-second worker commands share one thirty-second processing watchdog', { timeout: 40000 }, async context => {
+  test('three eleven-second worker commands share one thirty-second processing watchdog', fixtureOptions, async context => {
     const f = await fixture();
     observeWorkers(context, true);
     const started = performance.now();
@@ -358,7 +362,7 @@ function jobClock(context: TestContext) {
     } finally { await f.close(); }
   });
 
-  test('a lost initial response after handoff is reclaimed by the unrenewed lease', { timeout: 10000 }, async context => {
+  test('a lost initial response after handoff is reclaimed by the unrenewed lease', fixtureOptions, async context => {
     const f = await fixture();
     const clock = jobClock(context);
     try {
@@ -373,7 +377,7 @@ function jobClock(context: TestContext) {
     } finally { await f.close(); }
   });
 
-for (const expiry of ['lease', 'absolute'] as const) test(`${expiry} job deadline cancels held background work and cleans the shared slot`, { timeout: 15000 }, async context => {
+for (const expiry of ['lease', 'absolute'] as const) test(`${expiry} job deadline cancels held background work and cleans the shared slot`, fixtureOptions, async context => {
   const f = await fixture();
   const clock = jobClock(context);
   try {
@@ -399,7 +403,7 @@ for (const expiry of ['lease', 'absolute'] as const) test(`${expiry} job deadlin
   } finally { await f.close(); }
 });
 
-test('cold later-page priority does not prepare preceding pages', { timeout: 15000 }, async () => {
+test('cold later-page priority does not prepare preceding pages', fixtureOptions, async () => {
   const f = await fixture();
   try {
     let reader = await f.start(12);
@@ -412,7 +416,7 @@ test('cold later-page priority does not prepare preceding pages', { timeout: 150
   } finally { await f.close(); }
 });
 
-test('ignored initial range uses one explicit full-download fallback, never labels it incremental', { timeout: 15000 }, async () => {
+test('ignored initial range uses one explicit full-download fallback, never labels it incremental', fixtureOptions, async () => {
   const f = await fixture('ignored');
   try {
     let reader = await f.start();
@@ -429,7 +433,7 @@ test('ignored initial range uses one explicit full-download fallback, never labe
   } finally { await f.close(); }
 });
 
-test('late damaged page retains validated pages with a persistent failure, not a complete book', { timeout: 15000 }, async () => {
+test('late damaged page retains validated pages with a persistent failure, not a complete book', fixtureOptions, async () => {
   const f = await fixture('range', true);
   try {
     let reader = await f.start();
@@ -444,7 +448,7 @@ test('late damaged page retains validated pages with a persistent failure, not a
   } finally { await f.close(); }
 });
 
-test('partial protocol identifies every pending page and advances revision without pretending completeness', { timeout: 15000 }, async () => {
+test('partial protocol identifies every pending page and advances revision without pretending completeness', fixtureOptions, async () => {
   const f = await fixture();
   try {
     let reader = await f.start();
@@ -458,7 +462,7 @@ test('partial protocol identifies every pending page and advances revision witho
   } finally { await f.close(); }
 });
 
-test('releasing a terminal partial failure removes retained bytes and permits reopening', { timeout: 15000 }, async () => {
+test('releasing a terminal partial failure removes retained bytes and permits reopening', fixtureOptions, async () => {
   const f = await fixture('range', true);
   try {
     let reader = await f.start();
@@ -475,7 +479,7 @@ test('releasing a terminal partial failure removes retained bytes and permits re
   } finally { await f.close(); }
 });
 
-test('application shutdown waits for background worker and retained-file cleanup', { timeout: 15000 }, async () => {
+test('application shutdown waits for background worker and retained-file cleanup', fixtureOptions, async () => {
   const f = await fixture();
   try {
     let reader = await f.start();
@@ -487,7 +491,7 @@ test('application shutdown waits for background worker and retained-file cleanup
   } finally { await f.close(); }
 });
 
-test('disconnect before the initial response handoff cancels the job and removes operation listeners', { timeout: 10000 }, async () => {
+test('disconnect before the initial response handoff cancels the job and removes operation listeners', fixtureOptions, async () => {
   const f = await fixture();
   const held = f.holdResponse();
   try {
@@ -505,7 +509,7 @@ test('disconnect before the initial response handoff cancels the job and removes
 });
 
 for (const invalidation of ['session', 'user', 'configuration', 'source'] as const) {
-  test(`${invalidation} invalidation revokes even validated partial resources and stops held transport`, { timeout: 10000 }, async () => {
+  test(`${invalidation} invalidation revokes even validated partial resources and stops held transport`, fixtureOptions, async () => {
     const f = await fixture();
     try {
       let reader = await f.start();
@@ -524,7 +528,7 @@ for (const invalidation of ['session', 'user', 'configuration', 'source'] as con
   });
 }
 
-test('pending-page claim/save cannot replace the last ready-page position', { timeout: 10000 }, async () => {
+test('pending-page claim/save cannot replace the last ready-page position', fixtureOptions, async () => {
   const f = await fixture();
   try {
     let reader = await f.start();
@@ -542,7 +546,7 @@ test('pending-page claim/save cannot replace the last ready-page position', { ti
   } finally { await f.close(); }
 });
 
-test('whole-directory name, type, page and declared-entry guards run before any page is exposed', { timeout: 20000 }, async () => {
+test('whole-directory name, type, page and declared-entry guards run before any page is exposed', fixtureOptions, async () => {
   const page = comicPanel(1, 1, 1, 1);
   const archives = [
     await buildCbzFixture([{ name: '1.png', data: page }, { name: '1.PNG', data: page }]),
@@ -566,7 +570,7 @@ test('whole-directory name, type, page and declared-entry guards run before any 
   }
 });
 
-test('expired partial handles cannot pin a failed preparation until the24hour complete-cache TTL', { timeout: 10000 }, async () => {
+test('expired partial handles cannot pin a failed preparation until the24hour complete-cache TTL', fixtureOptions, async () => {
   const f = await fixture('range', true);
   try {
     let reader = await f.start();
@@ -579,7 +583,7 @@ test('expired partial handles cannot pin a failed preparation until the24hour co
   } finally { await f.close(); }
 });
 
-test('the shared reservation is not downgraded until spool cleanup finishes and retained pages stay charged', { timeout: 10000 }, async context => {
+test('the shared reservation is not downgraded until spool cleanup finishes and retained pages stay charged', fixtureOptions, async context => {
   const f = await fixture('range', true);
   const rm = fs.rm;
   let entered!: () => void, release!: () => void;
@@ -606,7 +610,7 @@ test('the shared reservation is not downgraded until spool cleanup finishes and 
   } finally { release(); await f.close(); }
 });
 
-test('status waits are coalesced per reader, not across independent completed-cache handles', { timeout: 10000 }, async () => {
+test('status waits are coalesced per reader, not across independent completed-cache handles', fixtureOptions, async () => {
   const f = await fixture();
   try {
     const reader = await f.start();
@@ -621,7 +625,7 @@ test('status waits are coalesced per reader, not across independent completed-ca
   } finally { await f.close(); }
 });
 
-test('release after native exit but before complete publication still closes and removes the original spool', { timeout: 10000 }, async context => {
+test('release after native exit but before complete publication still closes and removes the original spool', fixtureOptions, async context => {
   const f = await fixture();
   const workers = observeWorkers(context);
   let entered!: () => void, release!: () => void;
@@ -646,7 +650,7 @@ test('release after native exit but before complete publication still closes and
   } finally { release(); await f.close(); }
 });
 
-test('the original session expiry cancels held background work without a renewal or another client request', { timeout: 10000 }, async () => {
+test('the original session expiry cancels held background work without a renewal or another client request', fixtureOptions, async () => {
   const f = await fixture();
   const sql = new Database(path.join(f.root, 'fixture.db'));
   try {
@@ -660,7 +664,7 @@ test('the original session expiry cancels held background work without a renewal
   } finally { sql.close(); await f.close(); }
 });
 
-test('a partial reader belongs to its exact session and cannot be borrowed even by the same user', { timeout: 10000 }, async () => {
+test('a partial reader belongs to its exact session and cannot be borrowed even by the same user', fixtureOptions, async () => {
   const f = await fixture();
   try {
     const reader = await f.start();
@@ -673,7 +677,7 @@ test('a partial reader belongs to its exact session and cannot be borrowed even 
   } finally { await f.close(); }
 });
 
-test('a priority change during held directory loading waits for the validated index instead of failing the job', { timeout: 10000 }, async () => {
+test('a priority change during held directory loading waits for the validated index instead of failing the job', fixtureOptions, async () => {
   const f = await fixture();
   const held = f.holdIndex();
   try {
@@ -689,7 +693,7 @@ test('a priority change during held directory loading waits for the validated in
   } finally { held.release(); await f.close(); }
 });
 
-test('a failed cache entry reports unsupported content instead of a preparation that is no longer running', { timeout: 10000 }, async () => {
+test('a failed cache entry reports unsupported content instead of a preparation that is no longer running', fixtureOptions, async () => {
   const f = await fixture('range', true);
   try {
     f.release();
@@ -703,7 +707,7 @@ test('a failed cache entry reports unsupported content instead of a preparation 
   } finally { await f.close(); }
 });
 
-test('a valid forced-ZIP64 directory still prepares its original page bytes', { timeout: 10000 }, async () => {
+test('a valid forced-ZIP64 directory still prepares its original page bytes', fixtureOptions, async () => {
   const panel = comicPanel(1, 1, 16, 16);
   const writer = new ZipWriter(new Uint8ArrayWriter(), { zip64: true, useWebWorkers: false, useCompressionStream: false });
   await writer.add('1.png', new Uint8ArrayReader(panel));
@@ -719,7 +723,7 @@ test('a valid forced-ZIP64 directory still prepares its original page bytes', { 
   } finally { await f.close(); }
 });
 
-test('a priority change during the one full-download fallback does not abort or restart that transfer', { timeout: 10000 }, async () => {
+test('a priority change during the one full-download fallback does not abort or restart that transfer', fixtureOptions, async () => {
   const f = await fixture('entry-ignored');
   const held = f.holdFull();
   try {
