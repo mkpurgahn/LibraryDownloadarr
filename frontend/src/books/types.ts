@@ -30,7 +30,7 @@ export interface BookItem extends BookKey {
 }
 export type BookSummary = Omit<BookItem, 'files' | 'tracks' | 'chapters'> & { hasEbook: boolean; audioTrackCount: number };
 export interface BookTarget { itemId: string; fileId: string; contentVersion: string }
-export const READ_LIMITS = { epub: 100 * 1024 * 1024, pdf: 512 * 1024 * 1024, cbz: 100 * 1024 * 1024 } as const;
+export const READ_LIMITS = { epub: 100 * 1024 * 1024, pdf: 512 * 1024 * 1024, cbz: 256 * 1024 * 1024 } as const;
 export const COMIC_LIMITS = { pages: 1000, pixels: 16000000, dimension: 8192, entryBytes: 32 * 1024 * 1024 } as const;
 export interface BookTicketResult {
   target: BookTarget;

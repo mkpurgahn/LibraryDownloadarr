@@ -132,7 +132,7 @@ function rewriteCss(value: string, from: string, resources: Map<string, Prepared
 async function processArchive(source: string, output: string, format: ArchiveFormat, signal: AbortSignal): Promise<ArchiveResult> {
   const started = performance.now();
   const stat = await fs.stat(source);
-  const budget = new ArchiveBudget(stat.size, signal);
+  const budget = new ArchiveBudget(stat.size, signal, format);
   const entries = new Map<string, StoredEntry>();
   const foldedNames = new Set<string>();
   let file: FileHandle | undefined;

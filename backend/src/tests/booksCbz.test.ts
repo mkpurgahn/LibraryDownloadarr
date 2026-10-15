@@ -6,8 +6,9 @@ import { MessageChannel, Worker } from 'node:worker_threads';
 import test, { after } from 'node:test';
 import sharp from 'sharp';
 import { runArchiveWorker } from '../books/epub/prepare';
+import { ArchiveBudget, CBZ_LIMITS, EPUB_LIMITS } from '../books/epub/manifest';
 import { progressLocator } from '../books/progressTypes';
-import { animatedComicPanel, buildCbzFixture, comicPanel } from '../books/proof/cbzFixture';
+import { animatedComicPanel, buildCbzFixture, buildLargeCbzFixture, comicPanel } from '../books/proof/cbzFixture';
 
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const evidence: Array<Record<string, unknown>> = [];
@@ -22,7 +23,7 @@ async function prepare(bytes: Buffer, inspect: (result: Awaited<ReturnType<typeo
       new Worker(path.resolve('dist', 'books', 'epub', 'worker.js'), {
         workerData: { source, output, format: 'cbz' }, env: {},
         resourceLimits: { maxOldGenerationSizeMb: 128, maxYoungGenerationSizeMb: 16, stackSizeMb: 4 },
-      }));
+      }), 'cbz');
     await inspect(result, output);
     assert.equal(hash(await fs.readFile(source)), hash(bytes));
   } finally { await fs.rm(root, { recursive: true, force: true }); }
@@ -37,6 +38,49 @@ test('CBZ prepares every numbered raster page in natural order, never cover artw
       assert.equal(hash(await fs.readFile(path.join(output, result.spine[index]))), hash(comicPanel(number)));
     }
   });
+});
+
+test('CBZ larger than the reported 168636333-byte original prepares from disk within existing worker bounds', { timeout: 60000 }, async () => {
+  const bytes = await buildLargeCbzFixture();
+  assert.ok(bytes.length > 168636333, 'Generated original must exceed the actual reported file size');
+  await prepare(bytes, async (result, output) => {
+    assert.equal(result.state, 'ready', JSON.stringify(result));
+    assert.equal(result.resources.length, 243);
+    assert.deepEqual(result.spine, Array.from({ length: 243 }, (_, index) => hash(`Pages/${index + 1}.png`)));
+    assert.ok(result.metrics.peakTrackedBytes <= 256 * 1024 * 1024);
+    assert.ok(result.metrics.expandedBytes <= 512 * 1024 * 1024);
+    assert.ok(result.metrics.expandedBytes > 171043415, 'Generated expanded content must exceed the reported directory total');
+    assert.ok(result.metrics.elapsedMs < 30000);
+    assert.equal(result.metrics.decoderConcurrency, 1);
+    assert.equal(result.metrics.decoderCacheMemoryMiB, 0);
+    assert.equal(hash(await fs.readFile(path.join(output, result.spine[0]))), hash(comicPanel(1, 1, 960, 600, 0)));
+    assert.equal(hash(await fs.readFile(path.join(output, result.spine[242]))), hash(comicPanel(2, 1, 480, 512, 0)));
+    evidence.push({ case: 'above-actual-reported-original-size', reportedOriginalBytes: 168636333,
+      generatedArchiveBytes: bytes.length, ...result.metrics,
+      qualification: 'Generated243-page archive, not the user original; tracked worker budget is not a universal process-RSS bound.' });
+  });
+});
+
+test('CBZ has a separate bounded archive allowance while EPUB and cache budgets stay unchanged', async () => {
+  assert.doesNotThrow(() => new ArchiveBudget(256 * 1024 * 1024, undefined, 'cbz'));
+  assert.throws(() => new ArchiveBudget(256 * 1024 * 1024 + 1, undefined, 'cbz'), { status: 413, code: 'CBZ_TOO_LARGE' });
+  assert.doesNotThrow(() => new ArchiveBudget(100 * 1024 * 1024));
+  assert.throws(() => new ArchiveBudget(100 * 1024 * 1024 + 1), { status: 413, code: 'EPUB_TOO_LARGE' });
+  assert.equal(EPUB_LIMITS.cacheBytes - EPUB_LIMITS.expandedBytes - CBZ_LIMITS.compressedBytes, 256 * 1024 * 1024);
+  const root = path.resolve('.test-data', 'books-cbz-oversize', randomUUID());
+  await fs.mkdir(root, { recursive: true });
+  const source = path.join(root, 'oversize.cbz');
+  const file = await fs.open(source, 'wx');
+  await file.truncate(256 * 1024 * 1024 + 1);
+  await file.close();
+  let started = false;
+  try {
+    await assert.rejects(runArchiveWorker(source, path.join(root, 'pages'), new AbortController().signal, () => {
+      started = true;
+      throw new Error('Oversized original must not start a worker');
+    }, 'cbz'), { status: 413, code: 'CBZ_TOO_LARGE' });
+    assert.equal(started, false);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
 test('CBZ mixed corrupt, encrypted, unsupported or ambiguous pages reject the whole original', async () => {

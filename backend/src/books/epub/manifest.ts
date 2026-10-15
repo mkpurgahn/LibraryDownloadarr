@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 export const EPUB_POLICY = 'epub-scroll-v1' as const;
 export const CBZ_POLICY = 'cbz-pages-v1' as const;
 export type ArchiveFormat = 'epub' | 'cbz';
-export const CBZ_LIMITS = { pages: 1000, pixels: 16000000, dimension: 8192 } as const;
+export const CBZ_LIMITS = { compressedBytes: 256 * 1024 * 1024, pages: 1000, pixels: 16000000, dimension: 8192 } as const;
 export const CBZ_DOWNLOAD_ONLY_REASON = 'This CBZ is corrupt, unsupported, or exceeds the safe reading limits; download the original.';
 export const EPUB_LIMITS = {
   compressedBytes: 100 * 1024 * 1024,
@@ -24,6 +24,8 @@ export const EPUB_LIMITS = {
   handles: 256,
 } as const;
 export const DOWNLOAD_ONLY_REASON = 'Cannot read safely here; download original.';
+export const archiveCompressedLimit = (format: ArchiveFormat): number =>
+  format === 'cbz' ? CBZ_LIMITS.compressedBytes : EPUB_LIMITS.compressedBytes;
 export const epubContentVersion = (fileVersion: string): string =>
   createHash('sha256').update(`${EPUB_POLICY}:${fileVersion}`).digest('hex');
 export const cbzContentVersion = (fileVersion: string): string =>
@@ -76,9 +78,11 @@ export class ArchiveBudget {
   peakTrackedBytes = 0;
   peakProcessRssBytes = 0;
   private entryBytes = 0;
-  constructor(private readonly compressedBytes: number, private readonly signal?: AbortSignal) {
+  constructor(private readonly compressedBytes: number, private readonly signal?: AbortSignal, format: ArchiveFormat = 'epub') {
     if (!Number.isSafeInteger(compressedBytes) || compressedBytes <= 0) throw new UnsafeEpub('Invalid archive size');
-    if (compressedBytes > EPUB_LIMITS.compressedBytes) throw new BooksError(413, 'EPUB_TOO_LARGE', DOWNLOAD_ONLY_REASON);
+    if (compressedBytes > archiveCompressedLimit(format)) throw new BooksError(413,
+      format === 'cbz' ? 'CBZ_TOO_LARGE' : 'EPUB_TOO_LARGE',
+      format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON);
   }
   beginEntry(): void {
     this.signal?.throwIfAborted();

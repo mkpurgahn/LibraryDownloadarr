@@ -205,8 +205,17 @@ remain explicitly original-download-only.
 
 CBZ uses that **same** preparation slot, ZIP validation, worker watchdog,
 authenticated resource broker and 1 GiB cache, not another resource pool.
-The archive/entry/expansion/time limits above are unchanged. Additional CBZ
-limits are **1,000 pages**, **16,000,000 decoded pixels per page**, and
+CBZ originals may be up to **256 MiB compressed**; EPUB retains its **100 MiB**
+limit. Originals stream to private disk and the worker reads bounded chunks,
+not one whole-archive memory buffer. The 512 MiB expanded, 32 MiB entry,
+100:1 ratio, 256 MiB tracked-memory and 30-second worker limits remain unchanged.
+Preparation reserves the format's compressed allowance plus the expanded
+allowance before downloading: at most 768 MiB for CBZ, leaving 256 MiB within
+the existing 1 GiB cache budget for other entries. This is per-preparation
+accounting, not a guarantee of free filesystem space or total process RSS.
+The original copy rejects actual streamed bytes beyond its declared size or
+allowance; a short or changed response is not accepted as a complete archive.
+Additional CBZ limits are **1,000 pages**, **16,000,000 decoded pixels per page**, and
 **8,192 pixels per side**. Static JPEG, PNG and WebP are supported. Every page
 is fully decoded and checked before an archive becomes readable; one damaged,
 encrypted, unsupported or oversized page makes the whole CBZ download-only

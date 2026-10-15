@@ -7,7 +7,7 @@ import { Worker } from 'node:worker_threads';
 import { BooksError, notFound, opaqueSegment } from '../limits';
 import {
   ArchiveFormat, ArchiveResult, CBZ_DOWNLOAD_ONLY_REASON, CBZ_POLICY, DOWNLOAD_ONLY_REASON, EPUB_LIMITS,
-  EPUB_POLICY, ReaderDescriptor, cbzContentVersion, epubContentVersion,
+  EPUB_POLICY, ReaderDescriptor, archiveCompressedLimit, cbzContentVersion, epubContentVersion,
 } from './manifest';
 import { DatabaseService } from '../../models/database';
 import { BooksCatalog } from '../catalog';
@@ -25,7 +25,7 @@ export async function runArchiveWorker(
   factory?: () => Worker, format: ArchiveFormat = 'epub'
 ): Promise<ArchiveResult> {
   if (signal.aborted) throw new DOMException('Preparation cancelled', 'AbortError');
-  if ((await fs.stat(source)).size > EPUB_LIMITS.compressedBytes) {
+  if ((await fs.stat(source)).size > archiveCompressedLimit(format)) {
     throw new BooksError(413, format === 'cbz' ? 'CBZ_TOO_LARGE' : 'EPUB_TOO_LARGE',
       format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON);
   }
@@ -220,7 +220,8 @@ export class EpubPreparation {
     const checked = await this.relay.inspect(principal, target, signal);
     const format = checked.file.extension;
     if ((format !== 'epub' && format !== 'cbz') || checked.file.role !== 'ebook') throw new BooksError(422, 'BOOK_DOWNLOAD_ONLY', DOWNLOAD_ONLY_REASON);
-    if (checked.file.size > EPUB_LIMITS.compressedBytes) throw new BooksError(413, format === 'cbz' ? 'CBZ_TOO_LARGE' : 'EPUB_TOO_LARGE',
+    const compressedLimit = archiveCompressedLimit(format);
+    if (checked.file.size > compressedLimit) throw new BooksError(413, format === 'cbz' ? 'CBZ_TOO_LARGE' : 'EPUB_TOO_LARGE',
       format === 'cbz' ? CBZ_DOWNLOAD_ONLY_REASON : DOWNLOAD_ONLY_REASON);
     const key = this.key(target, format);
     await this.prune(0);
@@ -235,12 +236,12 @@ export class EpubPreparation {
     const work = path.join(this.db.booksCacheDir, `work-${randomUUID()}`);
     const destination = path.join(this.db.booksCacheDir, `prepared-${key}`);
     try {
-      await this.prune(EPUB_LIMITS.expandedBytes + EPUB_LIMITS.compressedBytes);
+      await this.prune(EPUB_LIMITS.expandedBytes + compressedLimit);
       await fs.mkdir(work, { mode: 0o700 });
       const original = path.join(work, 'original');
       const source = await fs.open(original, 'wx', 0o600);
       try {
-        await this.relay.copyOriginal(principal, target, source.createWriteStream({ autoClose: false }), operation.signal, EPUB_LIMITS.compressedBytes);
+        await this.relay.copyOriginal(principal, target, source.createWriteStream({ autoClose: false }), operation.signal, compressedLimit);
       } finally { await source.close(); }
       const result = await runArchiveWorker(original, path.join(work, 'resources'), operation.signal, undefined, format);
       if (operation.signal.aborted) throw new DOMException('Preparation cancelled', 'AbortError');

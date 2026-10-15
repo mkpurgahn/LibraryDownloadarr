@@ -95,7 +95,7 @@ export const BookDetail: React.FC = () => {
                         onClick={() => void audio.open(item)}>Listen</button>}
                   </div>}
                   {role === 'ebook' && files.length > 0 && !readable && <p className="mt-2 text-xs text-gray-400">{oversized
-                    ? selected?.extension === 'cbz' ? 'This CBZ exceeds the 100 MiB archive limit; download the original below.' :
+                    ? selected?.extension === 'cbz' ? `This CBZ exceeds the ${READ_LIMITS.cbz / 1024 / 1024} MiB archive limit; download the original below.` :
                       'This original exceeds the in-app reader size limit; download it below.' : item.read.reason || 'This ebook is download-only.'}</p>}
                   {role === 'audio' && files.length > 0 && !item.listen.available && <p className="mt-2 text-xs text-gray-400">{item.listen.reason}</p>}
                 </div>

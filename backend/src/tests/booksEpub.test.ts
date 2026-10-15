@@ -4,11 +4,13 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import http from 'node:http';
+import { Socket } from 'node:net';
+import { Writable } from 'node:stream';
 import express from 'express';
 import Database from 'better-sqlite3';
 import { deflateRawSync } from 'node:zlib';
 import test, { after } from 'node:test';
-import { ArchiveBudget, EPUB_LIMITS, validateArchiveName } from '../books/epub/manifest';
+import { ArchiveBudget, EPUB_LIMITS, archiveCompressedLimit, validateArchiveName } from '../books/epub/manifest';
 import { EpubPreparation, runArchiveWorker } from '../books/epub/prepare';
 import { buildEpubFixture as epub, fixturePackage as packageXml, fixtureChapter as chapter } from '../books/proof/epubFixture';
 import { buildCbzFixture } from '../books/proof/cbzFixture';
@@ -174,7 +176,7 @@ test('epub_two_navigation_and_unused_nested_archives', async () => {
   evidence.push({ test: 'epub_two_navigation_and_unused_nested_archives', ncx: 'renderable', nestedExpansion: false, verdict: 'pass' });
 });
 
-for (const format of ['epub', 'cbz'] as const) test(`${format}_resource_navigation_is_non_executable_and_handles_are_session_bound`, async () => {
+for (const format of ['epub', 'cbz'] as const) test(`${format}_resource_navigation_is_non_executable_and_handles_are_session_bound`, async t => {
   const bytes = format === 'cbz' ? await buildCbzFixture() : await epub();
   const root = path.resolve('.test-data', 'books-epub', randomUUID());
   await fs.mkdir(root, { recursive: true });
@@ -223,7 +225,8 @@ for (const format of ['epub', 'cbz'] as const) test(`${format}_resource_navigati
   let now = Date.now();
   const plex = new Membership();
   const catalog = new BooksCatalog(db.books);
-  const preparation = new EpubPreparation(db, catalog, new BooksRelay(db, catalog, new BookStreams(), plex), plex, () => now);
+  const relay = new BooksRelay(db, catalog, new BookStreams(), plex);
+  const preparation = new EpubPreparation(db, catalog, relay, plex, () => now);
   const app = express(); app.use(express.json());
   app.use('/api/books', createBooksRouter(db, { plex, preparation }));
   const server = http.createServer(app);
@@ -241,6 +244,42 @@ for (const format of ['epub', 'cbz'] as const) test(`${format}_resource_navigati
     assert.equal(item.read.available, true);
     const file = item.files[0];
     const principal = { userId: user.id, sessionId: sessions[0].id, expiresAt: sessions[0].expiresAt };
+    if (format === 'cbz') {
+      const target = { itemId: 'item', fileId: file.fileId, contentVersion: file.contentVersion };
+      const checked = await relay.inspect(principal, target, new AbortController().signal);
+      const limit = 256 * 1024 * 1024;
+      for (const extra of [1, -1]) {
+        const body = new http.IncomingMessage(new Socket());
+        body.statusCode = 200;
+        body.headers = { 'content-length': String(limit), etag: version };
+        let remaining = limit + extra;
+        const chunk = Buffer.alloc(65536, 1);
+        body._read = () => {
+          if (!remaining) { body.push(null); return; }
+          const next = chunk.subarray(0, Math.min(chunk.length, remaining));
+          remaining -= next.length;
+          body.push(next);
+        };
+        let written = 0;
+        const destination = new Writable({ write(data: Buffer, _encoding, done) { written += data.length; done(); } });
+        const inspect = t.mock.method(relay, 'inspect', async () => ({
+          ...checked, file: { ...checked.file, size: limit }, representation: { ...checked.representation, size: limit },
+        }));
+        const transport = t.mock.method(checked.client, 'openFile', async () => body);
+        try {
+          await assert.rejects(relay.copyOriginal(principal, target, destination, new AbortController().signal, limit),
+            { code: extra > 0 ? 'EPUB_TOO_LARGE' : 'ABS_FILE_INCOMPLETE' });
+          assert.equal(written, extra > 0 ? limit : limit - 1);
+          assert.equal(body.destroyed, true);
+          assert.equal(destination.destroyed, true);
+        } finally {
+          inspect.mock.restore(); transport.mock.restore(); body.destroy(); destination.destroy();
+        }
+      }
+      evidence.push({ test: 'cbz_actual_stream_bytes_bound_at_256MiB', maximumWrittenBytes: limit,
+        overrunChunkRejected: true, shortBodyRejected: true,
+        qualification: 'Real copy pipeline with controlled IncomingMessage chunks; not a TCP wire-byte ceiling or an authentication mock proof.' });
+    }
     const controller = new AbortController();
     const originalStarted = new Promise<void>(resolve => { beginOriginal = resolve; });
     stallSource = true;
@@ -251,11 +290,13 @@ for (const format of ['epub', 'cbz'] as const) test(`${format}_resource_navigati
     assert.equal((await request('/items/item/reader', 'POST', 0, { fileId: file.fileId, contentVersion: file.contentVersion })).status, 429);
     controller.abort();
     await assert.rejects(cancelled, { name: 'AbortError' });
+    assert.equal((await fs.readdir(db.booksCacheDir)).some(name => name.startsWith('work-')), false);
     stallSource = false;
     const prepared = await request('/items/item/reader', 'POST', 0, { fileId: file.fileId, contentVersion: file.contentVersion });
     assert.equal(prepared.status, 200);
     const descriptor = await prepared.json() as ReaderDescriptor;
     assert.equal(descriptor.state, 'ready');
+    assert.equal((await fs.readdir(db.booksCacheDir)).some(name => name.startsWith('work-')), false);
     assert.notEqual(descriptor.contentVersion, file.contentVersion);
     const resource = `/readers/${descriptor.readerId}/resources/${descriptor.spine[0]}`;
     for (const method of ['GET', 'HEAD']) {
@@ -297,7 +338,7 @@ for (const format of ['epub', 'cbz'] as const) test(`${format}_resource_navigati
     assert.equal(rebuiltReader.contentVersion, descriptor.contentVersion);
     version = '"fixture-v2"';
     assert.equal((await request(`/readers/${rebuiltReader.readerId}/resources/${rebuiltReader.spine[0]}`)).status, 409);
-    declaredSize = EPUB_LIMITS.compressedBytes + 1;
+    declaredSize = archiveCompressedLimit(format) + 1;
     const oversized = await (await request('/items/item')).json() as BookItem;
     assert.equal((await request('/items/item/reader', 'POST', 0, {
       fileId: oversized.files[0].fileId, contentVersion: oversized.files[0].contentVersion,
@@ -343,6 +384,6 @@ after(async () => {
   assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(path.join(output, 'epub-worker-verdict.json'), JSON.stringify({
-    schemaVersion: 1, cases: evidence, verdict: evidence.length === 10 ? 'pass' : 'blocked', node: process.version,
+    schemaVersion: 1, cases: evidence, verdict: evidence.length === 11 ? 'pass' : 'blocked', node: process.version,
   }, null, 2));
 });

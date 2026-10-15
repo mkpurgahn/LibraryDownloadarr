@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { CDPSession, Locator, Page, Route } from '@playwright/test';
 import { test, expect, signIn, capture, originalDownload } from './harness';
-import { parseReader } from '../../src/books/types';
+import { parseBookItem, parseReader } from '../../src/books/types';
 
 test.use({ cbzFixtures: true, controlledReaderClock: true, reverseProxy: true });
 
@@ -15,6 +15,64 @@ async function openComic(page: Page) {
   await card.click();
   await expect(page.getByLabel('Ebook original').locator('option')).toHaveCount(2);
 }
+
+test('CBZ large original above the actual reported size renders and resumes all243pages', async ({ page, app }, info) => {
+  test.setTimeout(60000);
+  await app.setCbz('large');
+  await signIn(page, app);
+  await openComic(page);
+  const manifestResponse = await page.request.get(`${app.origin}/api/books/items/manga`);
+  expect(manifestResponse.status()).toBe(200);
+  const item = parseBookItem(await manifestResponse.json());
+  const original = item.files.find(file => file.basename === 'Observatory - chapter A.cbz')!;
+  expect(original.size).toBeGreaterThan(168636333);
+  await expect(page.getByRole('link', { name: 'Read', exact: true })).toBeVisible();
+  await expect(page.getByText(/exceeds.*archive limit/)).toHaveCount(0);
+  await capture(page, 'large-cbz-readable-detail', info);
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  const first = page.getByRole('img', { name: 'Comic page 1 of 243', exact: true });
+  await expect(first).toBeVisible({ timeout: 35000 });
+  await expect.poll(() => first.evaluate(element => element instanceof HTMLImageElement
+    ? [element.naturalWidth, element.naturalHeight] : [])).toEqual([960, 600]);
+  await page.getByLabel('Page number', { exact: true }).fill('243');
+  await page.getByRole('button', { name: 'Go to page', exact: true }).click();
+  const last = page.getByRole('img', { name: 'Comic page 243 of 243', exact: true });
+  await expect(last).toBeVisible();
+  await expect.poll(() => last.evaluate(element => element instanceof HTMLImageElement
+    ? [element.naturalWidth, element.naturalHeight] : [])).toEqual([480, 512]);
+  expect(await savedComicPage(page)).toBe(243);
+  await capture(page, 'large-cbz-last-page-saved', info);
+  await page.getByRole('link', { name: 'Back to book', exact: true }).click();
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+  await expect(last).toBeVisible();
+  const reopened = parseBookItem(await (await page.request.get(`${app.origin}/api/books/items/manga`)).json());
+  expect(reopened.files.find(file => file.fileId === original.fileId)?.contentVersion).toBe(original.contentVersion);
+  await fs.writeFile(info.outputPath('large-cbz-contract.json'), JSON.stringify({
+    actualReportedArchiveBytes: 168636333, generatedArchiveBytes: original.size, pages: 243,
+    renderedFirstAndLast: true, savedAndResumedPage: 243, originalIdentityPreserved: true,
+    realOriginalPagesOpened: false,
+  }, null, 2));
+});
+
+test('CBZ oversized original retains download and is rejected before preparation', async ({ page, app }, info) => {
+  await app.setCbz('oversized');
+  await signIn(page, app);
+  await openComic(page);
+  await expect(page.getByRole('button', { name: 'Read', exact: true })).toBeDisabled();
+  await expect(page.getByText('This CBZ exceeds the 256 MiB archive limit; download the original below.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Download original Observatory - chapter A.cbz', exact: true })).toBeEnabled();
+  const item = parseBookItem(await (await page.request.get(`${app.origin}/api/books/items/manga`)).json());
+  expect(item.files[0].size).toBe(256 * 1024 * 1024 + 1);
+  const response = await page.request.post(`${app.origin}/api/books/items/manga/reader`, {
+    headers: { Authorization: `Bearer ${app.users[0].bearer}`, Origin: app.origin },
+    data: { fileId: item.files[0].fileId, contentVersion: item.files[0].contentVersion },
+  });
+  expect(response.status()).toBe(413);
+  expect((await response.json()).code).toBe('CBZ_TOO_LARGE');
+  await expect(page.getByRole('region', { name: 'Comic page' })).toHaveCount(0);
+  await capture(page, 'oversized-cbz-retains-original', info);
+});
 
 async function expectPanel(page: Page, position: number, panel: number, chapter = 1, total = 3) {
   const image = page.getByRole('img', { name: `Comic page ${position} of ${total}`, exact: true });

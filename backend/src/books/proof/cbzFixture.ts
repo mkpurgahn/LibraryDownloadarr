@@ -15,7 +15,7 @@ function chunk(type: string, data: Buffer): Buffer {
 }
 
 // Original numbered panels, generated from pixels rather than third-party artwork.
-export function comicPanel(page: number, chapter = 1, width = 480, height = 720): Buffer {
+export function comicPanel(page: number, chapter = 1, width = 480, height = 720, compressionLevel = 6): Buffer {
   const rows = Buffer.alloc((width * 3 + 1) * height);
   const digits = ['111101101101111', '010110010010111', '111001111100111', '111001111001111',
     '101101111001001', '111100111001111', '111100111101111', '111001010010010',
@@ -42,7 +42,7 @@ export function comicPanel(page: number, chapter = 1, width = 480, height = 720)
   header.writeUInt32BE(width); header.writeUInt32BE(height, 4);
   header[8] = 8; header[9] = 2;
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
-    chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
+    chunk('IDAT', deflateSync(rows, { level: compressionLevel })), chunk('IEND', Buffer.alloc(0))]);
 }
 
 export function animatedComicPanel(): Buffer {
@@ -65,4 +65,12 @@ export async function buildCbzFixture(entries: Array<{ name: string; data: Uint8
     password: entry.password, lastModDate: new Date('2020-01-01T00:00:00Z'),
   });
   return Buffer.from(await zip.close());
+}
+
+export async function buildLargeCbzFixture(): Promise<Buffer> {
+  const first = comicPanel(1, 1, 960, 600, 0);
+  const second = comicPanel(2, 1, 480, 512, 0);
+  return buildCbzFixture(Array.from({ length: 243 }, (_, index) => ({
+    name: `Pages/${index + 1}.png`, data: index === 0 ? first : second,
+  })));
 }

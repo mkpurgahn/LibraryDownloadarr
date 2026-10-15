@@ -29,7 +29,7 @@ type Provider = {
   libraryId: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
-  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized' | 'single'): Promise<void>;
+  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized' | 'single' | 'large'): Promise<void>;
   setPdf(mode: PdfFixtureMode): void;
   setAudio(mode: AudioFixtureMode): Promise<void>;
   stop(): Promise<void>;
@@ -42,7 +42,7 @@ export type BooksApp = App & {
   certificatePin: string;
   setUnavailable(value: boolean): void;
   replaceEpub(): Promise<void>;
-  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized' | 'single'): Promise<void>;
+  setCbz(mode: 'valid' | 'corrupt' | 'replacement' | 'oversized' | 'single' | 'large'): Promise<void>;
   setPdf(mode: PdfFixtureMode): void;
   setAudio(mode: AudioFixtureMode): Promise<void>;
   advanceReaderTime(milliseconds: number): void;
@@ -99,7 +99,7 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
       );
     }
   }
-  const { buildCbzFixture, comicPanel } = await import('../../../backend/dist/books/proof/cbzFixture.js');
+  const { buildCbzFixture, buildLargeCbzFixture, comicPanel } = await import('../../../backend/dist/books/proof/cbzFixture.js');
   const manga = cbzFixtures ? makeItem('manga', 'The Paper Observatory', ['cbz', 'cbz']) : undefined;
   if (manga) {
     manga.libraryFiles[0].metadata.filename = 'Observatory - chapter A.cbz';
@@ -114,9 +114,9 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
         data: mode === 'corrupt' && number === 2 ? Buffer.from('Damaged generated page') :
           comicPanel(mode === 'replacement' ? number + 1 : number, chapter),
       }));
-      const bytes = await buildCbzFixture(entries);
+      const bytes = mode === 'large' && chapter === 1 ? await buildLargeCbzFixture() : await buildCbzFixture(entries);
       files.set(`manga:manga-${chapter - 1}`, bytes);
-      manga.libraryFiles[chapter - 1].metadata.size = mode === 'oversized' ? 100 * 1024 * 1024 + 1 : bytes.length;
+      manga.libraryFiles[chapter - 1].metadata.size = mode === 'oversized' ? 256 * 1024 * 1024 + 1 : bytes.length;
       manga.libraryFiles[chapter - 1].metadata.mtimeMs += 1000;
     }
   };
