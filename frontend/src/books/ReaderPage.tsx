@@ -59,8 +59,15 @@ export const ReaderPage: React.FC = () => {
         saved = await progress.load();
         const page = progress.compatible && saved?.locator.kind === 'cbz' ? saved.locator.page : 1;
         const target = { itemId, fileId, contentVersion: file.contentVersion };
+        let partial: ProgressiveComicDescriptor | undefined;
         try {
-          const partial = await booksApi.prepareProgressive(target, page, controller.signal);
+          partial = await booksApi.prepareProgressive(target, page, controller.signal);
+        } catch (error) {
+          if (!(error instanceof BooksApiError) || error.status !== 404 || error.code !== 'BOOK_NOT_FOUND' || error.readerProtocol) throw error;
+          reader = await booksApi.prepareReader(target, controller.signal);
+          if (reader.policyVersion !== 'cbz-pages-v1') throw new Error('Reader format does not match this original.');
+        }
+        if (partial) {
           if (partial.contentVersion !== version) {
             await booksApi.releaseReader(partial.readerId);
             throw new Error('Reader format does not match this original.');
@@ -76,12 +83,9 @@ export const ReaderPage: React.FC = () => {
           reader = await comicSource.descriptor(controller.signal);
           if (controller.signal.aborted) return;
           setSource(comicSource);
-        } catch (error) {
-          if (!(error instanceof BooksApiError) || error.status !== 404 || error.code !== 'BOOK_NOT_FOUND' || error.readerProtocol) throw error;
-          reader = await booksApi.prepareReader(target, controller.signal);
-          if (reader.policyVersion !== 'cbz-pages-v1') throw new Error('Reader format does not match this original.');
         }
         if (controller.signal.aborted) return;
+        if (!reader) throw new Error('Reader preparation returned no descriptor.');
         setDescriptor(reader);
         if (!comicSource && reader.state !== 'ready') return;
       } else {

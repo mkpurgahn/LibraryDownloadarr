@@ -223,6 +223,8 @@ validate the whole ZIP directory first, then prioritize the first ten pages, or
 the saved/requested page and its nearby window. Each page is fully CRC-checked
 and decoded before it becomes readable; remaining pages prepare serially in the
 background. Pending pages cannot replace the last rendered saved position.
+Delayed claim acknowledgements do not replace a newer local position; queued
+saves and leaving the reader retain the latest rendered anchor.
 Late corruption stops preparation with a persistent partial-failure warning:
 validated pages may remain available, but unvalidated pages never do and the
 book is not reported complete. Retained pages stay charged to the same cache.
@@ -239,6 +241,9 @@ guarantees. Missing range support/validators or an ignored initial range may use
 one explicitly labeled full-download fallback before any page is published;
 changed/malformed responses never qualify. Lost range support after publication
 stops preparation instead of starting a second whole-file transfer.
+Rollback to the legacy complete endpoint is allowed only when the initial
+progressive start endpoint is unsupported. After an accepted start, status or
+descriptor failures terminate that attempt rather than starting fresh budgets.
 
 Network spooling precedes each worker command. A job also has an absolute
 five-minute deadline and an unrenewed 60-second preparing lease. One coalesced
@@ -255,6 +260,9 @@ Exact/NFC/case-folded duplicate paths are rejected. Only known non-page junk
 is ignored: the root `__MACOSX` tree, AppleDouble `._*` basenames, `.DS_Store`,
 `Thumbs.db`, `desktop.ini`, and `ComicInfo.xml`. Metadata is not executed or
 used to fetch remote pages; unexpected other files fail explicitly.
+ZIP record bounds use raw filename bytes, not the decoded or normalized name;
+valid CP437 filenames remain supported with the same local-header, CRC and
+native-image checks.
 
 Pinned sharp 0.34.5 validates CBZ rasters inside the worker, with libvips
 concurrency explicitly set to **one** (including musl/Alpine) and its operation

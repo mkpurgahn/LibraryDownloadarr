@@ -416,6 +416,27 @@ test('cold later-page priority does not prepare preceding pages', fixtureOptions
   } finally { await f.close(); }
 });
 
+test('pre-index lease expiry removes the accepted handle without a protocol marker', fixtureOptions, async context => {
+  const f = await fixture();
+  const clock = jobClock(context);
+  const held = f.holdIndex();
+  try {
+    const reader = await f.start();
+    await held.waiting;
+    assert.deepEqual(reader.spine, []);
+    clock.advance(60000);
+    for (let i = 0; i < 100 && (await fs.readdir(f.db.booksCacheDir)).length; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    const response = await f.request(`/readers/${reader.readerId}/status?page=1`);
+    assert.equal(response.status, 404);
+    assert.equal((await response.json() as { code: string }).code, 'BOOK_NOT_FOUND');
+    assert.equal(response.headers.get('x-book-reader-protocol'), null);
+    assert.deepEqual(await fs.readdir(f.db.booksCacheDir), []);
+    assert.equal(f.counts().active, 0);
+    assert.equal(f.counts().full, 0);
+    assert.equal(clock.size(), 0);
+  } finally { held.release(); await f.close(); }
+});
+
 test('ignored initial range uses one explicit full-download fallback, never labels it incremental', fixtureOptions, async () => {
   const f = await fixture('ignored');
   try {
@@ -544,6 +565,84 @@ test('pending-page claim/save cannot replace the last ready-page position', fixt
       locator: { ...write.locator, page: 11 } })).status, 422);
     assert.deepEqual(await (await f.request(`${url}?editionId=${f.target.fileId}`)).json(), before);
   } finally { await f.close(); }
+});
+
+function storedArchive(entries: Array<{ name: Buffer; data: Buffer }>): Buffer {
+  const records: Buffer[] = [], directory: Buffer[] = [];
+  let offset = 0;
+  for (const { name, data } of entries) {
+    let crc = 0xffffffff;
+    for (const byte of data) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+    crc = (crc ^ 0xffffffff) >>> 0;
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50); local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(crc, 16); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28); central.writeUInt32LE(offset, 42);
+    records.push(local, name, data); directory.push(central, name);
+    offset += local.length + name.length + data.length;
+  }
+  const central = Buffer.concat(directory), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(central.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...records, central, end]);
+}
+
+test('CP437 stored filename without padding prepares through the real worker and native decoder', fixtureOptions, async () => {
+  const page = comicPanel(1, 1, 1, 1);
+  const archive = storedArchive([{ name: Buffer.from([0x82, 0x2e, 0x70, 0x6e, 0x67]), data: page }]);
+  assert.equal(archive.readUInt16LE(26), 5);
+  assert.equal(archive.readUInt16LE(28), 0);
+  assert.equal(archive.readUInt16LE(6), 0);
+  assert.equal(archive.readUInt32LE(archive.length - 6), 30 + 5 + page.length);
+  const legacy = await fixture('range', false, archive);
+  try {
+    const response = await legacy.request('/items/book/reader', 'POST', legacy.target);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { state: string }).state, 'ready');
+  } finally { await legacy.close(); }
+  const f = await fixture('range', false, archive);
+  try {
+    let reader = await f.start();
+    while (reader.state === 'preparing') reader = await f.status(reader);
+    assert.equal(reader.state, 'complete');
+    assert.deepEqual(reader.spine, [digest('\u00e9.png')]);
+    const resource = reader.resources[0];
+    assert.deepEqual(resource, { resourceId: digest('\u00e9.png'), mediaType: 'image/png', size: page.length, width: 1, height: 1 });
+    const response = await f.request(`/readers/${reader.readerId}/resources/${resource.resourceId}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), page);
+  } finally { await f.close(); }
+});
+
+test('record bounds still reject raw-name overlap, local-header mismatch and damaged CP437 data', fixtureOptions, async () => {
+  const page = comicPanel(1, 1, 1, 1);
+  const bare = () => storedArchive([{ name: Buffer.from([0x82, 0x2e, 0x70, 0x6e, 0x67]), data: page }]);
+  const localName = bare(); localName.writeUInt16LE(6, 26);
+  const localExtra = bare(); localExtra.writeUInt16LE(1, 28);
+  const damaged = bare(); damaged[35] ^= 0xff;
+  const overlap = storedArchive([
+    { name: Buffer.from('0.png'), data: page },
+    { name: Buffer.from('e\u0301.png'), data: page },
+  ]);
+  const central = overlap.readUInt32LE(overlap.length - 6);
+  const secondCentral = central + 46 + 5;
+  overlap.writeUInt32LE(page.length + 1, secondCentral + 20);
+  for (const archive of [localName, localExtra, damaged, overlap]) {
+    const f = await fixture('range', false, archive);
+    try {
+      let reader = await f.start();
+      while (reader.state === 'preparing') reader = await f.status(reader);
+      assert.equal(reader.state, 'failed');
+      assert.deepEqual(reader.resources, []);
+    } finally { await f.close(); }
+  }
 });
 
 test('whole-directory name, type, page and declared-entry guards run before any page is exposed', fixtureOptions, async () => {

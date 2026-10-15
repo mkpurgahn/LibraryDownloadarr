@@ -14,8 +14,13 @@ export class ProgressClient {
   private canonical?: Progress;
   private listeners = new Set<(state: SaveState) => void>();
   private state: SaveState = 'unsaved';
+  private localRevision = 0;
+  private localLocation?: EbookLocator | AudioLocator;
   compatible = true;
-  location?: EbookLocator | AudioLocator;
+  get location(): EbookLocator | AudioLocator | undefined { return this.localLocation; }
+  set location(locator: EbookLocator | AudioLocator | undefined) {
+    this.localLocation = locator; this.localRevision++;
+  }
   constructor(
     private readonly key: BookKey, private readonly mode: 'ebook' | 'audio',
     private readonly editionId: string, private readonly contentVersion: string
@@ -53,6 +58,7 @@ export class ProgressClient {
     const next = this.queue.then(run); this.queue = next.catch(() => {}); return next;
   }
   async claim(locator: EbookLocator | AudioLocator, canonicalRevision: number): Promise<Progress> {
+    const renderedRevision = locator.kind === 'cbz' ? this.localRevision : undefined;
     return this.serialize(async () => {
       this.assertSession();
       this.pending = undefined;
@@ -62,7 +68,9 @@ export class ProgressClient {
       };
       try {
         const response = record(await booksApi.saveProgress(this.key.itemId, this.mode, this.editionId, write, this.controller.signal));
-        this.canonical = this.accept(response.progress); this.location = locator; this.compatible = true;
+        this.canonical = this.accept(response.progress); this.compatible = true;
+        // CBZ claims follow rendering; other readers/players apply their chosen position after the claim.
+        if (renderedRevision === undefined || this.localRevision === renderedRevision) this.localLocation = locator;
         this.notify('saved'); return this.canonical;
       } catch (error) { this.failed(error); throw error; }
     });

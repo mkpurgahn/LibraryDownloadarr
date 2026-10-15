@@ -78,10 +78,12 @@ async function execute(command: ComicCommand): Promise<Omit<ComicReply, 'metrics
         offset: entry.offset, compressedSize: entry.compressedSize, directory: entry.directory, end: 0 });
       budget.checkMemory();
     }
-    const ordered = [...plans].sort((a, b) => a.offset - b.offset);
+    const ordered = plans.map((plan, index) => ({ plan, nameBytes: entries[index].rawFilename.length }))
+      .sort((a, b) => a.plan.offset - b.plan.offset);
     for (let i = 0; i < ordered.length; i++) {
-      ordered[i].end = ordered[i + 1]?.offset ?? command.directoryStart;
-      if (ordered[i].offset + 30 + Buffer.byteLength(ordered[i].name) + ordered[i].compressedSize > ordered[i].end) {
+      const { plan, nameBytes } = ordered[i];
+      plan.end = ordered[i + 1]?.plan.offset ?? command.directoryStart;
+      if (plan.offset + 30 + nameBytes + plan.compressedSize > plan.end) {
         throw new UnsafeEpub('Overlapping archive records');
       }
     }
