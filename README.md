@@ -111,6 +111,8 @@ CBZ manga originals use an image-page reader with compact directional arrows,
 page jump, and clickable/tappable outer quarters of the visible page image.
 The center and empty margins do not turn pages. Dragging, scrolling, selections,
 and long presses do not activate the edges; a swipe never also counts as a tap.
+Multi-contact and cancelled touch gestures do not turn or save another page,
+including when a second contact starts on the heading or controls.
 **View** contains fit-page, fit-width, 50-300% manual zoom, and reading direction.
 Arrow keys and horizontal swipes remain available (swipes turn pages only when
 the page is not horizontally scrollable). Reading direction defaults to

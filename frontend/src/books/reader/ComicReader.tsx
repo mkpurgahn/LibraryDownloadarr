@@ -35,7 +35,8 @@ export const ComicReader: React.FC<{
   const active = useRef<AbortController>();
   const timer = useRef<number>();
   const blocked = useRef(false);
-  const touch = useRef<{ x: number; y: number }>();
+  const touch = useRef<{ id: number; x: number; y: number; image: HTMLImageElement; page: number }>();
+  const touchCancelled = useRef(false);
   const pointer = useRef<{
     id: number; x: number; y: number; time: number; side: 'left' | 'right';
     image: HTMLImageElement; page: number; ready: boolean;
@@ -72,6 +73,30 @@ export const ComicReader: React.FC<{
     });
     observer.observe(element);
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const start = (event: TouchEvent) => {
+      if (event.touches.length === 1) touchCancelled.current = false;
+      else cancelGesture();
+    };
+    const move = (event: TouchEvent) => {
+      if (event.touches.length !== 1 ||
+          (touch.current && event.touches[0].identifier !== touch.current.id)) cancelGesture();
+    };
+    const end = (event: TouchEvent) => { if (event.touches.length) cancelGesture(); };
+    // A second contact can start on controls outside the viewport. Keep cancellation
+    // latched through every release; only a new single-contact gesture resets it.
+    document.addEventListener('touchstart', start, { capture: true, passive: true });
+    document.addEventListener('touchmove', move, { capture: true, passive: true });
+    document.addEventListener('touchend', end, { capture: true, passive: true });
+    document.addEventListener('touchcancel', cancelGesture, { capture: true, passive: true });
+    return () => {
+      document.removeEventListener('touchstart', start, true);
+      document.removeEventListener('touchmove', move, true);
+      document.removeEventListener('touchend', end, true);
+      document.removeEventListener('touchcancel', cancelGesture, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -199,7 +224,7 @@ export const ComicReader: React.FC<{
 
   const go = (next: number) => {
     if (loading || blocked.current || next === page || next < 1 || next > total || !Number.isSafeInteger(next)) return;
-    pointer.current = undefined; touch.current = undefined;
+    cancelGesture();
     position(); save(); setLoading(true); setPage(next);
   };
   const key = (event: React.KeyboardEvent) => {
@@ -210,7 +235,9 @@ export const ComicReader: React.FC<{
     }
   };
 
-  const cancelGesture = () => { pointer.current = undefined; touch.current = undefined; };
+  function cancelGesture() {
+    touchCancelled.current = true; pointer.current = undefined; touch.current = undefined;
+  }
   const hasSelection = () => window.getSelection()?.isCollapsed === false;
   const edgeAt = (x: number, y: number): 'left' | 'right' | undefined => {
     const current = image.current; const element = viewport.current;
@@ -317,18 +344,24 @@ export const ComicReader: React.FC<{
       className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300"
       onKeyDown={key}
       onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}
+      // Native touch scrolling/swiping may cancel the pointer stream without cancelling the touch.
       onPointerCancel={() => { pointer.current = undefined; }} onClick={clickEdge}
       onContextMenu={cancelGesture} onWheel={cancelGesture}
       onScroll={() => { cancelGesture(); position(); window.clearTimeout(timer.current); timer.current = window.setTimeout(save, 400); }}
       onTouchStart={event => {
-        if (event.touches.length !== 1 || loading || blocked.current || hasSelection()) { cancelGesture(); return; }
-        touch.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+        if (touchCancelled.current || event.touches.length !== 1 || loading || blocked.current ||
+            !image.current || hasSelection()) { cancelGesture(); return; }
+        const contact = event.touches[0];
+        touch.current = { id: contact.identifier, x: contact.clientX, y: contact.clientY, image: image.current, page };
       }}
       onTouchCancel={cancelGesture}
       onTouchEnd={event => {
         const start = touch.current; touch.current = undefined;
         const end = event.changedTouches[0]; const element = viewport.current;
-        if (!start || !end || !element) return;
+        if (!start || touchCancelled.current || event.touches.length || event.changedTouches.length !== 1 ||
+            !end || end.identifier !== start.id || !element || start.image !== image.current || start.page !== page) {
+          pointer.current = undefined; return;
+        }
         const dx = end.clientX - start.x; const dy = end.clientY - start.y;
         if (Math.hypot(dx, dy) > 8) pointer.current = undefined;
         if (element.scrollWidth > element.clientWidth + 1 || hasSelection()) return;

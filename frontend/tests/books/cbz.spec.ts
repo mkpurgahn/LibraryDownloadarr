@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import type { Locator, Page, Route } from '@playwright/test';
+import type { CDPSession, Locator, Page, Route } from '@playwright/test';
 import { test, expect, signIn, capture, originalDownload } from './harness';
 import { parseReader } from '../../src/books/types';
 
@@ -67,6 +67,31 @@ async function toggleComicDirection(page: Page) {
   await options.click();
 }
 
+type ComicContact = { id: number; x: number; y: number };
+type ComicTouchEvent = {
+  type: string; trusted: boolean; target: string; touches: number[];
+  changed: Array<{ id: number; x: number; y: number }>;
+};
+async function comicTouch(session: CDPSession | undefined, target: Locator,
+  type: 'touchStart' | 'touchMove' | 'touchEnd' | 'touchCancel', contacts: ComicContact[], changed: ComicContact[]) {
+  if (session) {
+    await session.send('Input.dispatchTouchEvent', { type, touchPoints: contacts });
+  } else {
+    const points = (values: ComicContact[]) => values.map(({ id, x, y }) => ({ identifier: id, clientX: x, clientY: y }));
+    await target.dispatchEvent(type.toLowerCase(), { touches: points(contacts), changedTouches: points(changed) });
+  }
+}
+
+async function savedComicPage(page: Page) {
+  await expect(page.getByRole('region', { name: 'Comic page', exact: true })).toHaveAttribute('aria-busy', 'false');
+  await expect(page.getByText('Position saved', { exact: true })).toBeVisible();
+  const saved = page.waitForResponse(response => response.request().method() === 'PUT' &&
+    response.url().endsWith('/progress/ebook') && response.status() === 200 &&
+    response.request().postDataJSON().op === 'save');
+  await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
+  return (await (await saved).json()).progress.locator.page as number;
+}
+
 test('CBZ explicit Next button advances one actual decoded page and respects the end', async ({ page, app }) => {
   await signIn(page, app);
   await openComic(page);
@@ -85,6 +110,144 @@ test('CBZ explicit Next button advances one actual decoded page and respects the
 
 test.describe('visible page-edge navigation', () => {
   test.use({ hasTouch: true });
+  for (const gesture of ['swipe', 'tap'] as const) for (const firstReleased of ['image', 'outside'] as const) {
+    test(`CBZ cross-target multitouch ${gesture} keeps decoded and saved page when ${firstReleased} releases first`, async ({ page, app, browserName }, info) => {
+      await signIn(page, app);
+      await openComic(page);
+      await page.getByRole('link', { name: 'Read', exact: true }).click();
+      await expectPanel(page, 1, 1);
+      const image = page.getByRole('img', { name: /Comic page/ });
+      const session = browserName === 'chromium' ? await page.context().newCDPSession(page) : undefined;
+      const observations: object[] = [];
+      await page.evaluate(() => {
+        const events: object[] = [];
+        Reflect.set(window, 'comicTouchEvents', events);
+        for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+          document.addEventListener(type, event => {
+            const touch = event as TouchEvent;
+            events.push({ type, trusted: event.isTrusted, target: (event.target as Element).tagName,
+              touches: Array.from(touch.touches, contact => contact.identifier),
+              changed: Array.from(touch.changedTouches, contact => ({ id: contact.identifier, x: contact.clientX, y: contact.clientY })) });
+          }, { capture: true, passive: true });
+        }
+      });
+      try {
+        for (const outside of [
+          page.getByRole('heading', { name: 'The Paper Observatory', exact: true }),
+          page.getByRole('group', { name: 'Page navigation', exact: true }).locator('span'),
+        ]) {
+          const edge = await pageEdge(page, 'left');
+          const end = await pageEdge(page, 'right');
+          const bounds = (await outside.boundingBox())!;
+          // Chromium ends contacts in ID order, emitting separate trusted touchend events.
+          const a = { ...edge, id: firstReleased === 'image' ? 11 : 22 };
+          const b = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2, id: firstReleased === 'image' ? 22 : 11 };
+          await page.evaluate(() => { Reflect.get(window, 'comicTouchEvents').length = 0; });
+          await comicTouch(session, image, 'touchStart', [a], [a]);
+          await comicTouch(session, outside, 'touchStart', [a, b], [b]);
+          for (let step = 1; gesture === 'swipe' && step <= 5; step++) {
+            a.x = edge.x + (end.x - edge.x) * step / 5;
+            await comicTouch(session, image, 'touchMove', [a, b], [a]);
+          }
+          if (session) {
+            await comicTouch(session, image, 'touchEnd', [], [a, b]);
+          } else if (firstReleased === 'image') {
+            await comicTouch(session, image, 'touchEnd', [b], [a]);
+            await comicTouch(session, outside, 'touchEnd', [], [b]);
+          } else {
+            await comicTouch(session, outside, 'touchEnd', [a], [b]);
+            await comicTouch(session, image, 'touchEnd', [], [a]);
+          }
+          const savedPage = await savedComicPage(page);
+          const events: ComicTouchEvent[] = await page.evaluate(() => Reflect.get(window, 'comicTouchEvents'));
+          observations.push({ input: session ? 'trusted native Chromium CDP' : 'synthetic TouchEvent handler coverage',
+            outside: await outside.evaluate(element => element.tagName), gesture, firstReleased, events, savedPage });
+          await fs.writeFile(info.outputPath('cross-target-touch.json'), JSON.stringify(observations, null, 2));
+          expect(events.map(event => event.trusted)).toEqual(events.map(() => Boolean(session)));
+          expect(events.slice(0, 2).map(event => [event.type, event.target, event.touches.length])).toEqual([
+            ['touchstart', 'IMG', 1], ['touchstart', await outside.evaluate(element => element.tagName), 2],
+          ]);
+          if (gesture === 'swipe') {
+            expect(events.filter(event => event.type === 'touchmove' && event.touches.length === 2).length).toBeGreaterThan(0);
+          }
+          const releases = events.filter(event => event.type === 'touchend');
+          expect(releases.map(event => event.changed.map(contact => contact.id))).toEqual(firstReleased === 'image'
+            ? [[a.id], [b.id]] : [[b.id], [a.id]]);
+          expect(releases.map(event => event.touches.length)).toEqual([1, 0]);
+          const releasedImage = releases.find(event => event.changed[0].id === a.id)!.changed[0];
+          if (gesture === 'swipe') expect(releasedImage.x - edge.x).toBeGreaterThan(60);
+          expect(Math.abs(releasedImage.y - edge.y)).toBeLessThan(40);
+          expect.soft(savedPage).toBe(1);
+          await expectPanel(page, 1, 1);
+        }
+        const edge = await pageEdge(page, 'left');
+        await page.touchscreen.tap(edge.x, edge.y);
+        await expectPanel(page, 2, 2);
+        const tapSaved = await savedComicPage(page);
+        expect(tapSaved).toBe(2);
+        const a = { ...await pageEdge(page, 'left'), id: 33 };
+        const end = await pageEdge(page, 'right');
+        await comicTouch(session, image, 'touchStart', [a], [a]);
+        for (let step = 1; step <= 5; step++) {
+          const moved = { ...a, x: a.x + (end.x - a.x) * step / 5 };
+          await comicTouch(session, image, 'touchMove', [moved], [moved]);
+        }
+        await comicTouch(session, image, 'touchEnd', [], [{ ...a, x: end.x }]);
+        await expectPanel(page, 3, 10);
+        const swipeSaved = await savedComicPage(page);
+        expect(swipeSaved).toBe(3);
+        observations.push({ recovery: 'clean single-contact tap then swipe', tap: 'native browser touchscreen',
+          swipe: session ? 'trusted native Chromium CDP' : 'synthetic TouchEvent handler coverage', savedPages: [tapSaved, swipeSaved] });
+        await fs.writeFile(info.outputPath('cross-target-touch.json'), JSON.stringify(observations, null, 2));
+      } finally { await session?.detach(); }
+    });
+  }
+
+  test('CBZ cancelled touch cannot save a turn and a clean touch still works', async ({ page, app, browserName }, info) => {
+    await signIn(page, app);
+    await openComic(page);
+    await page.getByRole('link', { name: 'Read', exact: true }).click();
+    await expectPanel(page, 1, 1);
+    const image = page.getByRole('img', { name: /Comic page/ });
+    const session = browserName === 'chromium' ? await page.context().newCDPSession(page) : undefined;
+    try {
+      const a = { ...await pageEdge(page, 'left'), id: 41 };
+      const end = { ...await pageEdge(page, 'right'), id: 41 };
+      await comicTouch(session, image, 'touchStart', [a], [a]);
+      await comicTouch(session, image, 'touchMove', [end], [end]);
+      await comicTouch(session, image, 'touchCancel', [], [end]);
+      // A stale fallback completion must not resurrect a cancelled contact.
+      await comicTouch(undefined, image, 'touchEnd', [], [end]);
+      expect(await savedComicPage(page)).toBe(1);
+      await expectPanel(page, 1, 1);
+      const edge = await pageEdge(page, 'left');
+      await page.touchscreen.tap(edge.x, edge.y);
+      await expectPanel(page, 2, 2);
+      expect(await savedComicPage(page)).toBe(2);
+      await fs.writeFile(info.outputPath('cancelled-touch.json'), JSON.stringify({
+        cancellation: session ? 'trusted native Chromium CDP touchCancel' : 'synthetic TouchEvent handler coverage',
+        staleCompletion: 'synthetic touchend', cleanTap: 'native browser touchscreen', savedPages: [1, 2],
+      }, null, 2));
+    } finally { await session?.detach(); }
+  });
+
+  test('CBZ touch contact identity rejects an unrelated completion', async ({ page, app }) => {
+    await signIn(page, app);
+    await openComic(page);
+    await page.getByRole('link', { name: 'Read', exact: true }).click();
+    await expectPanel(page, 1, 1);
+    const image = page.getByRole('img', { name: /Comic page/ });
+    const a = { ...await pageEdge(page, 'left'), id: 51 };
+    const unrelated = { ...await pageEdge(page, 'right'), id: 52 };
+    await comicTouch(undefined, image, 'touchStart', [a], [a]);
+    await comicTouch(undefined, image, 'touchEnd', [], [unrelated]);
+    expect(await savedComicPage(page)).toBe(1);
+    await expectPanel(page, 1, 1);
+    await page.touchscreen.tap(a.x, a.y);
+    await expectPanel(page, 2, 2);
+    expect(await savedComicPage(page)).toBe(2);
+  });
+
   test('CBZ swipes do not double-turn and zoomed panning never turns', async ({ page, app, browserName }, info) => {
     await signIn(page, app);
     await openComic(page);
