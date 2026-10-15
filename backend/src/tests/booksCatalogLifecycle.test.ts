@@ -13,12 +13,14 @@ import { BOOKS_COOKIE } from '../books/mediaAuth';
 import { PlexService } from '../services/plexService';
 
 class Membership extends PlexService {
+  constructor(private readonly wait: () => Promise<void> = async () => {}) { super(); }
   override async validateExactServerMembership() {
+    await this.wait();
     return { serverToken: 'generated-server', discoveredUrl: '', owned: false };
   }
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, holdMembership = false) {
   const enabled = process.env.BOOKS_ENABLED;
   process.env.BOOKS_ENABLED = 'true';
   const root = path.resolve('.test-data', 'catalog-lifecycle', randomUUID());
@@ -60,21 +62,43 @@ async function fixture(t: TestContext) {
   const user = db.createOrUpdatePlexUser({ plexId: 'generated-user', username: 'Generated',
     email: 'generated@invalid.test', plexAccountToken: 'generated-account', plexToken: 'generated-server' });
   const session = db.createSession(user.id);
+  let enterMembership!: () => void;
+  let releaseMembership!: () => void;
+  const membershipEntered = new Promise<void>(resolve => { enterMembership = resolve; });
+  const membershipGate = new Promise<void>(resolve => { releaseMembership = resolve; });
+  if (holdMembership) db.clearPlexMembership(user.id);
+  const responses: Array<{ request: http.IncomingMessage; response: http.ServerResponse;
+    closed: Promise<void>; readableClosed: Promise<void> }> = [];
   const app = express();
   app.use(express.json());
-  app.use('/api/books', createBooksRouter(db, { plex: new Membership() }));
+  app.use((req, res, next) => {
+    responses.push({ request: req, response: res,
+      closed: new Promise<void>(resolve => res.once('close', resolve)),
+      readableClosed: new Promise<void>(resolve => req.once('close', resolve)) });
+    req.resume();
+    next();
+  });
+  app.use('/api/books', createBooksRouter(db, { plex: new Membership(async () => {
+    enterMembership();
+    if (holdMembership) await membershipGate;
+  }) }));
   let sessionListeners = 0;
   let configListeners = 0;
   const expiryTimers = new Set<NodeJS.Timeout>();
+  const operationTimers = new Set<NodeJS.Timeout>();
   const realSetTimeout = global.setTimeout;
   const realClearTimeout = global.clearTimeout;
   const timerSpy = t.mock.method(global, 'setTimeout', (...args: Parameters<typeof setTimeout>) => {
     const timer = realSetTimeout(...args);
     if (args[1] && args[1] > 60000) expiryTimers.add(timer);
+    if (args[1] && args[1] >= 10000) operationTimers.add(timer);
     return timer;
   });
   const clearSpy = t.mock.method(global, 'clearTimeout', (...args: Parameters<typeof clearTimeout>) => {
-    if (typeof args[0] === 'object') expiryTimers.delete(args[0]);
+    if (typeof args[0] === 'object') {
+      expiryTimers.delete(args[0]);
+      operationTimers.delete(args[0]);
+    }
     return realClearTimeout(...args);
   });
   const onSession = db.onSessionRevoked.bind(db);
@@ -94,10 +118,11 @@ async function fixture(t: TestContext) {
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const origin = `http://127.0.0.1:${address.port}`;
   return {
-    db, sql, session, entered, aborted,
+    db, sql, session, entered, aborted, origin, responses, membershipEntered, releaseMembership,
     get requests() { return requests; },
     listeners: () => ({ session: sessionListeners, config: configListeners }),
     expiryTimers: () => expiryTimers.size,
+    operationTimers: () => operationTimers.size,
     request(url: string, options: { method?: string; cookie?: boolean; signal?: AbortSignal } = {}) {
       const headers: Record<string, string> = options.cookie
         ? { Cookie: `${BOOKS_COOKIE}=${db.books.createMediaSession({
@@ -108,6 +133,7 @@ async function fixture(t: TestContext) {
     },
     release() { holding = false; for (const respond of pending.splice(0)) respond(); },
     async close() {
+      releaseMembership();
       holding = false; for (const respond of pending.splice(0)) respond();
       server.closeAllConnections(); provider.closeAllConnections();
       await Promise.all([server, provider].map(s => new Promise<void>(resolve => s.close(() => resolve()))));
@@ -118,6 +144,74 @@ async function fixture(t: TestContext) {
     },
   };
 }
+
+for (const method of ['GET', 'HEAD']) for (const cookie of [false, true]) {
+  test(`catalog_pre_auth_disconnect_${method}_${cookie ? 'cookie' : 'bearer'}_never_starts_provider`, { timeout: 5000 }, async t => {
+    const f = await fixture(t, true);
+    try {
+      const controller = new AbortController();
+      const response = f.request('/libraries/selected/items?category=books', { method, cookie, signal: controller.signal });
+      await f.membershipEntered;
+      assert.equal(f.requests, 0);
+      assert.deepEqual(f.listeners(), { session: 0, config: 0 });
+      controller.abort();
+      await assert.rejects(response, { name: 'AbortError' });
+      await f.responses[0].closed;
+      assert.equal(f.responses[0].response.destroyed, true, 'The real response closed before authentication resumed');
+      f.releaseMembership();
+      await delay(100);
+      assert.ok(f.db.getPlexUserById(f.session.userId)?.membershipValidatedAt, 'Held membership validation completed successfully');
+      assert.equal(f.requests, 0, 'No catalog-provider request after an already-observed client disconnect');
+      assert.deepEqual(f.listeners(), { session: 0, config: 0 });
+      assert.equal(f.operationTimers(), 0);
+      assert.equal(f.responses[0].response.listenerCount('close'), 0);
+    } finally { await f.close(); }
+  });
+}
+
+test('catalog_pre_auth_completed_readable_GET_HEAD_and_reused_keep_alive_remain_valid', { timeout: 5000 }, async t => {
+  const f = await fixture(t, true);
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  try {
+    const request = (method: string) => new Promise<{ status: number | undefined; body: string; reused: boolean }>((resolve, reject) => {
+      const req = http.request(`${f.origin}/api/books/libraries/selected/items?category=books`, {
+        method, agent, headers: { Authorization: `Bearer ${f.session.token}` },
+      }, res => {
+        const chunks: Buffer[] = [];
+        res.on('data', chunk => chunks.push(chunk));
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString(), reused: req.reusedSocket }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    const first = request('GET');
+    await f.membershipEntered;
+    await f.responses[0].readableClosed;
+    assert.equal(f.responses[0].request.complete, true);
+    assert.equal(f.responses[0].request.destroyed, true, 'Completed GET readable is not a disconnected response');
+    assert.equal(f.responses[0].request.aborted, false);
+    assert.equal(f.responses[0].response.destroyed, false);
+    assert.equal(f.requests, 0, 'Authentication still gates catalog access');
+    f.release();
+    f.releaseMembership();
+    const get = await first;
+    assert.equal(get.status, 200);
+    assert.equal(JSON.parse(get.body).items[0].itemId, 'generated-book');
+    const head = await request('HEAD');
+    assert.deepEqual(head, { status: 200, body: '', reused: true });
+    const again = await request('GET');
+    assert.equal(again.status, 200);
+    assert.equal(again.reused, true);
+    assert.equal(JSON.parse(again.body).items[0].itemId, 'generated-book');
+    assert.equal(f.requests, 6, 'Each valid request completes the two-part audio union');
+    assert.deepEqual(f.listeners(), { session: 0, config: 0 });
+    assert.equal(f.operationTimers(), 0);
+    for (const observed of f.responses) {
+      await observed.closed;
+      assert.equal(observed.response.listenerCount('close'), 0);
+    }
+  } finally { agent.destroy(); await f.close(); }
+});
 
 const paths = [
   ['audio-union', '/libraries/selected/items?category=books'],

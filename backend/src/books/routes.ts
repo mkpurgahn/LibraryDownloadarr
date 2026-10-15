@@ -31,6 +31,8 @@ export function bookHandler(
   handler: (req: AuthRequest, res: Response, signal: AbortSignal) => Promise<unknown>
 ) {
   return (req: AuthRequest, res: Response, _next: NextFunction): void => {
+    // Authentication may outlive the client; request-readable completion alone is not a disconnect.
+    if (req.aborted || res.destroyed || res.closed) return;
     const controller = new AbortController();
     const close = () => { if (!res.writableFinished) controller.abort(); };
     res.once('close', close);
