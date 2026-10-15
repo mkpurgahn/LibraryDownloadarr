@@ -156,6 +156,83 @@ async function savedComicPage(page: Page) {
   return (await (await saved).json()).progress.locator.page as number;
 }
 
+for (const single of [false, true]) {
+  test(`CBZ page arrows share rendered styles for ${single ? 'single-page disabled' : 'ready hover focus and loading'} states`, async ({ page, app }, info) => {
+    if (single) await app.setCbz('single');
+    await signIn(page, app);
+    await openComic(page);
+    await page.getByRole('link', { name: 'Read', exact: true }).click();
+    await expectPanel(page, 1, 1, 1, single ? 1 : 3);
+    const previous = page.getByRole('button', { name: 'Previous page', exact: true });
+    const next = page.getByRole('button', { name: 'Next page', exact: true });
+    const viewport = page.getByRole('region', { name: 'Comic page', exact: true });
+    const style = async (button: Locator) => {
+      await button.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+      await expect.poll(() => button.evaluate(element =>
+        element.getAnimations().every(animation => animation.playState !== 'running'))).toBe(true);
+      return button.evaluate(element => {
+        const css = getComputedStyle(element);
+        return { background: css.backgroundColor, image: css.backgroundImage, color: css.color,
+          shadow: css.boxShadow, opacity: css.opacity, cursor: css.cursor,
+          width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height };
+      });
+    };
+    const observations: Record<string, unknown> = {};
+    await page.mouse.move(0, 0); await viewport.focus();
+    observations.ready = { previous: await style(previous), next: await style(next) };
+    await capture(page, single ? 'cbz-arrows-single' : 'cbz-arrows-ready', info);
+    await fs.writeFile(info.outputPath('arrow-styles.json'), JSON.stringify(observations, null, 2));
+    const normal = await style(next);
+    expect(await style(previous)).toEqual(normal);
+    expect(normal).toMatchObject({ background: single ? 'rgb(45, 45, 45)' : 'rgb(67, 56, 202)',
+      color: single ? 'rgb(209, 213, 219)' : 'rgb(255, 255, 255)', image: 'none',
+      opacity: single ? '0.4' : '1', width: 44, height: 44 });
+    if (single) {
+      await expect(previous).toBeDisabled(); await expect(next).toBeDisabled();
+      await previous.hover(); const previousHover = await style(previous);
+      await next.hover(); expect(await style(next)).toEqual(previousHover);
+      expect(previousHover).toMatchObject({ background: 'rgb(45, 45, 45)', cursor: 'not-allowed' });
+      await expectPanel(page, 1, 1, 1, 1);
+      expect(await savedComicPage(page)).toBe(1);
+      observations.disabledHover = previousHover;
+    } else {
+      await expect(previous).toBeEnabled(); await expect(next).toBeEnabled();
+      await previous.hover(); const previousHover = await style(previous);
+      await next.hover(); const nextHover = await style(next);
+      expect(previousHover).toEqual(nextHover);
+      expect(nextHover.background).toBe('rgb(79, 70, 229)');
+      await page.mouse.move(0, 0);
+      await previous.focus(); await expect(previous).toBeFocused();
+      const previousFocus = await style(previous);
+      await next.focus(); await expect(next).toBeFocused();
+      const nextFocus = await style(next);
+      expect(previousFocus).toEqual(nextFocus);
+      expect(nextFocus.shadow).toContain('rgb(165, 180, 252)');
+      observations.hover = { previous: previousHover, next: nextHover };
+      observations.focus = { previous: previousFocus, next: nextFocus };
+      let held: Route | undefined;
+      await page.route('**/readers/*/resources/*', route => { held = route; });
+      await previous.click();
+      await expect.poll(() => Boolean(held)).toBe(true);
+      await expect(viewport).toHaveAttribute('aria-busy', 'true');
+      await expect(previous).toBeDisabled(); await expect(next).toBeDisabled();
+      await page.mouse.move(0, 0); await viewport.focus();
+      const disabled = await style(next);
+      expect(await style(previous)).toEqual(disabled);
+      expect(disabled).toMatchObject({ background: 'rgb(45, 45, 45)', color: 'rgb(209, 213, 219)',
+        opacity: '0.4', cursor: 'not-allowed', width: 44, height: 44 });
+      observations.loading = disabled;
+      await held!.continue(); await page.unroute('**/readers/*/resources/*');
+      await expectPanel(page, 3, 10);
+      expect(await savedComicPage(page)).toBe(3);
+      await next.click(); await expectPanel(page, 1, 1);
+      expect(await savedComicPage(page)).toBe(1);
+      observations.actualWrapSavedPages = [3, 1];
+    }
+    await fs.writeFile(info.outputPath('arrow-styles.json'), JSON.stringify(observations, null, 2));
+  });
+}
+
 async function swipeComic(page: Page, session: CDPSession | undefined, forward: boolean) {
   const image = page.getByRole('img', { name: /Comic page/ });
   const start = { ...await pageEdge(page, forward ? 'right' : 'left'), id: 61 };

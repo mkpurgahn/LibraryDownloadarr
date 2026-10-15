@@ -285,7 +285,7 @@ export const ComicReader: React.FC<{
     const disabled = loading || blocked.current || total === 1;
     return <button type="button" aria-label={forward ? 'Next page' : 'Previous page'}
       title={forward ? 'Next page' : 'Previous page'} disabled={disabled}
-      className={`${forward ? 'btn-primary' : 'btn-secondary'} flex h-11 w-11 shrink-0 items-center justify-center p-0 disabled:cursor-not-allowed disabled:opacity-40`}
+      className="btn-primary flex h-11 w-11 shrink-0 items-center justify-center p-0 disabled:cursor-not-allowed disabled:opacity-40"
       onClick={() => turn(forward ? 1 : -1)}>
       <svg viewBox="0 0 24 24" aria-hidden="true" className={`h-5 w-5 fill-none stroke-current stroke-2 ${side === 'right' ? 'rotate-180' : ''}`}>
         <path d="m14 6-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
