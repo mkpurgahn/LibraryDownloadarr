@@ -51,7 +51,7 @@ export type BooksApp = App & {
   restart(): Promise<void>;
 };
 export interface CbzTransfer {
-  start(): void;
+  start(options?: { ignoreEntryRanges?: boolean }): void;
   release(): void;
   snapshot(): { bytes: number; requests: number; active: number; held: boolean; elapsedMs: number };
 }
@@ -63,11 +63,13 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
   const validators = new WeakMap<Buffer, { size: number; etag: string }>();
   const cbzOffsets = new WeakMap<Buffer, [number, number]>();
   let throttledCbz = false, holdCbz = true, sentCbz = 0, requestsCbz = 0, activeCbz = 0, cbzStarted = 0;
+  let ignoreEntryRanges = false;
   const heldCbz = new Set<() => void>();
   const cbzTransfer: CbzTransfer = {
-    start() {
+    start(options) {
       if (activeCbz) throw new Error('Previous controlled source request is still active');
       throttledCbz = true; holdCbz = true; sentCbz = 0; requestsCbz = 0; cbzStarted = performance.now();
+      ignoreEntryRanges = options?.ignoreEntryRanges === true;
     },
     release() { holdCbz = false; for (const send of [...heldCbz]) send(); },
     snapshot: () => ({ bytes: sentCbz, requests: requestsCbz, active: activeCbz, held: holdCbz, elapsedMs: performance.now() - cbzStarted }),
@@ -219,7 +221,8 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
     res.setHeader('Accept-Ranges', 'bytes');
     const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? '');
     let start = 0; let end = total - 1;
-    if (range) {
+    if (range && !(throttledCbz && ignoreEntryRanges && item.id === 'manga' && match[2] === 'manga-0' &&
+        Number(range[1]) !== total - 65557)) {
       start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), total - 1) : total - 1;
       if (start >= total || start > end) { res.writeHead(416, { 'Content-Range': `bytes */${total}` }).end(); return; }
       res.statusCode = 206; res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);

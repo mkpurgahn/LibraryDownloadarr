@@ -117,3 +117,25 @@ test('throttled243page source opens ten pages, jumps past held work and cold-res
     frames, firstTen, jumpMs, qualification: 'Generated headless DOM-decoded timings; provider body bytes sent are an upper bound, not TCP wire or physical-display timings. Actual original not decoded.',
   }, null, 2));
 });
+
+test('an indexed full-download fallback stays explicit and prioritizes a pending jump after that one transfer', async ({ page, app }, info) => {
+  test.setTimeout(60000);
+  await app.setCbz('large');
+  const transfer = app.cbzTransfer!;
+  await page.goto(`${app.origin}/manifest.json`);
+  await page.evaluate(token => localStorage.setItem('token', token), app.users[0].bearer);
+  await page.goto(`${app.origin}/books/items/manga`);
+  transfer.start({ ignoreEntryRanges: true });
+  await page.getByRole('link', { name: 'Read', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'CBZ reader', exact: true })).toBeVisible();
+  await expect(page.getByText('This source requires a full download before pages can be prepared.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('img', { name: /Comic page/ })).toHaveCount(0);
+  await page.getByLabel('Page number', { exact: true }).fill('243');
+  await page.getByRole('button', { name: 'Go to page', exact: true }).click();
+  await capture(page, 'indexed-full-download-fallback', info);
+  transfer.release();
+  await expect(page.getByRole('img', { name: 'Comic page 243 of 243', exact: true })).toBeVisible({ timeout: 30000 });
+  expect(transfer.snapshot().requests).toBe(3);
+  expect(transfer.snapshot().bytes).toBeGreaterThanOrEqual(180349307);
+  await capture(page, 'full-download-fallback-requested-page', info);
+});

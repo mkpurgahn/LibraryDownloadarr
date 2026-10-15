@@ -195,7 +195,7 @@ export const ReaderPage: React.FC = () => {
         `Preparation stopped. ${preparation.resources.length} of ${preparation.spine.length} pages are ready; other pages are unavailable. Download the original.` :
         'The page list could not be validated. Download the original.' :
         preparation.state === 'complete' ? `All ${preparation.spine.length} pages ready.` :
-          preparation.mode === 'full-download' && !preparation.spine.length ? 'This source requires a full download before pages can be prepared.' :
+          preparation.mode === 'full-download' && !preparation.resources.length ? 'This source requires a full download before pages can be prepared.' :
             `Preparing pages in the background: ${preparation.resources.length} of ${preparation.spine.length || 'unknown'} ready.`}
     </p>}
     {client && (!started || state === 'conflict') && <section aria-label="Saved position" className="mb-3 rounded bg-dark-100 p-4">
