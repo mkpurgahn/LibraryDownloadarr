@@ -128,6 +128,9 @@ test('canonical_and_legacy_links_preserve_reading_and_audio_resume_without_mixed
   expect(seconds).toBeGreaterThan(0.2);
   await expect(page.getByRole('region', { name: 'Audiobook player' })).toHaveCount(0);
   await page.reload();
+  await page.getByTestId('books-audio').evaluate(element => {
+    if (element instanceof HTMLAudioElement) element.volume = 0;
+  });
   await page.getByRole('button', { name: 'Listen', exact: true }).click();
   await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
   await expect.poll(() => page.getByTestId('books-audio').evaluate(element =>
