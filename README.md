@@ -107,11 +107,17 @@ First-open preparation includes the initial writer claim; saved-position choices
 appear only when a stored or conflicting position exists. EPUB text anchors
 retain positions within long paragraphs across font changes and reader reopen.
 
-CBZ manga originals use an image-page reader with previous/next, page jump,
-fit-page, fit-width, 50-300% manual zoom, arrow keys, and horizontal swipes
-(when the page is not horizontally scrollable). Reading direction defaults to
-right-to-left and has an explicit left-to-right toggle. Direction changes
-navigation, not the semantic page order. The selected original's filename is
+CBZ manga originals use an image-page reader with compact directional arrows,
+page jump, and clickable/tappable outer quarters of the visible page image.
+The center and empty margins do not turn pages. Dragging, scrolling, selections,
+and long presses do not activate the edges; a swipe never also counts as a tap.
+**View** contains fit-page, fit-width, 50-300% manual zoom, and reading direction.
+Arrow keys and horizontal swipes remain available (swipes turn pages only when
+the page is not horizontally scrollable). Reading direction defaults to
+right-to-left and has an explicit left-to-right toggle. Arrows and page edges
+follow that direction, not a different semantic page order. Navigation pauses
+while a page loads and never treats the end of an original as the next chapter.
+The selected original's filename is
 shown in the reader; separate chapter files never borrow another file's pages
 or saved position. Vertical and horizontal within-page fractions survive zoom,
 viewport resizing (including automatic scroll clamping), and reopening when
