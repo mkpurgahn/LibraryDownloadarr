@@ -165,7 +165,8 @@ four-second hint explains Escape and the corners. Move the pointer to **any
 viewport corner**, tap a corner, or press Tab to reveal all reader controls,
 including **Exit full screen**. Controls overlay the book rather than moving it,
 stay visible while hovered or focused (including menus), and hide shortly after
-leaving. Page-turn buttons still appear only in Paged mode. Unsupported or denied
+leaving. Reader controls retain color and focus feedback without animating their
+visibility. Page-turn buttons still appear only in Paged mode. Unsupported or denied
 native fullscreen uses an honestly labeled **Viewport-only view**. Errors and partial-preparation
 warnings remain visible. Active audio keeps playing without reserving space for
 its hidden outside toolbar. Mode, font, zoom and fullscreen changes preserve

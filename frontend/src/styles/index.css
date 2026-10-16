@@ -73,6 +73,12 @@
   }
 }
 
+/* Hidden reader chrome must not wait for a descendant's visibility transition. */
+[data-reader-chrome],
+[data-reader-chrome] * {
+  transition-property: color, background-color, border-color, outline-color, fill, stroke, box-shadow;
+}
+
 @media (max-width: 479px) {
   .media-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
