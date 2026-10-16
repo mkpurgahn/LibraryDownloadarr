@@ -178,10 +178,23 @@ function controls(): void {
   host.dataset.sections = String(sections.size);
   host.dataset.assetBytes = String(assetBytes); host.dataset.blobUrls = String(blobs.size);
 }
-function arrange(saved?: EbookLocator): void {
+function sectionTop(): number | undefined {
+  const value = sections.get(section);
+  return value ? value.element.getBoundingClientRect().top - viewport.getBoundingClientRect().top : undefined;
+}
+function arrange(saved?: EbookLocator, visualTop?: number): void {
   shadow.replaceChildren(...[...sections.entries()].sort(([a], [b]) => a - b).map(([, value]) => value.element));
+  // Keep short trailing sections reachable without loading beyond the window.
+  const trailing = shadow.lastElementChild;
+  host.style.paddingBottom = presentation.mode === 'continuous' && trailing instanceof HTMLElement
+    ? `${Math.max(0, Math.ceil(viewport.clientHeight - trailing.getBoundingClientRect().height) + 1)}px` : '0';
   measure();
   if (saved) restore(saved);
+  if (visualTop !== undefined) {
+    viewport.scrollTop += (sectionTop() ?? visualTop) - visualTop;
+    if (restoredAnchor) restoredAnchor.scrollTop = viewport.scrollTop;
+    measure();
+  }
   controls();
 }
 function wanted(index: number): number[] {
@@ -217,7 +230,7 @@ function neighbors(epoch: number): void {
       await load(index, epoch);
       if (disposed || epoch !== generation) return;
       const saved = location();
-      arrange(saved);
+      arrange(saved, sectionTop());
     }
   }).catch(error => {
     if (!disposed && epoch === generation) { console.warn('EPUB neighboring section failed', { category: error instanceof Error ? error.name : 'Error' }); fail(); }
@@ -301,7 +314,7 @@ contents.onchange = () => {
   if (entry) navigate(descriptor.spine.indexOf(entry.resourceId), undefined, entry.fragment);
 };
 font.onchange = () => {
-  const saved = location(); host.style.fontSize = `${font.value}px`; restore(saved); report(true);
+  logical = location(); host.style.fontSize = `${font.value}px`; reflow(); report(true);
 };
 shadow.addEventListener('click', event => {
   const target = event.composedPath().find(value => value instanceof Element && value.localName === 'a');
@@ -315,6 +328,7 @@ viewport.addEventListener('scroll', () => {
   if (geometry.width !== viewport.clientWidth || geometry.height !== viewport.clientHeight || geometry.scrollHeight !== viewport.scrollHeight) {
     reflow(); return;
   }
+  if (viewport.scrollTop === geometry.top) return;
   if (presentation.mode === 'continuous') {
     const top = viewport.getBoundingClientRect().top;
     const visible = [...sections.entries()].find(([, value]) => {
@@ -322,20 +336,26 @@ viewport.addEventListener('scroll', () => {
     });
     if (visible && visible[0] !== section) {
       section = visible[0]; restoredAnchor = undefined; report();
-      const saved = logical; const epoch = ++generation;
+      const saved = logical, top = sectionTop(); const epoch = ++generation;
       for (const number of sections.keys()) if (!wanted(section).includes(number)) remove(number);
-      arrange(saved); neighbors(epoch);
+      arrange(saved, top); neighbors(epoch);
     }
   }
-  report(); controls();
+  report(); controls(); measure();
 });
 viewport.addEventListener('keydown', event => {
   if (['ArrowRight', 'PageDown', 'ArrowLeft', 'PageUp'].includes(event.key)) {
     event.preventDefault(); turn(['ArrowRight', 'PageDown'].includes(event.key) ? 1 : -1);
-  } else if (event.key === 'Escape') send('escape');
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') send('escape');
 });
 const removeTouch = touchNavigation(viewport, turn);
-const observer = new ResizeObserver(() => { if (ready && !navigating) reflow(); });
+const observer = new ResizeObserver(() => {
+  if (ready && !navigating && (geometry.width !== viewport.clientWidth || geometry.height !== viewport.clientHeight ||
+      geometry.scrollHeight !== viewport.scrollHeight)) reflow();
+});
 observer.observe(viewport); observer.observe(host);
 document.addEventListener('visibilitychange', () => report(true));
 window.addEventListener('pagehide', () => {

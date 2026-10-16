@@ -52,6 +52,7 @@ export async function mountPdfReader(
   let removeTouch: (() => void) | undefined;
   let refreshPresentation: ((page: number, offset: number) => void) | undefined;
   let restoredPosition: { page: number; scrollTop: number; offset: number } | undefined;
+  let pendingPosition: Extract<EbookLocator, { kind: 'pdf' }> | undefined;
   const views = new Map<number, PageView>();
   const renders = new Set<RenderTask>();
   const textLayers = new Set<TextLayer>();
@@ -85,7 +86,7 @@ export async function mountPdfReader(
   showChrome();
   const updatePresentation = (event: Event) => {
     if (!(event instanceof CustomEvent)) return;
-    const saved = ready && !changing ? location() : progress.location;
+    const saved = pendingPosition ?? (ready ? location() : progress.location);
     presentation = event.detail as ReaderPresentation;
     showChrome();
     if (saved?.kind === 'pdf') refreshPresentation?.(saved.page, saved.offset);
@@ -122,7 +123,7 @@ export async function mountPdfReader(
   function dispose(): void {
     if (disposed) return;
     disposed = true; ready = false; generation += 1;
-    restoredPosition = undefined; current = 1;
+    restoredPosition = undefined; pendingPosition = undefined; current = 1;
     controller.abort(); clearInterval(timer); cancelAnimationFrame(scrollFrame);
     observer?.disconnect(); removeTouch?.();
     if (updatePresentation) container.removeEventListener(PRESENTATION_EVENT, updatePresentation);
@@ -308,6 +309,9 @@ export async function mountPdfReader(
       if (!Number.isSafeInteger(number) || number < 1 || number > documentProxy!.numPages ||
           !Number.isFinite(offset) || offset < 0 || offset > 1) return Promise.reject(new PdfLimitError('Saved PDF position is outside this document; start from the beginning.'));
       save(); changing = true;
+      // A rendered boundary can be visible while its neighbor is still loading.
+      // Keep navigation intent separate from progress, which is saved only on completion.
+      pendingPosition = { kind: 'pdf', page: number, offset };
       const epoch = ++generation;
       for (const task of renders) task.cancel();
       for (const layer of textLayers) layer.cancel();
@@ -329,7 +333,7 @@ export async function mountPdfReader(
         container.dataset.pdfPagePixels = String(views.get(number)!.canvas.width * views.get(number)!.canvas.height);
         status.textContent = `Page ${number} of ${documentProxy!.numPages}${wanted.some(page => views.get(page)?.capped) ? ' / Zoom limited by the pixel/cache safety budget.' : ''}`;
         showChrome();
-        ready = true; changing = false; save();
+        ready = true; changing = false; pendingPosition = undefined; save();
       });
       navigation = task; return task;
     };
@@ -337,7 +341,7 @@ export async function mountPdfReader(
     refreshPresentation = navigate;
     const setZoom = (scale: number) => {
       if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new PdfLimitError('Unsupported PDF zoom.');
-      const position = location(); save(); zoom = scale;
+      const position = pendingPosition ?? location(); save(); zoom = scale;
       changing = true;
       for (const task of renders) task.cancel();
       for (const page of [...views.keys()]) removePage(page);

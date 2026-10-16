@@ -58,7 +58,7 @@ export interface CbzTransfer {
   timeline(): TransferTimeline;
 }
 
-async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, categoryFixtures = false, readerWindowFixtures = false): Promise<Provider> {
+async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, categoryFixtures = false, readerWindowFixtures = false, shortReaderFixtures = false): Promise<Provider> {
   const token = randomUUID();
   let unavailable = false;
   const files = new Map<string, Buffer>();
@@ -140,11 +140,12 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
   const setCbz: Provider['setCbz'] = async mode => {
     if (!manga) throw new Error('CBZ fixtures are not enabled');
     for (let chapter = 1; chapter <= 2; chapter++) {
-      const entries = (mode === 'single' ? [1] : [10, 2, 1]).map(number => ({
+      const entries = (mode === 'single' ? [1] : shortReaderFixtures ? [5, 4, 3, 2, 1] : [10, 2, 1]).map(number => ({
         name: `Pages/${number}.png`,
         data: mode === 'corrupt' && number === 2 ? Buffer.from('Damaged generated page') :
           comicPanel(mode === 'replacement' ? number + 1 : number, chapter,
-            readerWindowFixtures && number === 2 ? 960 : 480, readerWindowFixtures && number === 10 ? 1100 : 720),
+            (readerWindowFixtures || shortReaderFixtures) && number === 2 ? 960 : 480,
+            shortReaderFixtures && number === 2 ? 180 : readerWindowFixtures && number === 10 ? 1100 : 720),
       }));
       const bytes = mode === 'large' && chapter === 1 ? await buildLargeCbzFixture() : await buildCbzFixture(entries);
       files.set(`manga:manga-${chapter - 1}`, bytes);
@@ -179,6 +180,16 @@ async function syntheticProvider(longNodeEpub = false, cbzFixtures = false, cate
           .replace('</body>', `<img src="image${index}.png" alt="Generated section art"/></body>`)) },
         { name: `OPS/image${index}.png`, data: comicPanel(index + 1, 1) },
       ]).flat(),
+    } : {}),
+    ...(shortReaderFixtures ? {
+      package: fixturePackage.replace(' properties="nav"', '').replace(/<spine>.*<\/spine>/, `<spine>${Array.from({ length: 5 }, (_, index) =>
+        `<itemref idref="short${index}"/>`).join('')}</spine>`).replace('</manifest>',
+        Array.from({ length: 5 }, (_, index) =>
+          `<item id="short${index}" href="short${index}.xhtml" media-type="application/xhtml+xml"/>`).join('') + '</manifest>'),
+      extra: Array.from({ length: 5 }, (_, index) => ({
+        name: `OPS/short${index}.xhtml`,
+        data: Buffer.from(`<html xmlns="http://www.w3.org/1999/xhtml"><body><h2>Short section ${index + 1}</h2><p>Read this line in order.</p></body></html>`),
+      })),
     } : {}),
   });
   files.set('dual:dual-0', ebook);
@@ -360,7 +371,7 @@ async function verifiedFixtureTls(origin: string, cert: Buffer): Promise<void> {
   });
 }
 
-export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean; reverseProxy: boolean; canonicalOrigin: boolean; cbzFixtures: boolean; categoryFixtures: boolean; readerWindowFixtures: boolean }>({
+export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controlledReaderClock: boolean; externalApp: boolean; longNodeEpub: boolean; reverseProxy: boolean; canonicalOrigin: boolean; cbzFixtures: boolean; categoryFixtures: boolean; readerWindowFixtures: boolean; shortReaderFixtures: boolean }>({
   cbzFixtures: [false, { option: true }],
   categoryFixtures: [false, { option: true }],
   liveProvider: [false, { option: true }],
@@ -368,9 +379,10 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
   externalApp: [false, { option: true }],
   longNodeEpub: [false, { option: true }],
   readerWindowFixtures: [false, { option: true }],
+  shortReaderFixtures: [false, { option: true }],
   reverseProxy: [false, { option: true }],
   canonicalOrigin: [true, { option: true }],
-  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub, reverseProxy, canonicalOrigin, cbzFixtures, categoryFixtures, readerWindowFixtures }, use, testInfo) => {
+  app: async ({ liveProvider, controlledReaderClock, externalApp, longNodeEpub, reverseProxy, canonicalOrigin, cbzFixtures, categoryFixtures, readerWindowFixtures, shortReaderFixtures }, use, testInfo) => {
     if (externalApp) {
       const fixture = await loadExternalFixture(repoRoot);
       await use(fixture);
@@ -398,7 +410,7 @@ export const test = base.extend<{ app: BooksApp; liveProvider: boolean; controll
     let clockOffset = 0;
     const readerNow = () => Date.now() + clockOffset;
     try {
-      if (!liveProvider) provider = await syntheticProvider(longNodeEpub, cbzFixtures, categoryFixtures, readerWindowFixtures);
+      if (!liveProvider) provider = await syntheticProvider(longNodeEpub, cbzFixtures, categoryFixtures, readerWindowFixtures, shortReaderFixtures);
       const absOrigin = provider?.origin ?? process.env.BOOKS_TEST_ABS_ORIGIN;
       const selectedLibrary = provider?.libraryId ?? process.env.BOOKS_PROOF_LIBRARY_ID;
       if (!absOrigin || !selectedLibrary) throw new Error('Isolated ABS fixture inputs are required');

@@ -148,6 +148,9 @@ reading across page or spine-section boundaries. **Reading mode** switches to
 browser. Continuous scrolling stops at the end of the selected original; it
 does not repeat the book or open another original. A small current/neighbor
 window is retained, not the whole book's DOM, decoded images or canvases.
+Short trailing CBZ pages and EPUB sections get enough trailing scroll space to
+reach the top and load the next neighbor, without expanding that window or
+preventing backwards scrolling.
 
 **Full screen** is an explicit action, never automatically restored. It hides
 site and reader controls, with reachable **Show controls** and **Exit full
@@ -156,6 +159,9 @@ uses an honestly labeled **Viewport-only view**. Errors and partial-preparation
 warnings remain visible. Active audio keeps playing without reserving space for
 its hidden outside toolbar. Mode, font, zoom and fullscreen changes preserve
 logical positions rather than saving layout-clamped offsets.
+PDF presentation changes also retain the pending page/fraction while neighbors
+render; an unrendered navigation target does not become saved progress. EPUB
+Escape works from both the reading viewport and embedded controls.
 
 The EPUB preview has contents, viewport-sized previous/next reading screens,
 scrolling, font size, and private resume. Paged navigation crosses to another

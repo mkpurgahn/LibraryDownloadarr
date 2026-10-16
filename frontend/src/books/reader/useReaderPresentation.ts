@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
 import { BOOKS_CHANGED_EVENT } from '../api';
 import type { ReadingMode } from './presentation';
@@ -8,10 +8,21 @@ export function useReaderPresentation(userId: string | undefined, identity: stri
   const trigger = useRef<HTMLButtonElement>(null);
   const [mode, setMode] = useState<ReadingMode>('continuous');
   const [screen, setScreen] = useState<'normal' | 'native' | 'viewport'>('normal');
+  const previousScreen = useRef(screen);
   const [controls, setControls] = useState(false);
   const [notice, setNotice] = useState('');
   const epoch = useRef(0);
   const key = userId ? `books-reading-mode:${userId}` : undefined;
+  useLayoutEffect(() => {
+    let focus: number | undefined;
+    if (previousScreen.current !== 'normal' && screen === 'normal') {
+      // Release the embedded document before returning focus to its parent.
+      if (document.activeElement instanceof HTMLIFrameElement) document.activeElement.blur();
+      focus = requestAnimationFrame(() => trigger.current?.focus());
+    }
+    previousScreen.current = screen;
+    return () => { if (focus !== undefined) cancelAnimationFrame(focus); };
+  }, [screen]);
   useEffect(() => {
     try { setMode(key && localStorage.getItem(key) === 'paged' ? 'paged' : 'continuous'); }
     catch { setNotice('Reading preference could not be loaded in this browser.'); }
@@ -26,7 +37,6 @@ export function useReaderPresentation(userId: string | undefined, identity: stri
     try {
       if (document.fullscreenElement === root.current) await document.exitFullscreen();
       setScreen('normal'); setControls(false);
-      requestAnimationFrame(() => trigger.current?.focus());
     } catch { setNotice('Full screen could not close. Press Escape to exit.'); }
   };
   const enter = async () => {
@@ -49,7 +59,7 @@ export function useReaderPresentation(userId: string | undefined, identity: stri
     const element = root.current;
     const changed = () => {
       if (document.fullscreenElement === element) setScreen('native');
-      else { setScreen('normal'); setControls(false); requestAnimationFrame(() => trigger.current?.focus()); }
+      else { setScreen('normal'); setControls(false); }
     };
     const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape') void exit(); };
     const invalidate = () => { void exit(); };

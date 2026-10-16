@@ -105,6 +105,11 @@ export const ComicReader: React.FC<{
       value.image.style.width = `${Math.max(1, Math.floor(value.entry.width * scale))}px`;
       value.image.style.height = 'auto';
     }
+    // The trailing entry must be able to reach the top even when it is shorter
+    // than the viewport; otherwise scrolling can never replenish this window.
+    const trailing = container.lastElementChild;
+    container.style.paddingBottom = mode === 'continuous' && trailing instanceof HTMLElement
+      ? `${Math.max(0, element.clientHeight - trailing.offsetHeight)}px` : '0';
     const selected = pages.current.get(anchor.current.page);
     if (!selected) return;
     const vertical = mode === 'continuous' ? selected.element.offsetHeight - element.clientHeight : element.scrollHeight - element.clientHeight;
