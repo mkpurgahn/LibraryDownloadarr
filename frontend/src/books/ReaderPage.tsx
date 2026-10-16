@@ -7,6 +7,8 @@ import { ProgressClient, SaveState } from './progress';
 import { mountEpubReader } from './reader/epubAdapter';
 import { ComicReader } from './reader/ComicReader';
 import { ProgressiveComicSource } from './reader/progressiveComic';
+import { PRESENTATION_EVENT, ReadingMode } from './reader/presentation';
+import { useReaderPresentation } from './reader/useReaderPresentation';
 
 const beginning = (descriptor?: ReaderDescriptor): EbookLocator => descriptor?.policyVersion === 'cbz-pages-v1'
   ? { kind: 'cbz', page: 1, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion }
@@ -16,6 +18,11 @@ const beginning = (descriptor?: ReaderDescriptor): EbookLocator => descriptor?.p
 export const ReaderPage: React.FC = () => {
   const { itemId, fileId } = useParams<{ itemId: string; fileId: string }>();
   const revision = useAuthStore(state => state.sessionRevision);
+  const userId = useAuthStore(state => state.user?.id);
+  const presentation = useReaderPresentation(userId, `${itemId}:${fileId}:${revision}`);
+  const { mode, chromeHidden } = presentation;
+  const currentPresentation = useRef({ mode, chromeHidden });
+  currentPresentation.current = { mode, chromeHidden };
   const [item, setItem] = useState<BookItem>();
   const [file, setFile] = useState<BookFile>();
   const [descriptor, setDescriptor] = useState<ReaderDescriptor>();
@@ -143,7 +150,7 @@ export const ReaderPage: React.FC = () => {
       if (event instanceof CustomEvent && typeof event.detail === 'string') setError(event.detail);
     };
     current.addEventListener('reader-error', failure);
-    const dispose = mountEpubReader(current, descriptor, client);
+    const dispose = mountEpubReader(current, descriptor, client, currentPresentation.current);
     return () => { dispose(); current.removeEventListener('reader-error', failure); };
   }, [descriptor, client, started]);
   useEffect(() => {
@@ -156,12 +163,17 @@ export const ReaderPage: React.FC = () => {
     };
     current.addEventListener('reader-error', failure);
     void import('./reader/pdfAdapter').then(module =>
-      module.mountPdfReader(current, { itemId, fileId: file.fileId, contentVersion: file.contentVersion }, client, controller.signal)
+      module.mountPdfReader(current, { itemId, fileId: file.fileId, contentVersion: file.contentVersion }, client, controller.signal, currentPresentation.current)
     ).then(reader => {
       if (controller.signal.aborted) reader.dispose(); else dispose = reader.dispose;
     }).catch(error => { if (!aborted(error) && !controller.signal.aborted) setError(booksErrorMessage(error)); });
     return () => { controller.abort(); dispose?.(); current.removeEventListener('reader-error', failure); };
   }, [file, client, started, itemId]);
+  useLayoutEffect(() => {
+    for (const element of [frame.current, pdfContainer.current]) {
+      element?.dispatchEvent(new CustomEvent(PRESENTATION_EVENT, { detail: { mode, chromeHidden } }));
+    }
+  }, [mode, chromeHidden]);
   const resume = async (saved: boolean, here = false) => {
     if (!client || !file) return;
     setError('');
@@ -179,21 +191,38 @@ export const ReaderPage: React.FC = () => {
       window.requestAnimationFrame(() => setStarted(true));
     } catch (error) { if (!aborted(error)) setError(booksErrorMessage(error)); }
   };
-  return <main className="flex flex-col bg-dark p-3" style={{ height: 'calc(100dvh - var(--books-player-height, 0px))', paddingTop: 'max(0.75rem, env(safe-area-inset-top))', paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
-    <header className="flex flex-wrap items-center justify-between gap-3 pb-2">
+  return <main ref={presentation.root} data-reading-mode={mode}
+    className={`flex flex-col bg-dark ${presentation.screen !== 'normal' ? 'fixed inset-0 z-[1000]' : 'p-3'}`}
+    style={{ height: presentation.screen !== 'normal' ? '100dvh' : 'calc(100dvh - var(--books-player-height, 0px))',
+      paddingTop: chromeHidden ? 0 : 'max(0.75rem, env(safe-area-inset-top))',
+      paddingBottom: chromeHidden ? 0 : 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+    {presentation.screen !== 'normal' && <div className="absolute right-2 top-2 z-50 flex gap-2 rounded-lg bg-dark/90 p-1">
+      {presentation.screen === 'viewport' && <span className="self-center px-2 text-xs">Viewport-only view</span>}
+      <button className="btn-secondary min-h-11 min-w-11" onClick={() => presentation.setControls(value => !value)}>
+        {chromeHidden ? 'Show controls' : 'Hide controls'}</button>
+      <button className="btn-secondary min-h-11 min-w-11" onClick={() => void presentation.exit()}>Exit full screen</button>
+    </div>}
+    <header hidden={chromeHidden} className={chromeHidden ? 'hidden' : 'flex flex-wrap items-center justify-between gap-3 pb-2'}>
       <Link tabIndex={0} className="inline-flex min-h-11 items-center text-primary-300" to={`/books/items/${itemId}`}>Back to book</Link>
       <div className="min-w-0">
         <h1 ref={heading} tabIndex={-1} className="break-words text-lg font-semibold outline-none">{item?.title ?? 'Book reader'}</h1>
         {file?.extension === 'cbz' && <p className="break-words text-xs text-gray-400">{file.basename}</p>}
       </div>
       {started && <p role="status" className="text-sm text-gray-300">{state === 'saved' ? 'Position saved' : state === 'conflict' ? 'Another device changed the saved position.' : 'Position not saved yet.'}</p>}
+      <label className="flex items-center gap-2 text-sm">Reading mode
+        <select className="input min-h-11 w-auto" value={mode} onChange={event => presentation.chooseMode(event.target.value as ReadingMode)}>
+          <option value="continuous">Continuous</option><option value="paged">Paged</option>
+        </select>
+      </label>
+      <button ref={presentation.trigger} className="btn-secondary min-h-11" onClick={() => void presentation.enter()}>Full screen</button>
     </header>
+    {presentation.notice && <p role="alert" className="p-3 text-amber-200">{presentation.notice}</p>}
     {error && <div role="alert" className="mb-3 rounded bg-red-500/10 p-3 text-red-200">{error}
       <button className="btn-secondary ml-3 min-h-11" onClick={() => setRetry(value => value + 1)}>Open reader again</button>
     </div>}
     {!client && descriptor?.state !== 'download-only' && !error && <p role="status" className="p-6">Preparing book...</p>}
     {descriptor?.state === 'download-only' && <p role="status" className="p-6">{descriptor.reason}</p>}
-    {preparation && <p role={preparation.state === 'failed' ? 'alert' : 'status'}
+    {preparation && (!chromeHidden || preparation.state === 'failed') && <p role={preparation.state === 'failed' ? 'alert' : 'status'}
       className={`h-12 shrink-0 overflow-auto text-sm ${preparation.state === 'failed' ? 'text-red-200' : 'text-gray-400'}`}>
       {preparation.state === 'failed' ? preparation.spine.length ?
         `Preparation stopped. ${preparation.resources.length} of ${preparation.spine.length} pages are ready; other pages are unavailable. Download the original.` :
@@ -215,6 +244,7 @@ export const ReaderPage: React.FC = () => {
     {started && file?.extension === 'pdf' && <div ref={pdfContainer} data-testid="pdf-reader" className="min-h-0 w-full flex-1" />}
     {started && client && file?.extension === 'cbz' && descriptor?.policyVersion === 'cbz-pages-v1' && itemId &&
       <ComicReader key={descriptor.readerId} descriptor={descriptor} progress={client} source={source}
+        mode={mode} chromeHidden={chromeHidden}
         initialLocator={initialComic} onRendered={comicRendered}
         target={{ itemId, fileId: file.fileId, contentVersion: file.contentVersion }} />}
   </main>;

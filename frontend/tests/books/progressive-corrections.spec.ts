@@ -43,6 +43,8 @@ test('a held initial claim cannot rewind the rendered page on leave and durable 
     const second = page.getByRole('img', { name: 'Comic page 2 of 3', exact: true });
     await expect(second).toBeVisible();
     await expect.poll(() => second.evaluate(image => image instanceof HTMLImageElement && image.naturalWidth)).toBe(480);
+    await page.getByLabel('Reading mode').selectOption('paged');
+    await page.getByLabel('Reading mode').selectOption('continuous');
     // Finish layout, then hold periodic/animation sampling through claim acknowledgement and cleanup.
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     await page.clock.install();

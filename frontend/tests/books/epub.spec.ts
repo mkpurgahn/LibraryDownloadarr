@@ -22,7 +22,7 @@ test('reader_restores_section_fraction_privately', async ({ page, app }, info) =
   await expect(page.locator('iframe')).toHaveAttribute('sandbox', 'allow-scripts');
   await frame.getByLabel('Font size').selectOption('24');
   await expect(frame.getByLabel('Font size')).toHaveValue('24');
-  await frame.getByRole('button', { name: 'Next section', exact: true }).click();
+  await frame.getByLabel('Contents').selectOption('1');
   await expect(frame.getByRole('heading', { name: 'Second section' })).toBeVisible();
   await expect(page.getByRole('status').filter({ hasText: 'Position saved' })).toBeVisible();
   await capture(page, 'epub-second-section', info);

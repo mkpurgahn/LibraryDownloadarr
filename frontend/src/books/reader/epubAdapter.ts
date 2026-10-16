@@ -3,13 +3,16 @@ import { booksApi, aborted, BOOKS_CHANGED_EVENT } from '../api';
 import { ReaderDescriptor, parseLocator, record } from '../types';
 import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
+import { DEFAULT_PRESENTATION, PRESENTATION_EVENT, ReaderPresentation } from './presentation';
 
-export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDescriptor, progress: ProgressClient): () => void {
+export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDescriptor, progress: ProgressClient,
+  initialPresentation: ReaderPresentation = DEFAULT_PRESENTATION): () => void {
   const controller = new AbortController();
   const instance = crypto.randomUUID();
   const channel = new MessageChannel();
   let connected = false;
   let active = 0;
+  let presentation = initialPresentation;
   const outstanding = new Set<number>();
   const error = (message: string) => frame.dispatchEvent(new CustomEvent('reader-error', { detail: message }));
   const save = () => {
@@ -22,6 +25,7 @@ export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDesc
     let value: Record<string, unknown>;
     try { value = record(event.data); } catch { error('Reader sent an invalid message.'); return; }
     if (value.instance !== instance) return;
+    if (value.type === 'escape') { window.dispatchEvent(new Event('reader-exit-fullscreen')); return; }
     if (value.type === 'error') { error('Cannot read safely here; download original.'); return; }
     if (value.type === 'location') {
       try {
@@ -52,8 +56,16 @@ export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDesc
   const boot = (event: MessageEvent) => {
     if (connected || controller.signal.aborted || event.source !== frame.contentWindow || event.data?.type !== 'epub-shell-ready') return;
     connected = true;
-    frame.contentWindow!.postMessage({ type: 'epub-init', instance, descriptor, locator: progress.location }, '*', [channel.port2]);
+    frame.contentWindow!.postMessage({ type: 'epub-init', instance, descriptor, locator: progress.location, presentation }, '*', [channel.port2]);
   };
+  const update = (event: Event) => {
+    if (!(event instanceof CustomEvent)) return;
+    presentation = event.detail as ReaderPresentation;
+    if (connected) channel.port1.postMessage({ type: 'presentation', instance, presentation });
+  };
+  const cancelGesture = () => { if (connected) channel.port1.postMessage({ type: 'cancel-gesture', instance }); };
+  frame.addEventListener(PRESENTATION_EVENT, update);
+  document.addEventListener('touchstart', cancelGesture, { capture: true, passive: true });
   window.addEventListener('message', boot);
   const visibility = () => { if (document.visibilityState === 'hidden') save(); };
   document.addEventListener('visibilitychange', visibility);
@@ -65,6 +77,8 @@ export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDesc
     controller.abort(); channel.port1.close(); channel.port2.close();
     window.clearInterval(interval);
     window.removeEventListener('message', boot);
+    frame.removeEventListener(PRESENTATION_EVENT, update);
+    document.removeEventListener('touchstart', cancelGesture, true);
     window.removeEventListener('pagehide', save);
     document.removeEventListener('visibilitychange', visibility);
     window.removeEventListener(SESSION_CHANGED_EVENT, dispose);

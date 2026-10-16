@@ -95,9 +95,9 @@ export class ProgressiveComicSource {
     return { readerId: this.readerId, policyVersion: 'cbz-pages-v1', contentVersion: this.current.contentVersion,
       state: 'preparing', spine: [...this.current.spine], resources: [], toc: [] };
   }
-  async page(page: number, signal: AbortSignal): Promise<ComicResource> {
+  async page(page: number, signal: AbortSignal, foreground = true): Promise<ComicResource> {
     if (!Number.isSafeInteger(page) || page < 1 || page > this.current.spine.length) throw new Error('Page outside this book.');
-    if (page !== this.wanted && !this.resource(page)) {
+    if (foreground && page !== this.wanted) {
       this.wanted = page;
       this.poll?.abort();
     }

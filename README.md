@@ -142,8 +142,29 @@ and sanitizer-policy changes make older locations incompatible.
 Pending progress requests cannot read or commit after their session is revoked
 or expires, even if a provider response arrives later.
 
-The EPUB preview has native contents, previous/next sections, scrolling, font
-size, and private resume. A second device must explicitly claim the saved
+All readable originals (CBZ, PDF and EPUB) default to **Continuous** vertical
+reading across page or spine-section boundaries. **Reading mode** switches to
+**Paged** and remembers the explicit choice for this signed-in user in this
+browser. Continuous scrolling stops at the end of the selected original; it
+does not repeat the book or open another original. A small current/neighbor
+window is retained, not the whole book's DOM, decoded images or canvases.
+
+**Full screen** is an explicit action, never automatically restored. It hides
+site and reader controls, with reachable **Show controls** and **Exit full
+screen** buttons and Escape to exit. Unsupported or denied native fullscreen
+uses an honestly labeled **Viewport-only view**. Errors and partial-preparation
+warnings remain visible. Active audio keeps playing without reserving space for
+its hidden outside toolbar. Mode, font, zoom and fullscreen changes preserve
+logical positions rather than saving layout-clamped offsets.
+
+The EPUB preview has contents, viewport-sized previous/next reading screens,
+scrolling, font size, and private resume. Paged navigation crosses to another
+spine section only at the current section's boundary, not on every Next page.
+PDF and EPUB do not wrap. Horizontal single-finger swipes work on touch-enabled
+desktop/hybrid computers as well as narrow screens: left advances, right goes
+back. Vertical touch scrolls; horizontal panning, selections, long presses and
+multi-contact gestures do not turn pages.
+A second device must explicitly claim the saved
 position; conflicts offer **Resume saved position** or **Continue here**.
 Positions save every ten seconds and on navigation/visibility changes when
 possible. Network failures show an unsaved state; browser-close delivery is
@@ -166,8 +187,8 @@ Relative navigation loops within the selected original: previous on page 1
 opens its last page, and next on its last page opens page 1. A one-page original
 stays on page 1 with disabled arrows. Page jumps require a valid literal page
 number and never wrap invalid values. Pages are not mirrored or reordered.
-Navigation pauses while a page loads, never crosses to another chapter, and
-never advances automatically. A newly selected page starts at its top-left;
+Explicit CBZ navigation pauses while a page loads, never crosses to another
+original, and never advances automatically. A newly selected page starts at its top-left;
 resuming a saved page retains its saved position.
 The selected original's filename is
 shown in the reader; separate chapter files never borrow another file's pages
@@ -266,10 +287,15 @@ native-image checks.
 
 Pinned sharp 0.34.5 validates CBZ rasters inside the worker, with libvips
 concurrency explicitly set to **one** (including musl/Alpine) and its operation
-cache disabled and a one-second native decode deadline per page. Pages are decoded serially; the browser acquires only its
-current page, cancels abandoned turns and releases object URLs on navigation,
-session/configuration changes and close. Its decoded-pixel counter describes
-the single application-owned image, not browser RSS or compositor memory.
+cache disabled and a one-second native decode deadline per page. The browser
+retains at most three validated page images in Continuous mode and one in Paged
+mode (at most 48 million retained decoded pixels and 96 MiB of page blobs in the
+continuous window, subject to the existing per-page limits). It displays the
+foreground page before waiting for neighbors. Neighbor waits do not replace
+the progressive source's latest requested-page priority. Abandoned fetch/decode
+work is cancelled and object URLs are released on eviction, session/configuration
+changes and close. Counters describe application-owned images, not browser RSS
+or compositor memory.
 The worker's 256 MiB tracked heap/external budget and V8 heap limits **do not**
 bound native libvips allocations or whole-process RSS. Sampled process-RSS
 evidence is reported separately, not as a hard memory guarantee. The legacy complete-reader
@@ -284,7 +310,12 @@ DOMPurify sanitation and parsed CSS restrictions. Book payloads are served as
 authenticated, non-executable attachments; only the isolated frame constructs
 book DOM. It receives no credentials or provider paths. Conservative additional
 bounds are 100,000 XML nodes, 128 levels, one million characters per section,
-512 KiB per stylesheet, and 64 MiB of assets for the visible section. Dependency
+512 KiB per stylesheet, and **64 MiB aggregate assets across the active window**,
+including in-flight assets. Continuous EPUB keeps at most three sanitized spine
+sections (one in Paged mode), each with an isolated style scope and a sanitized
+Foliate text-anchor mirror. Shared assets use reference-counted object URLs and
+are released when their last section is evicted. A bounded request queue feeds
+the unchanged two-active-request private resource broker. Dependency
 licenses ship at `/books-reader-notices.txt`; Foliate is pinned to reviewed
 commit `78914aef4466eb960965702401634c2cb348e9b1`.
 

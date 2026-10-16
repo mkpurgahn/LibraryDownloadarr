@@ -4,6 +4,7 @@ import { BookTarget, ComicDescriptor, ComicLocator, ComicResource } from '../typ
 import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
 import { ProgressiveComicSource } from './progressiveComic';
+import { ReadingMode } from './presentation';
 
 type Fit = 'page' | 'width' | 'manual';
 const clamp = (value: number) => Math.max(0, Math.min(1, value));
@@ -11,12 +12,13 @@ const clamp = (value: number) => Math.max(0, Math.min(1, value));
 export const ComicReader: React.FC<{
   descriptor: ComicDescriptor; target: BookTarget; progress: ProgressClient;
   source?: ProgressiveComicSource; initialLocator?: ComicLocator; onRendered?: (locator: ComicLocator) => Promise<void>;
-}> = ({ descriptor, target, progress, source, initialLocator, onRendered }) => {
+  mode: ReadingMode; chromeHidden: boolean;
+}> = ({ descriptor, target, progress, source, initialLocator, onRendered, mode, chromeHidden }) => {
   const initial = initialLocator ?? (progress.location?.kind === 'cbz' ? progress.location :
     { kind: 'cbz' as const, page: 1, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion });
   const [page, setPage] = useState(initial.page);
   const [jump, setJump] = useState(String(initial.page));
-  const [fit, setFit] = useState<Fit>('page');
+  const [fit, setFit] = useState<Fit>(mode === 'continuous' ? 'width' : 'page');
   const [zoom, setZoom] = useState(100);
   const [options, setOptions] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -28,15 +30,18 @@ export const ComicReader: React.FC<{
   const image = useRef<HTMLImageElement>();
   const manifest = useRef(descriptor);
   const anchor = useRef<ComicLocator>(initial);
+  const pages = useRef(new Map<number, { entry: ComicResource; image: HTMLImageElement; url: string; element: HTMLDivElement }>());
+  const layoutMode = useRef(mode);
   const snapshot = useRef<{
     image: HTMLImageElement; top: number; left: number;
     width: number; height: number; scrollWidth: number; scrollHeight: number;
+    pageTop: number; pageHeight: number; pageLeft: number; pageWidth: number;
   }>();
   const queue = useRef<Promise<void>>(Promise.resolve());
   const active = useRef<AbortController>();
   const timer = useRef<number>();
   const blocked = useRef(false);
-  const touch = useRef<{ id: number; x: number; y: number; image: HTMLImageElement; page: number }>();
+  const touch = useRef<{ id: number; x: number; y: number; time: number; image: HTMLImageElement; page: number }>();
   const touchCancelled = useRef(false);
   const pointer = useRef<{
     id: number; x: number; y: number; time: number; side: 'left' | 'right';
@@ -57,14 +62,65 @@ export const ComicReader: React.FC<{
     // A changed layout can clamp offsets before either scroll or ResizeObserver fires.
     if (element.clientWidth !== previous.width || element.clientHeight !== previous.height ||
         element.scrollWidth !== previous.scrollWidth || element.scrollHeight !== previous.scrollHeight) return;
-    const vertical = element.scrollHeight - element.clientHeight;
-    const horizontal = element.scrollWidth - element.clientWidth;
+    if (layoutMode.current === 'continuous' && element.scrollTop !== previous.top) {
+      const visible = [...pages.current.entries()].find(([, value]) =>
+        value.element.offsetTop <= element.scrollTop + 1 &&
+        value.element.offsetTop + value.element.offsetHeight > element.scrollTop + 1);
+      if (visible && visible[0] !== anchor.current.page) {
+        const [number, value] = visible;
+        anchor.current = { ...anchor.current, page: number, offset: 0, horizontal: 0 };
+        image.current = value.image;
+        setPage(number); setResource(value.entry); setJump(String(number));
+        snapshot.current = { ...previous, image: value.image, pageTop: value.element.offsetTop, pageHeight: value.element.offsetHeight,
+          pageLeft: value.element.offsetLeft, pageWidth: value.element.offsetWidth };
+      }
+    }
+    const selected = snapshot.current!;
+    const vertical = layoutMode.current === 'continuous' ? selected.pageHeight - element.clientHeight : element.scrollHeight - element.clientHeight;
+    const horizontal = layoutMode.current === 'continuous' ? selected.pageWidth - element.clientWidth : element.scrollWidth - element.clientWidth;
+    const left = layoutMode.current === 'continuous' ? selected.pageLeft : 0;
     anchor.current = { ...anchor.current,
-      offset: vertical > 0 && element.scrollTop !== previous.top ? clamp(element.scrollTop / vertical) : anchor.current.offset,
-      horizontal: horizontal > 0 && element.scrollLeft !== previous.left ? clamp(element.scrollLeft / horizontal) : anchor.current.horizontal };
-    snapshot.current = { ...previous, top: element.scrollTop, left: element.scrollLeft };
+      offset: vertical > 0 && element.scrollTop !== previous.top ? clamp((element.scrollTop - selected.pageTop) / vertical) : anchor.current.offset,
+      horizontal: horizontal > 0 && element.scrollLeft !== previous.left ? clamp((element.scrollLeft - left) / horizontal) : anchor.current.horizontal };
+    snapshot.current = { ...selected, top: element.scrollTop, left: element.scrollLeft };
     progress.location = anchor.current;
   };
+  function removePage(number: number) {
+    const value = pages.current.get(number);
+    if (!value) return;
+    value.image.removeAttribute('src'); value.element.remove(); URL.revokeObjectURL(value.url);
+    pages.current.delete(number);
+  }
+  function arrange() {
+    const element = viewport.current, container = slot.current;
+    if (!element || !container) return;
+    position();
+    const wanted = mode === 'continuous' ? [page - 1, page, page + 1] : [page];
+    for (const number of pages.current.keys()) if (!wanted.includes(number)) removePage(number);
+    container.replaceChildren(...[...pages.current.entries()].sort(([a], [b]) => a - b).map(([, value]) => value.element));
+    layoutMode.current = mode;
+    for (const value of pages.current.values()) {
+      const scale = fit === 'width' ? element.clientWidth / value.entry.width :
+        fit === 'page' ? Math.min(element.clientWidth / value.entry.width, element.clientHeight / value.entry.height) : zoom / 100;
+      value.image.style.width = `${Math.max(1, Math.floor(value.entry.width * scale))}px`;
+      value.image.style.height = 'auto';
+    }
+    const selected = pages.current.get(anchor.current.page);
+    if (!selected) return;
+    const vertical = mode === 'continuous' ? selected.element.offsetHeight - element.clientHeight : element.scrollHeight - element.clientHeight;
+    element.scrollTop = selected.element.offsetTop + anchor.current.offset * Math.max(0, vertical);
+    const horizontal = mode === 'continuous' ? selected.element.offsetWidth - element.clientWidth : element.scrollWidth - element.clientWidth;
+    const left = mode === 'continuous' ? selected.element.offsetLeft - Math.max(0, (element.clientWidth - selected.element.offsetWidth) / 2) : 0;
+    element.scrollLeft = left + anchor.current.horizontal * Math.max(0, horizontal);
+    snapshot.current = { image: selected.image, top: element.scrollTop, left: element.scrollLeft,
+      width: element.clientWidth, height: element.clientHeight, scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight,
+      pageTop: selected.element.offsetTop, pageHeight: selected.element.offsetHeight,
+      pageLeft: selected.element.offsetLeft, pageWidth: selected.element.offsetWidth };
+    element.dataset.decodedPixels = String([...pages.current.values()].reduce((sum, value) => sum + value.entry.width * value.entry.height, 0));
+    element.dataset.pageBytes = String([...pages.current.values()].reduce((sum, value) => sum + value.entry.size, 0));
+  }
+  const arrangeLatest = useRef(arrange);
+  arrangeLatest.current = arrange;
 
   useEffect(() => {
     const element = viewport.current!;
@@ -105,6 +161,7 @@ export const ComicReader: React.FC<{
     const changed = () => {
       blocked.current = true;
       active.current?.abort();
+      for (const number of pages.current.keys()) removePage(number);
       image.current?.removeAttribute('src'); image.current = undefined;
       slot.current?.replaceChildren(); setResource(undefined); setLoading(false);
       setError('Your Books session or configuration changed. Reopen Books to continue.');
@@ -115,6 +172,7 @@ export const ComicReader: React.FC<{
     window.addEventListener(SESSION_CHANGED_EVENT, changed);
     window.addEventListener(BOOKS_CHANGED_EVENT, changed);
     return () => {
+      for (const number of pages.current.keys()) removePage(number);
       window.clearInterval(interval); window.clearTimeout(timer.current);
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('pagehide', save);
@@ -135,32 +193,35 @@ export const ComicReader: React.FC<{
   useEffect(() => {
     const controller = new AbortController();
     active.current = controller;
-    let url: string | undefined;
-    let decoded: HTMLImageElement | undefined;
-    const clear = () => {
-      decoded?.removeAttribute('src');
-      if (image.current === decoded) { image.current = undefined; slot.current?.replaceChildren(); }
-      if (url) { URL.revokeObjectURL(url); url = undefined; }
-    };
-    controller.signal.addEventListener('abort', clear, { once: true });
-    setLoading(true); setResource(undefined); setError(''); setJump(String(page));
-    queue.current = queue.current.then(async () => {
+    setLoading(!pages.current.has(page)); setError(''); setJump(String(page));
+    arrange();
+    const load = async (number: number, foreground: boolean) => {
       if (controller.signal.aborted || blocked.current) return;
+      let url: string | undefined;
+      let decoded: HTMLImageElement | undefined;
+      const clear = () => {
+        decoded?.removeAttribute('src');
+        if (url) { URL.revokeObjectURL(url); url = undefined; }
+      };
+      controller.signal.addEventListener('abort', clear, { once: true });
       try {
+        const cached = pages.current.get(number);
+        if (cached) return cached;
         const current = () => {
-          const entry = manifest.current.resources.find(entry => entry.resourceId === manifest.current.spine[page - 1]);
+          const entry = manifest.current.resources.find(entry => entry.resourceId === manifest.current.spine[number - 1]);
           if (!entry) throw new Error('This CBZ page is unavailable. Reopen the original.');
           return entry;
         };
-        let entry = source ? await source.page(page, controller.signal) : current();
+        let entry = source ? await source.page(number, controller.signal, foreground) : current();
         let bytes: ArrayBuffer;
         try {
           bytes = await booksApi.readerResource(source?.readerId ?? manifest.current.readerId, entry.resourceId, entry.size, controller.signal);
         } catch (error) {
           if (!(error instanceof BooksApiError) || ![404, 410].includes(error.status)) throw error;
           if (source) {
-            await source.renew(page, controller.signal);
-            entry = await source.page(page, controller.signal);
+            if (!foreground) return;
+            await source.renew(number, controller.signal);
+            entry = await source.page(number, controller.signal);
             bytes = await booksApi.readerResource(source.readerId, entry.resourceId, entry.size, controller.signal);
           } else {
             const renewed = await booksApi.prepareReader(target, controller.signal);
@@ -181,7 +242,7 @@ export const ComicReader: React.FC<{
         if (controller.signal.aborted) return;
         url = URL.createObjectURL(new Blob([bytes], { type: entry.mediaType }));
         decoded = new Image();
-        decoded.alt = `Comic page ${page} of ${total}`;
+        decoded.alt = `Comic page ${number} of ${total}`;
         decoded.draggable = false;
         decoded.className = 'block max-w-none';
         decoded.src = url;
@@ -190,25 +251,42 @@ export const ComicReader: React.FC<{
         if (decoded.naturalWidth !== entry.width || decoded.naturalHeight !== entry.height) {
           throw new Error('This CBZ page could not be decoded safely; download the original.');
         }
-        image.current = decoded;
-        slot.current!.replaceChildren(decoded);
-        if (anchor.current.page !== page) anchor.current = {
-          kind: 'cbz', page, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion,
-        };
-        progress.location = anchor.current;
-        setResource(entry);
-        setLoading(false);
-        if (onRendered) void onRendered(anchor.current); else void progress.save(anchor.current);
+        const element = document.createElement('div');
+        element.dataset.page = String(number); element.className = 'mx-auto w-fit';
+        element.append(decoded);
+        const value = { entry, image: decoded, url, element };
+        pages.current.set(number, value); url = undefined; decoded = undefined;
+        return value;
       } catch (error) {
         if (!aborted(error) && !controller.signal.aborted) {
-          clear(); setLoading(false);
+          if (foreground) setLoading(false);
           setError(error instanceof BooksApiError ? booksErrorMessage(error) :
             'This CBZ page cannot be displayed safely. Reopen the reader or download the original.');
         }
-      } finally { if (controller.signal.aborted) clear(); }
+      } finally {
+        controller.signal.removeEventListener('abort', clear);
+        clear();
+      }
+    };
+    queue.current = queue.current.then(async () => {
+      const value = await load(page, true);
+      if (!value || controller.signal.aborted) return;
+      image.current = value.image;
+      if (anchor.current.page !== page) anchor.current = { kind: 'cbz', page, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion };
+      progress.location = anchor.current;
+      setResource(value.entry); setLoading(false); arrangeLatest.current();
+      if (onRendered) void onRendered(anchor.current); else void progress.save(anchor.current);
+      // Neighbor waits never join the foreground queue or replace its progressive priority.
+      if (mode === 'continuous') void (async () => {
+        for (const number of [page + 1, page - 1].filter(number => number >= 1 && number <= total)) {
+          await load(number, false);
+          if (controller.signal.aborted) return;
+          arrangeLatest.current();
+        }
+      })();
     });
-    return () => { controller.abort(); clear(); };
-  }, [page, descriptor, progress, source, onRendered, target.itemId, target.fileId, target.contentVersion]);
+    return () => { controller.abort(); };
+  }, [page, mode, descriptor, progress, source, onRendered, target.itemId, target.fileId, target.contentVersion]);
 
   // Restore disclosure reflows in this commit, before new user scrolls can reach ResizeObserver.
   useLayoutEffect(() => {
@@ -216,18 +294,8 @@ export const ComicReader: React.FC<{
     const current = image.current;
     if (!element || !current || !resource || !element.clientWidth) return;
     position();
-    const scale = fit === 'width' ? element.clientWidth / resource.width :
-      fit === 'page' ? Math.min(element.clientWidth / resource.width, element.clientHeight / resource.height) : zoom / 100;
-    current.style.width = `${Math.max(1, Math.floor(resource.width * scale))}px`;
-    current.style.height = 'auto';
-    element.scrollTop = anchor.current.offset * Math.max(0, element.scrollHeight - element.clientHeight);
-    element.scrollLeft = anchor.current.horizontal * Math.max(0, element.scrollWidth - element.clientWidth);
-    snapshot.current = {
-      image: current, top: element.scrollTop, left: element.scrollLeft,
-      width: element.clientWidth, height: element.clientHeight,
-      scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight,
-    };
-  }, [resource, fit, zoom, viewportSize, options]);
+    arrange();
+  }, [resource, fit, zoom, viewportSize, options, mode, chromeHidden]);
 
   const go = (next: number) => {
     if ((loading && !source) || blocked.current || next === page || next < 1 || next > total || !Number.isSafeInteger(next)) return;
@@ -302,7 +370,7 @@ export const ComicReader: React.FC<{
   };
 
   return <section aria-label="CBZ reader" className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
-    <div role="group" aria-label="Page navigation" className="flex items-center gap-2">
+    <div role="group" aria-label="Page navigation" className={chromeHidden ? 'hidden' : 'flex items-center gap-2'}>
       {pageButton('left')}
       <form className="flex min-w-0 flex-1 items-center justify-center gap-1 text-sm tabular-nums" onSubmit={event => {
         event.preventDefault();
@@ -323,7 +391,7 @@ export const ComicReader: React.FC<{
         className="min-h-11 min-w-11 shrink-0 rounded-lg px-2 text-sm text-gray-300 hover:bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300"
         onClick={() => { position(); setOptions(value => !value); }}>View</button>
     </div>
-    {options && <div id="comic-view-options" role="region" aria-label="Reading options" className="grid grid-cols-2 items-end gap-2 text-sm">
+    {options && !chromeHidden && <div id="comic-view-options" role="region" aria-label="Reading options" className="grid grid-cols-2 items-end gap-2 text-sm">
       <label className="min-w-0">Page fit
         <select className="input mt-1 min-h-11 px-2" style={{ colorScheme: 'dark' }} value={fit}
           onChange={event => { position(); setFit(event.target.value as Fit); }}>
@@ -337,13 +405,12 @@ export const ComicReader: React.FC<{
         </select>
       </label>
     </div>}
-    <p id="comic-navigation-help" className="text-xs text-gray-400">
+    <p id="comic-navigation-help" className={chromeHidden ? 'hidden' : 'text-xs text-gray-400'}>
       {total === 1 ? 'This original has one page.' : 'Left: previous. Right: next. First and last pages connect within this original.'}
     </p>
     {error && <p role="alert" className="rounded bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
     <div ref={viewport} role="region" aria-label="Comic page" aria-busy={loading} tabIndex={0}
       aria-describedby="comic-navigation-help"
-      data-decoded-pixels={resource ? resource.width * resource.height : 0}
       className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300"
       onKeyDown={key}
       onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}
@@ -355,7 +422,7 @@ export const ComicReader: React.FC<{
         if (touchCancelled.current || event.touches.length !== 1 || loading || blocked.current ||
             !image.current || hasSelection()) { cancelGesture(); return; }
         const contact = event.touches[0];
-        touch.current = { id: contact.identifier, x: contact.clientX, y: contact.clientY, image: image.current, page };
+        touch.current = { id: contact.identifier, x: contact.clientX, y: contact.clientY, time: event.timeStamp, image: image.current, page };
       }}
       onTouchCancel={cancelGesture}
       onTouchEnd={event => {
@@ -367,11 +434,11 @@ export const ComicReader: React.FC<{
         }
         const dx = end.clientX - start.x; const dy = end.clientY - start.y;
         if (Math.hypot(dx, dy) > 8) pointer.current = undefined;
-        if (element.scrollWidth > element.clientWidth + 1 || hasSelection()) return;
+        if (element.scrollWidth > element.clientWidth + 1 || hasSelection() || event.timeStamp - start.time > 500) return;
         if (Math.abs(dx) > 60 && Math.abs(dy) < 40) turn(dx < 0 ? 1 : -1);
       }}>
       {loading && <p role="status" className="p-4 text-sm text-gray-300">Loading page {page} of {total}...</p>}
-      <div ref={slot} className="mx-auto w-fit" />
+      <div ref={slot} className="relative min-w-full w-fit" />
     </div>
     <p role="status" className="sr-only">{loading ? `Loading page ${page} of ${total}` : !resource && error ? 'Page unavailable' : `Page ${page} of ${total}`}</p>
   </section>;

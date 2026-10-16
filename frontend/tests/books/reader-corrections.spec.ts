@@ -25,7 +25,7 @@ test('first_open_waits_for_initial_claim_without_false_resume_choices', async ({
     release();
     const frame = page.frameLocator('iframe[title="EPUB reader"]');
     await expect(frame.getByRole('heading', { name: 'First section' })).toBeVisible();
-    await frame.getByRole('button', { name: 'Next section', exact: true }).click();
+    await frame.getByLabel('Contents').selectOption('1');
     await expect(frame.getByRole('heading', { name: 'Second section' })).toBeVisible();
     await page.getByRole('link', { name: 'Back to book' }).click();
     await page.getByRole('link', { name: 'Read', exact: true }).click();
@@ -61,6 +61,8 @@ test.describe('accurate long-node lifecycle', () => {
     await page.getByRole('link', { name: 'Read', exact: true }).click();
     const initial = await (await prepared).json() as ReaderDescriptor;
     const frame = page.frameLocator('iframe[title="EPUB reader"]');
+    await page.getByLabel('Reading mode').selectOption('paged');
+    await expect(frame.locator('article')).toHaveCount(1);
     await expect(frame.locator('article p')).toBeVisible();
     expect(await frame.locator('article p').evaluate(element => ({
       nodes: element.childNodes.length, textNode: element.firstChild?.nodeType === Node.TEXT_NODE,

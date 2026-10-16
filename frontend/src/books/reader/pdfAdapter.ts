@@ -8,6 +8,7 @@ import { BookTarget, EbookLocator, integer, list, record, text } from '../types'
 import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
 import { PDF_LIMITS, PdfCacheBudget, PdfLimitError } from './pdfPolicy';
+import { DEFAULT_PRESENTATION, PRESENTATION_EVENT, ReaderPresentation, touchNavigation } from './presentation';
 
 const activeReaders = new WeakMap<HTMLElement, () => void>();
 const assetManifest = new Map(list(JSON.parse(assetJson)).map(value => {
@@ -27,7 +28,8 @@ export interface PdfReader {
 }
 
 export async function mountPdfReader(
-  container: HTMLElement, target: BookTarget, progress: ProgressClient, signal: AbortSignal
+  container: HTMLElement, target: BookTarget, progress: ProgressClient, signal: AbortSignal,
+  initialPresentation: ReaderPresentation = DEFAULT_PRESENTATION
 ): Promise<PdfReader> {
   activeReaders.get(container)?.();
   const controller = new AbortController();
@@ -44,6 +46,11 @@ export async function mountPdfReader(
   let navigation: Promise<void> = Promise.resolve();
   let scrollFrame = 0;
   let phase = 'headers';
+  let presentation = initialPresentation;
+  let geometry = { width: 0, height: 0, scrollHeight: 0 };
+  let observer: ResizeObserver | undefined;
+  let removeTouch: (() => void) | undefined;
+  let refreshPresentation: ((page: number, offset: number) => void) | undefined;
   let restoredPosition: { page: number; scrollTop: number; offset: number } | undefined;
   const views = new Map<number, PageView>();
   const renders = new Set<RenderTask>();
@@ -69,6 +76,21 @@ export async function mountPdfReader(
   const previous = shadow.querySelector<HTMLButtonElement>('#prev')!;
   const next = shadow.querySelector<HTMLButtonElement>('#next')!;
   const zoomSelect = shadow.querySelector<HTMLSelectElement>('#zoom')!;
+  const chrome = shadow.querySelector<HTMLElement>('nav')!;
+  const showChrome = () => {
+    chrome.style.display = presentation.chromeHidden ? 'none' : '';
+    status.style.display = presentation.chromeHidden && !status.textContent?.includes('limited') ? 'none' : '';
+    viewport.style.paddingBottom = presentation.mode === 'continuous' ? '70vh' : '0';
+  };
+  showChrome();
+  const updatePresentation = (event: Event) => {
+    if (!(event instanceof CustomEvent)) return;
+    const saved = ready && !changing ? location() : progress.location;
+    presentation = event.detail as ReaderPresentation;
+    showChrome();
+    if (saved?.kind === 'pdf') refreshPresentation?.(saved.page, saved.offset);
+  };
+  container.addEventListener(PRESENTATION_EVENT, updatePresentation);
   const raise = (error: unknown) => {
     if (!disposed && !aborted(error)) {
       console.warn('PDF reader failed', { phase, category: error instanceof Error ? error.name : 'Error' });
@@ -102,6 +124,8 @@ export async function mountPdfReader(
     disposed = true; ready = false; generation += 1;
     restoredPosition = undefined; current = 1;
     controller.abort(); clearInterval(timer); cancelAnimationFrame(scrollFrame);
+    observer?.disconnect(); removeTouch?.();
+    if (updatePresentation) container.removeEventListener(PRESENTATION_EVENT, updatePresentation);
     for (const render of renders) render.cancel();
     for (const layer of textLayers) layer.cancel();
     worker?.terminate();
@@ -175,6 +199,8 @@ export async function mountPdfReader(
     async fetch({ filename }: { filename: string }) { return asset(`standard_fonts/${filename}`); }
   }
   function location(): EbookLocator {
+    if (geometry.width && (geometry.width !== viewport.clientWidth || geometry.height !== viewport.clientHeight ||
+        geometry.scrollHeight !== viewport.scrollHeight) && progress.location?.kind === 'pdf') return progress.location;
     if (restoredPosition?.page === current && Math.abs(viewport.scrollTop - restoredPosition.scrollTop) <= 1) {
       return { kind: 'pdf', page: current, offset: restoredPosition.offset };
     }
@@ -232,7 +258,7 @@ export async function mountPdfReader(
     pageInput.max = String(documentProxy.numPages);
     shadow.querySelector('#total')!.textContent = `of ${documentProxy.numPages}`;
 
-    async function renderPage(number: number, epoch: number): Promise<void> {
+    const renderPage = async (number: number, epoch: number): Promise<void> => {
       if (views.has(number)) return;
       const page = await documentProxy!.getPage(number); check();
       if (epoch !== generation) return;
@@ -276,7 +302,7 @@ export async function mountPdfReader(
       } catch (error) {
         textLayer.cancel(); releases.forEach(release => release()); destroyCanvas(canvas); page.cleanup(); throw error;
       } finally { renders.delete(rendering); textLayers.delete(textLayer); }
-    }
+    };
     const goToPage = (number: number, offset: number): Promise<void> => {
       check();
       if (!Number.isSafeInteger(number) || number < 1 || number > documentProxy!.numPages ||
@@ -288,7 +314,8 @@ export async function mountPdfReader(
       const task = navigation.catch(() => {}).then(async () => {
         if (disposed || epoch !== generation) return;
         status.textContent = 'Rendering pages...';
-        const wanted = [number - 1, number, number + 1].filter(page => page >= 1 && page <= documentProxy!.numPages);
+        const wanted = (presentation.mode === 'continuous' ? [number - 1, number, number + 1] : [number])
+          .filter(page => page >= 1 && page <= documentProxy!.numPages);
         for (const page of [...views.keys()]) if (!wanted.includes(page)) removePage(page);
         for (const page of wanted) { await renderPage(page, epoch); if (disposed || epoch !== generation) return; }
         viewport.replaceChildren(...wanted.map(page => views.get(page)!.element));
@@ -297,14 +324,17 @@ export async function mountPdfReader(
         viewport.scrollTop = views.get(number)!.element.offsetTop + views.get(number)!.element.offsetHeight * offset;
         // Preserve the logical locator; browser pixel quantization must not rewrite it on every reopen.
         restoredPosition = { page: number, scrollTop: viewport.scrollTop, offset };
+        geometry = { width: viewport.clientWidth, height: viewport.clientHeight, scrollHeight: viewport.scrollHeight };
         container.dataset.pdfRenderedPages = String(views.size);
         container.dataset.pdfPagePixels = String(views.get(number)!.canvas.width * views.get(number)!.canvas.height);
         status.textContent = `Page ${number} of ${documentProxy!.numPages}${wanted.some(page => views.get(page)?.capped) ? ' / Zoom limited by the pixel/cache safety budget.' : ''}`;
+        showChrome();
         ready = true; changing = false; save();
       });
       navigation = task; return task;
     };
     const navigate = (page: number, offset = 0) => { void goToPage(page, offset).catch(error => { if (!aborted(error) && !disposed) raise(error); }); };
+    refreshPresentation = navigate;
     const setZoom = (scale: number) => {
       if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new PdfLimitError('Unsupported PDF zoom.');
       const position = location(); save(); zoom = scale;
@@ -321,14 +351,20 @@ export async function mountPdfReader(
         status.textContent = `Enter a page from 1 to ${documentProxy!.numPages}.`;
         pageInput.value = String(current); return;
       }
-      navigate(value);
+      if (value !== current) navigate(value);
     };
     pageInput.onchange = jump;
     pageInput.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); jump(); } };
     zoomSelect.onchange = () => setZoom(Number(zoomSelect.value));
+    const turn = (delta: -1 | 1) => {
+      if (!ready || changing) return;
+      const number = current + delta;
+      if (number >= 1 && number <= documentProxy!.numPages) navigate(number);
+    };
+    removeTouch = touchNavigation(viewport, turn);
     viewport.onkeydown = event => {
-      if (event.key === 'PageDown' && current < documentProxy!.numPages) { event.preventDefault(); navigate(current + 1); }
-      else if (event.key === 'PageUp' && current > 1) { event.preventDefault(); navigate(current - 1); }
+      if (['PageDown', 'ArrowRight'].includes(event.key)) { event.preventDefault(); turn(1); }
+      else if (['PageUp', 'ArrowLeft'].includes(event.key)) { event.preventDefault(); turn(-1); }
     };
     viewport.onscroll = () => {
       if (!ready || changing || disposed) return;
@@ -338,7 +374,7 @@ export async function mountPdfReader(
         const visible = [...views.entries()].find(([, view]) =>
           view.element.offsetTop <= viewport.scrollTop + 1 &&
           view.element.offsetTop + view.element.offsetHeight > viewport.scrollTop + 1);
-        if (visible && visible[0] !== current) {
+        if (presentation.mode === 'continuous' && visible && visible[0] !== current) {
           const offset = Math.max(0, Math.min(1, (viewport.scrollTop - visible[1].element.offsetTop) / visible[1].element.offsetHeight));
           navigate(visible[0], offset);
         } else progress.location = location();
@@ -347,6 +383,12 @@ export async function mountPdfReader(
     const initial = progress.location?.kind === 'pdf' ? progress.location : { page: 1, offset: 0 };
     phase = 'pages';
     await goToPage(initial.page, initial.offset);
+    observer = new ResizeObserver(() => {
+      if (disposed || !ready || changing || !geometry.width ||
+          (geometry.width === viewport.clientWidth && geometry.height === viewport.clientHeight)) return;
+      setZoom(zoom);
+    });
+    observer.observe(viewport);
     document.addEventListener('visibilitychange', saveOnHidden);
     window.addEventListener('pagehide', save);
     timer = window.setInterval(() => { if (document.visibilityState === 'visible') save(); }, 10000);

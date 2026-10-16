@@ -8,6 +8,12 @@ test.use({ cbzFixtures: true, controlledReaderClock: true, reverseProxy: true })
 
 async function openComic(page: Page) {
   await page.goto(new URL('/books', page.url()).href);
+  await page.evaluate(async () => {
+    const response = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+    if (!response.ok) throw new Error('Fixture user unavailable');
+    const { user } = await response.json();
+    localStorage.setItem(`books-reading-mode:${user.id}`, 'paged');
+  });
   const card = page.getByRole('link', { name: 'Open The Paper Observatory', exact: true });
   await card.scrollIntoViewIfNeeded();
   // The fixture's absent cover must not remove the pointer target during the click.
@@ -435,6 +441,10 @@ test.describe('visible page-edge navigation', () => {
           page.getByRole('heading', { name: 'The Paper Observatory', exact: true }),
           page.getByRole('group', { name: 'Page navigation', exact: true }).locator('span'),
         ]) {
+          if (session) {
+            await session.send('Emulation.setPageScaleFactor', { pageScaleFactor: 1 });
+            await expect.poll(() => page.evaluate(() => window.visualViewport?.scale)).toBe(1);
+          }
           const edge = await pageEdge(page, 'left');
           const end = await pageEdge(page, 'right');
           const bounds = (await outside.boundingBox())!;
@@ -479,6 +489,7 @@ test.describe('visible page-edge navigation', () => {
           expect.soft(savedPage).toBe(1);
           await expectPanel(page, 1, 1);
         }
+        if (session) await session.send('Emulation.setPageScaleFactor', { pageScaleFactor: 1 });
         const edge = await pageEdge(page, 'right');
         await page.touchscreen.tap(edge.x, edge.y);
         await expectPanel(page, 2, 2);

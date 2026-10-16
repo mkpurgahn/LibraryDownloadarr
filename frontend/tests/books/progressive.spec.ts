@@ -122,6 +122,10 @@ test('throttled243page source opens ten pages, jumps past held work and cold-res
   expect(firstTen.held).toBe(true);
   expect(await first.getAttribute('src')).toBe(firstUrl);
   await capture(page, 'progressive-ten-ready', info);
+  await page.getByLabel('Page number', { exact: true }).fill('11');
+  await page.getByRole('button', { name: 'Go to page', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: /^Loading page 11 of 243$/ })).toBeAttached();
+  await expect(page.getByRole('img', { name: 'Comic page 11 of 243', exact: true })).toHaveCount(0);
   await page.getByLabel('Page number', { exact: true }).fill('243');
   const jumpedAt = performance.now();
   await page.getByRole('button', { name: 'Go to page', exact: true }).click();
@@ -149,6 +153,14 @@ test('throttled243page source opens ten pages, jumps past held work and cold-res
   expect(resumed.ms).toBeLessThanOrEqual(3000);
   expect(resumed.sourceBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
   expect(unrenderedWrites).toEqual([]);
+  const resourceWindow = await page.getByRole('region', { name: 'Comic page', exact: true }).evaluate(element => ({
+    images: element.querySelectorAll('img').length, decodedPixels: Number(element.getAttribute('data-decoded-pixels')),
+    pageBytes: Number(element.getAttribute('data-page-bytes')),
+  }));
+  expect(resourceWindow.images).toBeLessThanOrEqual(3);
+  expect(resourceWindow.decodedPixels).toBeLessThanOrEqual(48000000);
+  expect(resourceWindow.pageBytes).toBeLessThanOrEqual(96 * 1024 * 1024);
+  await fs.writeFile(info.outputPath('continuous-large-window.json'), JSON.stringify(resourceWindow, null, 2));
   await capture(page, 'progressive-cold-resume-243', info);
 });
 
