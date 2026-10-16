@@ -140,9 +140,10 @@ export const ComicReader: React.FC<{
   useEffect(() => {
     const element = viewport.current!;
     const observer = new ResizeObserver(() => {
-      cancelGesture();
+      const width = element.clientWidth, height = element.clientHeight;
+      if (snapshot.current?.width !== width || snapshot.current?.height !== height) cancelGesture();
       position();
-      setViewportSize({ width: element.clientWidth, height: element.clientHeight });
+      setViewportSize(previous => previous.width === width && previous.height === height ? previous : { width, height });
     });
     observer.observe(element);
     return () => observer.disconnect();
@@ -334,7 +335,7 @@ export const ComicReader: React.FC<{
   }
   useLayoutEffect(() => {
     cancelGesture();
-  }, [mode, overlay, page, descriptor, source, fit, zoom, viewportSize, loading]);
+  }, [mode, overlay, page, descriptor, source, fit, zoom, loading]);
 
   const hasSelection = () => window.getSelection()?.isCollapsed === false;
   const readingTarget = (target: EventTarget) => target === image.current || (mode === 'paged' && overlay &&

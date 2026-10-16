@@ -324,3 +324,27 @@ test('CBZ fullscreen gutters cannot turn during pending page work or after revoc
       revokedContentRemovedAndStaleCompletionIgnored: true }, null, 2));
   } finally { release(); }
 });
+
+test('CBZ a redundant resize notification cannot cancel a click on an already arranged viewport', async ({ page, app }) => {
+  await page.addInitScript(() => {
+    const NativeObserver = ResizeObserver;
+    class ObservedResize extends NativeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        super((entries, observer) => {
+          callback(entries, observer);
+          if (entries.some(entry => entry.target.getAttribute('aria-label') === 'Comic page')) {
+            Reflect.set(window, 'repeatGutterResize', () => callback(entries, observer));
+          }
+        });
+      }
+    }
+    window.ResizeObserver = ObservedResize;
+  });
+  await signIn(page, app); await open(page, true); await enter(page);
+  await expect.poll(() => page.evaluate(() => typeof Reflect.get(window, 'repeatGutterResize'))).toBe('function');
+  const target = await point(page, 'right'), before = await bounds(page);
+  await page.mouse.move(target.x, target.y); await page.mouse.down();
+  await page.evaluate(() => Reflect.get(window, 'repeatGutterResize')());
+  expect(await bounds(page)).toEqual(before);
+  await page.mouse.up(); await panel(page, 2);
+});
