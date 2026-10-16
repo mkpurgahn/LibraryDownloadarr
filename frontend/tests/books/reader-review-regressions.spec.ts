@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import type { Page } from '@playwright/test';
-import { test, expect, signIn, capture } from './harness';
+import { test, expect, signIn, capture, revealReaderControls, hideReaderControls } from './harness';
 import { parseBookItem, parseProgress } from '../../src/books/types';
 
 test.use({ cbzFixtures: true, hasTouch: true });
@@ -125,7 +125,7 @@ for (const change of ['paged', 'fullscreen'] as const) {
       if (change === 'paged') await page.getByLabel('Reading mode').selectOption('paged');
       else {
         await page.getByRole('button', { name: 'Full screen', exact: true }).click();
-        await expect(page.getByRole('button', { name: 'Exit full screen', exact: true })).toBeVisible();
+        await expect(page.locator('main')).not.toHaveAttribute('data-reader-fullscreen', 'normal');
       }
       await page.evaluate(() => Reflect.get(window, 'thirdPageGate').release());
       await expect(page.getByTestId('pdf-reader').getByRole('status', { includeHidden: true })).toContainText('Page 2 of');
@@ -141,7 +141,7 @@ for (const change of ['paged', 'fullscreen'] as const) {
       else expect(await reader.locator('canvas').count()).toBeLessThanOrEqual(3);
       expect(Number(await reader.getAttribute('data-pdf-cached-bytes'))).toBeLessThanOrEqual(128 * 1024 * 1024);
       expect(Number(await reader.getAttribute('data-pdf-max-canvas-pixels'))).toBeLessThanOrEqual(16000000);
-      if (change === 'fullscreen') await page.getByRole('button', { name: 'Exit full screen', exact: true }).click();
+      if (change === 'fullscreen') { await revealReaderControls(page); await page.getByRole('button', { name: 'Exit full screen', exact: true }).click(); }
       const item = parseBookItem(await (await page.request.get(`${app.origin}/api/books/items/dual`)).json());
       const file = item.files.find(file => file.extension === 'pdf')!;
       const savedResponse = page.waitForResponse(response => response.request().method() === 'PUT' && response.url().endsWith('/progress/ebook'));
@@ -175,8 +175,8 @@ test('EPUB fallback Escape from embedded navigation exits and restores trigger f
   await expect(frame.getByRole('heading', { name: 'First section' })).toBeVisible();
   await page.getByLabel('Reading mode').selectOption('paged');
   await page.getByRole('button', { name: 'Full screen', exact: true }).click();
-  await expect(page.getByText('Viewport-only view', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Show controls', exact: true }).click();
+  await expect(page.getByRole('status').getByText('Viewport-only view', { exact: true })).toBeVisible();
+  await revealReaderControls(page);
   const next = frame.getByRole('button', { name: 'Next page', exact: true });
   await next.focus(); await expect(next).toBeFocused();
   const top = await frame.locator('#viewport').evaluate(element => element.scrollTop);
@@ -196,23 +196,27 @@ test('EPUB fallback Escape from embedded navigation exits and restores trigger f
   }
 });
 
-test('PDF Show controls uncovers the title without leaving fullscreen', async ({ page, app, browserName }, info) => {
+test('PDF hiding overlay controls uncovers the title without leaving fullscreen or moving content', async ({ page, app, browserName }, info) => {
   await signIn(page, app); await open(page, 'pdf');
   await expect(page.getByText('Generated PDF page 1', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Full screen', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Exit full screen', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Exit full screen', exact: true })).toBeHidden();
   await capture(page, 'pdf-fullscreen-controls-hidden', info);
-  await page.getByRole('button', { name: 'Show controls', exact: true }).click();
+  const viewport = page.getByRole('region', { name: 'PDF pages', exact: true });
+  const before = await viewport.boundingBox();
+  await revealReaderControls(page);
   await expect(page.getByRole('navigation', { name: 'PDF controls' })).toBeVisible();
+  expect(await viewport.boundingBox()).toEqual(before);
+  await hideReaderControls(page, viewport);
   const title = page.getByText('Generated PDF page 1', { exact: true });
   await expect(title).toBeInViewport();
   const titleBounds = (await title.boundingBox())!;
-  const overlayBounds = (await page.getByRole('button', { name: 'Hide controls', exact: true }).boundingBox())!;
-  expect(titleBounds.y).toBeGreaterThanOrEqual(overlayBounds.y + overlayBounds.height);
-  await expect(page.getByRole('button', { name: 'Exit full screen', exact: true })).toBeVisible();
+  expect(await viewport.boundingBox()).toEqual(before);
+  await expect(page.getByRole('navigation', { name: 'PDF controls' })).toBeHidden();
+  await expect(page.locator('main')).not.toHaveAttribute('data-reader-fullscreen', 'normal');
   const drawable = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, native: Boolean(document.fullscreenElement) }));
   await capture(page, 'pdf-fullscreen-title-unoccluded', info);
   await fs.writeFile(info.outputPath('fullscreen-unoccluded.json'), JSON.stringify({
-    browserName, configured: page.viewportSize(), drawable, titleBounds, overlayBounds, headless: true,
+    browserName, configured: page.viewportSize(), drawable, titleBounds, viewport: before, headless: true,
   }, null, 2));
 });

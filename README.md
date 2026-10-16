@@ -155,10 +155,17 @@ Short trailing CBZ pages and EPUB sections get enough trailing scroll space to
 reach the top and load the next neighbor, without expanding that window or
 preventing backwards scrolling.
 
-**Full screen** is an explicit action, never automatically restored. It hides
-site and reader controls, with reachable **Show controls** and **Exit full
-screen** buttons and Escape to exit. Unsupported or denied native fullscreen
-uses an honestly labeled **Viewport-only view**. Errors and partial-preparation
+Hover a CBZ or PDF page to see its page number; EPUB shows its section number
+rather than an invented fixed page count. Keyboard focus also exposes these
+labels. Labels overlay the page without changing its text, selection or position.
+
+**Full screen** is an explicit action, never automatically restored. A brief
+four-second hint explains Escape and the corners. Move the pointer to **any
+viewport corner**, tap a corner, or press Tab to reveal all reader controls,
+including **Exit full screen**. Controls overlay the book rather than moving it,
+stay visible while hovered or focused (including menus), and hide shortly after
+leaving. Page-turn buttons still appear only in Paged mode. Unsupported or denied
+native fullscreen uses an honestly labeled **Viewport-only view**. Errors and partial-preparation
 warnings remain visible. Active audio keeps playing without reserving space for
 its hidden outside toolbar. Mode, font, zoom and fullscreen changes preserve
 logical positions rather than saving layout-clamped offsets.

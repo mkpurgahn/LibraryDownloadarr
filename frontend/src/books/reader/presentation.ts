@@ -1,7 +1,7 @@
 export type ReadingMode = 'continuous' | 'paged';
-export interface ReaderPresentation { mode: ReadingMode; chromeHidden: boolean }
+export interface ReaderPresentation { mode: ReadingMode; chromeHidden: boolean; overlay: boolean; chromeTop: number }
 export const PRESENTATION_EVENT = 'reader-presentation';
-export const DEFAULT_PRESENTATION: ReaderPresentation = { mode: 'continuous', chromeHidden: false };
+export const DEFAULT_PRESENTATION: ReaderPresentation = { mode: 'continuous', chromeHidden: false, overlay: false, chromeTop: 0 };
 
 export function touchNavigation(viewport: HTMLElement, turn: (delta: -1 | 1) => void): () => void {
   const document = viewport.ownerDocument;

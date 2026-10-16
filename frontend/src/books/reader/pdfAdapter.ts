@@ -9,6 +9,7 @@ import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
 import { PDF_LIMITS, PdfCacheBudget, PdfLimitError } from './pdfPolicy';
 import { DEFAULT_PRESENTATION, PRESENTATION_EVENT, ReaderPresentation, touchNavigation } from './presentation';
+import { applyReaderChrome, CHROME_INTERACTION_EVENT, pageLabel, trackReaderChrome } from './readerOverlays';
 
 const activeReaders = new WeakMap<HTMLElement, () => void>();
 const assetManifest = new Map(list(JSON.parse(assetJson)).map(value => {
@@ -20,6 +21,7 @@ const assetManifest = new Map(list(JSON.parse(assetJson)).map(value => {
 interface PageView {
   page: PDFPageProxy; element: HTMLElement; canvas: HTMLCanvasElement; text: TextLayer;
   releaseText: Array<() => void>; capped: boolean;
+  removeLabel(): void;
 }
 export interface PdfReader {
   setZoom(scale: number): void;
@@ -68,7 +70,7 @@ export async function mountPdfReader(
   container.dataset.pdfWorkerActive = 'false';
   const shadow = container.shadowRoot ?? container.attachShadow({ mode: 'open' });
   shadow.innerHTML = `<style>
-    :host{display:flex;flex-direction:column;min-height:0;height:100%;background:#292929;color:#222;border-radius:8px;overflow:hidden;font:16px system-ui}
+    :host{position:relative;display:flex;flex-direction:column;min-height:0;height:100%;background:#292929;color:#222;border-radius:8px;overflow:hidden;font:16px system-ui}
     *{box-sizing:border-box}nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;background:#f1eee5}button,input,select{font:inherit;min-height:44px;border:1px solid #777;border-radius:5px;color:#222;background:#fff;padding:6px}input{width:5rem}label{display:flex;gap:6px;align-items:center}button:disabled{opacity:.45}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #8d5900}.status{padding:6px 10px;color:#eee;font-size:12px}.viewport{position:relative;flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding-bottom:70vh}.page{position:relative;background:#fff;margin:12px auto}canvas{display:block}.textLayer{position:absolute;inset:0;overflow:clip;line-height:1;text-align:initial;transform-origin:0 0;text-size-adjust:none;forced-color-adjust:none;--min-font-size:1;--text-scale-factor:calc(var(--total-scale-factor) * var(--min-font-size));--min-font-size-inv:calc(1 / var(--min-font-size))}.textLayer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0 0}.textLayer > :not(.markedContent),.textLayer .markedContent span:not(.markedContent){font-size:calc(var(--text-scale-factor) * var(--font-height,0));transform:rotate(var(--rotate,0deg)) scaleX(var(--scale-x,1)) scale(var(--min-font-size-inv))}.textLayer .markedContent{display:contents}.textLayer ::selection{background:#b8d4f5}
     </style><nav aria-label="PDF controls"><button id="prev">Previous page</button><label>Page number<input id="page" type="number" min="1" value="1"></label><span id="total"></span><button id="next">Next page</button><label>Zoom<select id="zoom"><option value="0.75">75%</option><option value="1" selected>100%</option><option value="1.5">150%</option><option value="2">200%</option><option value="3">300%</option></select></label></nav><div class="status" role="status">Loading PDF...</div><div class="viewport" role="region" aria-label="PDF pages" tabindex="0"></div>`;
   const viewport = shadow.querySelector<HTMLElement>('.viewport')!;
@@ -78,19 +80,33 @@ export async function mountPdfReader(
   const next = shadow.querySelector<HTMLButtonElement>('#next')!;
   const zoomSelect = shadow.querySelector<HTMLSelectElement>('#zoom')!;
   const chrome = shadow.querySelector<HTMLElement>('nav')!;
+  const chromeContainer = document.createElement('div');
+  chromeContainer.dataset.readerChrome = '';
+  chromeContainer.style.background = '#292929';
+  shadow.insertBefore(chromeContainer, chrome);
+  chromeContainer.append(chrome, status);
+  const warning = document.createElement('p');
+  warning.setAttribute('role', 'alert');
+  Object.assign(warning.style, { position: 'absolute', bottom: '0', left: '44px', right: '44px', zIndex: '35', background: '#292929', color: '#fff', padding: '8px', display: 'none' });
+  shadow.append(warning);
   const showChrome = () => {
-    chrome.style.display = presentation.chromeHidden ? 'none' : '';
+    applyReaderChrome(chromeContainer, presentation);
     previous.hidden = next.hidden = presentation.mode !== 'paged';
-    status.style.display = presentation.chromeHidden && !status.textContent?.includes('limited') ? 'none' : '';
     viewport.style.paddingBottom = presentation.mode === 'continuous' ? '70vh' : '0';
+    warning.textContent = status.textContent?.includes('limited') ? status.textContent : '';
+    warning.style.display = presentation.chromeHidden && warning.textContent ? '' : 'none';
   };
   showChrome();
+  const removeChrome = trackReaderChrome(chromeContainer, detail =>
+    container.dispatchEvent(new CustomEvent(CHROME_INTERACTION_EVENT, { detail, bubbles: true })));
   const updatePresentation = (event: Event) => {
     if (!(event instanceof CustomEvent)) return;
+    const next = event.detail as ReaderPresentation;
+    const layoutChanged = next.mode !== presentation.mode || next.overlay !== presentation.overlay;
     const saved = pendingPosition ?? (ready ? location() : progress.location);
-    presentation = event.detail as ReaderPresentation;
+    presentation = next;
     showChrome();
-    if (saved?.kind === 'pdf') refreshPresentation?.(saved.page, saved.offset);
+    if (layoutChanged && saved?.kind === 'pdf') refreshPresentation?.(saved.page, saved.offset);
   };
   container.addEventListener(PRESENTATION_EVENT, updatePresentation);
   const raise = (error: unknown) => {
@@ -118,7 +134,7 @@ export async function mountPdfReader(
   function removePage(number: number): void {
     const view = views.get(number);
     if (!view) return;
-    view.text.cancel(); view.releaseText.forEach(release => release());
+    view.removeLabel(); view.text.cancel(); view.releaseText.forEach(release => release());
     destroyCanvas(view.canvas); view.element.remove(); view.page.cleanup(); views.delete(number);
   }
   function dispose(): void {
@@ -126,7 +142,7 @@ export async function mountPdfReader(
     disposed = true; ready = false; generation += 1;
     restoredPosition = undefined; pendingPosition = undefined; current = 1;
     controller.abort(); clearInterval(timer); cancelAnimationFrame(scrollFrame);
-    observer?.disconnect(); removeTouch?.();
+    observer?.disconnect(); removeTouch?.(); removeChrome();
     if (updatePresentation) container.removeEventListener(PRESENTATION_EVENT, updatePresentation);
     for (const render of renders) render.cancel();
     for (const layer of textLayers) layer.cancel();
@@ -300,7 +316,8 @@ export async function mountPdfReader(
       try {
         await Promise.all([rendering.promise, textLayer.render()]); check();
         if (epoch !== generation) throw new DOMException('PDF page replaced', 'AbortError');
-        views.set(number, { page, element, canvas, text: textLayer, releaseText: releases, capped: scale < requested });
+        views.set(number, { page, element, canvas, text: textLayer, releaseText: releases, capped: scale < requested,
+          removeLabel: pageLabel(element, viewport, `Page ${number} of ${documentProxy!.numPages}`) });
       } catch (error) {
         textLayer.cancel(); releases.forEach(release => release()); destroyCanvas(canvas); page.cleanup(); throw error;
       } finally { renders.delete(rendering); textLayers.delete(textLayer); }
@@ -339,7 +356,14 @@ export async function mountPdfReader(
       navigation = task; return task;
     };
     const navigate = (page: number, offset = 0) => { void goToPage(page, offset).catch(error => { if (!aborted(error) && !disposed) raise(error); }); };
-    refreshPresentation = navigate;
+    refreshPresentation = (page, offset) => {
+      if (geometry.width && geometry.width !== viewport.clientWidth) {
+        changing = true;
+        for (const task of renders) task.cancel();
+        for (const number of [...views.keys()]) removePage(number);
+      }
+      navigate(page, offset);
+    };
     const setZoom = (scale: number) => {
       if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new PdfLimitError('Unsupported PDF zoom.');
       const position = pendingPosition ?? location(); save(); zoom = scale;

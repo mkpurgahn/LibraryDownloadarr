@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import type { Locator, Page } from '@playwright/test';
-import { test, expect, signIn, capture } from './harness';
+import { test, expect, signIn, capture, revealReaderControls, hideReaderControls } from './harness';
 import { parseBookItem, parseProgress } from '../../src/books/types';
 
 type Format = 'cbz' | 'pdf' | 'epub';
@@ -117,12 +117,12 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) {
     await page.getByRole('button', { name: 'Full screen', exact: true }).click();
     await expect(ui.direct).toBeHidden(); await expect(ui.view).toBeHidden();
     await turnVisibility(ui.turns, false);
-    await page.getByRole('button', { name: 'Show controls', exact: true }).click();
+    await revealReaderControls(page);
     await expect(ui.direct).toBeVisible(); await expect(ui.view).toBeVisible();
     await turnVisibility(ui.turns, false);
     await observe('fullscreen-show-continuous');
-    await page.getByRole('button', { name: 'Hide controls', exact: true }).click();
-    await page.getByRole('button', { name: 'Show controls', exact: true }).click();
+    await hideReaderControls(page, ui.viewport);
+    await revealReaderControls(page);
     await turnVisibility(ui.turns, false);
     await page.getByRole('button', { name: 'Exit full screen', exact: true }).click();
     const after = await saveAndLeave();

@@ -549,6 +549,18 @@ export async function capture(page: Page, name: string, info: TestInfo): Promise
   }, null, 2));
 }
 
+export async function revealReaderControls(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Show reader controls (top left)', exact: true }).focus();
+  await expect(page.getByRole('button', { name: 'Exit full screen', exact: true })).toBeVisible();
+}
+
+export async function hideReaderControls(page: Page, viewport: import('@playwright/test').Locator): Promise<void> {
+  const box = (await viewport.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.75);
+  await viewport.focus();
+  await expect(page.getByLabel('Reading mode')).toBeHidden();
+}
+
 export async function originalDownload(page: Page, click: () => Promise<void>, info: TestInfo): Promise<Download> {
   const events: Array<Record<string, unknown>> = [];
   const response = (response: import('@playwright/test').Response) => {

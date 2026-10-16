@@ -20,9 +20,10 @@ export const ReaderPage: React.FC = () => {
   const revision = useAuthStore(state => state.sessionRevision);
   const userId = useAuthStore(state => state.user?.id);
   const presentation = useReaderPresentation(userId, `${itemId}:${fileId}:${revision}`);
-  const { mode, chromeHidden } = presentation;
-  const currentPresentation = useRef({ mode, chromeHidden });
-  currentPresentation.current = { mode, chromeHidden };
+  const { mode, chromeHidden, chromeTop } = presentation;
+  const overlay = presentation.screen !== 'normal';
+  const currentPresentation = useRef({ mode, chromeHidden, overlay, chromeTop });
+  currentPresentation.current = { mode, chromeHidden, overlay, chromeTop };
   const [item, setItem] = useState<BookItem>();
   const [file, setFile] = useState<BookFile>();
   const [descriptor, setDescriptor] = useState<ReaderDescriptor>();
@@ -171,9 +172,9 @@ export const ReaderPage: React.FC = () => {
   }, [file, client, started, itemId]);
   useLayoutEffect(() => {
     for (const element of [frame.current, pdfContainer.current]) {
-      element?.dispatchEvent(new CustomEvent(PRESENTATION_EVENT, { detail: { mode, chromeHidden } }));
+      element?.dispatchEvent(new CustomEvent(PRESENTATION_EVENT, { detail: { mode, chromeHidden, overlay, chromeTop } }));
     }
-  }, [mode, chromeHidden]);
+  }, [mode, chromeHidden, overlay, chromeTop]);
   const resume = async (saved: boolean, here = false) => {
     if (!client || !file) return;
     setError('');
@@ -191,18 +192,21 @@ export const ReaderPage: React.FC = () => {
       window.requestAnimationFrame(() => setStarted(true));
     } catch (error) { if (!aborted(error)) setError(booksErrorMessage(error)); }
   };
-  return <main ref={presentation.root} data-reading-mode={mode}
-    className={`flex flex-col bg-dark ${presentation.screen !== 'normal' ? 'fixed inset-0 z-[1000]' : 'p-3'}`}
-    style={{ height: presentation.screen !== 'normal' ? '100dvh' : 'calc(100dvh - var(--books-player-height, 0px))',
-      paddingTop: chromeHidden ? 0 : 'max(0.75rem, env(safe-area-inset-top))',
-      paddingBottom: chromeHidden ? 0 : 'max(0.75rem, env(safe-area-inset-bottom))' }}>
-    {presentation.screen !== 'normal' && <div className="absolute right-2 top-2 z-50 flex gap-2 rounded-lg bg-dark/90 p-1">
-      {presentation.screen === 'viewport' && <span className="self-center px-2 text-xs">Viewport-only view</span>}
-      <button className="btn-secondary min-h-11 min-w-11" onClick={() => presentation.setControls(value => !value)}>
-        {chromeHidden ? 'Show controls' : 'Hide controls'}</button>
-      <button className="btn-secondary min-h-11 min-w-11" onClick={() => void presentation.exit()}>Exit full screen</button>
-    </div>}
-    <header hidden={chromeHidden} className={chromeHidden ? 'hidden' : 'flex flex-wrap items-center justify-between gap-3 pb-2'}>
+  return <main ref={presentation.root} data-reading-mode={mode} data-reader-fullscreen={presentation.screen} tabIndex={-1}
+    className={`flex flex-col bg-dark outline-none ${overlay ? 'fixed inset-0 z-[1000]' : 'relative p-3'}`}
+    style={{ height: overlay ? '100dvh' : 'calc(100dvh - var(--books-player-height, 0px))',
+      paddingTop: overlay ? 0 : 'max(0.75rem, env(safe-area-inset-top))',
+      paddingBottom: overlay ? 0 : 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+    {overlay && [['top left', 'left-0 top-0'], ['top right', 'right-0 top-0'],
+      ['bottom left', 'bottom-0 left-0'], ['bottom right', 'bottom-0 right-0']].map(([name, position], index) =>
+      <button key={name} type="button" data-reader-corner={name} aria-label={`Show reader controls (${name})`}
+        tabIndex={index === 0 ? 0 : -1}
+        className={`absolute z-50 h-11 w-11 rounded bg-dark/90 text-xs text-white opacity-0 focus-visible:opacity-100 focus-visible:outline ${position}`}
+        onPointerDown={presentation.cornerDown} onPointerMove={presentation.cornerMove}
+        onPointerCancel={presentation.cornerCancel} onClick={presentation.cornerClick}>Menu</button>)}
+    <header ref={presentation.chrome} data-reader-chrome
+      className={`flex flex-wrap items-center justify-between gap-3 pb-2 ${overlay ? 'absolute inset-x-0 top-0 z-40 max-h-[40vh] overflow-y-auto bg-dark/95 px-12 pt-3 shadow-lg' : ''}`}
+      style={{ visibility: chromeHidden ? 'hidden' : undefined }}>
       <Link tabIndex={0} className="inline-flex min-h-11 items-center text-primary-300" to={`/books/items/${itemId}`}>Back to book</Link>
       <div className="min-w-0">
         <h1 ref={heading} tabIndex={-1} className="break-words text-lg font-semibold outline-none">{item?.title ?? 'Book reader'}</h1>
@@ -214,8 +218,15 @@ export const ReaderPage: React.FC = () => {
           <option value="continuous">Continuous</option><option value="paged">Paged</option>
         </select>
       </label>
-      <button ref={presentation.trigger} className="btn-secondary min-h-11" onClick={() => void presentation.enter()}>Full screen</button>
+      {presentation.screen === 'viewport' && <span className="text-xs text-gray-300">Viewport-only view</span>}
+      <button ref={presentation.trigger} className="btn-secondary min-h-11"
+        onClick={() => void (overlay ? presentation.exit() : presentation.enter())}>{overlay ? 'Exit full screen' : 'Full screen'}</button>
     </header>
+    {overlay && presentation.hint && <div role="status" className="pointer-events-none absolute inset-x-12 bottom-6 z-40 mx-auto w-fit max-w-[calc(100%-6rem)] rounded-lg bg-dark/95 p-3 text-center text-sm text-gray-100 shadow-lg">
+      {presentation.screen === 'viewport' && <span className="mb-1 block text-xs">Viewport-only view</span>}
+      {presentation.hint}
+    </div>}
+    <div className={overlay ? 'absolute inset-x-12 bottom-0 z-40 max-h-[45vh] overflow-y-auto bg-dark/95' : 'contents'}>
     {presentation.notice && <p role="alert" className="p-3 text-amber-200">{presentation.notice}</p>}
     {error && <div role="alert" className="mb-3 rounded bg-red-500/10 p-3 text-red-200">{error}
       <button className="btn-secondary ml-3 min-h-11" onClick={() => setRetry(value => value + 1)}>Open reader again</button>
@@ -240,11 +251,12 @@ export const ReaderPage: React.FC = () => {
         <button className="btn-secondary min-h-11" onClick={() => void resume(false)}>Start from beginning</button>
       </div>
     </section>}
+    </div>
     {started && file?.extension === 'epub' && <iframe ref={frame} title="EPUB reader" sandbox="allow-scripts" className="min-h-0 w-full flex-1 rounded-lg border-0" />}
     {started && file?.extension === 'pdf' && <div ref={pdfContainer} data-testid="pdf-reader" className="min-h-0 w-full flex-1" />}
     {started && client && file?.extension === 'cbz' && descriptor?.policyVersion === 'cbz-pages-v1' && itemId &&
       <ComicReader key={descriptor.readerId} descriptor={descriptor} progress={client} source={source}
-        mode={mode} chromeHidden={chromeHidden}
+        mode={mode} chromeHidden={chromeHidden} overlay={overlay} chromeTop={chromeTop}
         initialLocator={initialComic} onRendered={comicRendered}
         target={{ itemId, fileId: file.fileId, contentVersion: file.contentVersion }} />}
   </main>;

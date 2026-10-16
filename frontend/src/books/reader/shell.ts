@@ -4,6 +4,7 @@ import { safeDocument, safeSvg } from './sanitize';
 import { safeCss } from './cssPolicy';
 import { ASSET_BUDGET, READER_POLICY, resourceReference } from './policy';
 import { DEFAULT_PRESENTATION, ReaderPresentation, touchNavigation } from './presentation';
+import { applyReaderChrome, pageLabel, trackReaderChrome } from './readerOverlays';
 
 const host = document.getElementById('book')!;
 const shadow = host.attachShadow({ mode: 'open' });
@@ -14,7 +15,12 @@ const previous = document.getElementById('previous') as HTMLButtonElement;
 const next = document.getElementById('next') as HTMLButtonElement;
 const status = document.getElementById('reader-status')!;
 const chrome = document.querySelector('nav')!;
-type Section = { element: HTMLElement; root: ShadowRoot; mirror: Document; assets: Set<string> };
+const chromeContainer = document.createElement('div');
+chromeContainer.dataset.readerChrome = '';
+document.body.insertBefore(chromeContainer, chrome);
+chromeContainer.append(chrome, status);
+document.body.style.position = 'relative';
+type Section = { element: HTMLElement; root: ShadowRoot; mirror: Document; assets: Set<string>; removeLabel(): void };
 let port: MessagePort;
 let descriptor: ReaderDescriptor;
 let instance = '';
@@ -31,6 +37,7 @@ let presentation = DEFAULT_PRESENTATION;
 let logical: EbookLocator | undefined;
 let geometry = { width: 0, height: 0, scrollHeight: 0, top: 0 };
 let restoredAnchor: { resourceId: string; textOffset: number; scrollTop: number } | undefined;
+let focusControls = false;
 const sections = new Map<number, Section>();
 const blobs = new Map<string, { url: string; size: number; users: number }>();
 const requests = new Map<number, { id: string; resolve(value: ArrayBuffer): void; reject(error: Error): void; sent: boolean }>();
@@ -48,7 +55,7 @@ function releaseAssets(ids: Set<string>): void {
 function remove(index: number): void {
   const value = sections.get(index);
   if (!value) return;
-  value.element.remove(); releaseAssets(value.assets); sections.delete(index);
+  value.removeLabel(); value.element.remove(); releaseAssets(value.assets); sections.delete(index);
 }
 function fail(): void {
   ready = false;
@@ -163,9 +170,9 @@ function restore(locator: EbookLocator): void {
   logical = locator; measure();
 }
 function showChrome(): void {
-  chrome.style.display = presentation.chromeHidden ? 'none' : '';
+  applyReaderChrome(chromeContainer, presentation);
   previous.hidden = next.hidden = presentation.mode !== 'paged';
-  status.style.display = presentation.chromeHidden && status.getAttribute('role') !== 'alert' ? 'none' : '';
+  if (focusControls && !presentation.chromeHidden) { focusControls = false; contents.focus(); }
 }
 function controls(): void {
   previous.disabled = section === 0 && viewport.scrollTop <= 1;
@@ -223,7 +230,8 @@ async function load(index: number, epoch: number): Promise<void> {
     for (const style of mirror.querySelectorAll('style,script')) style.remove();
     await Promise.all([...root.querySelectorAll('img')].map(image => image.decode()));
     if (disposed || epoch !== generation) return;
-    sections.set(index, { element, root, mirror, assets: used }); retained = true;
+    sections.set(index, { element, root, mirror, assets: used,
+      removeLabel: pageLabel(element, viewport, `Section ${index + 1} of ${descriptor.spine.length}`) }); retained = true;
   } finally { if (!retained) releaseAssets(used); }
 }
 function neighbors(epoch: number): void {
@@ -270,10 +278,11 @@ function navigate(index: number, saved?: EbookLocator, fragment?: string, end = 
   });
 }
 function reflow(nextPresentation?: ReaderPresentation): void {
+  const layoutChanged = !nextPresentation || nextPresentation.mode !== presentation.mode || nextPresentation.overlay !== presentation.overlay;
   const saved = logical ?? (ready ? location() : undefined);
   if (nextPresentation) presentation = nextPresentation;
   showChrome();
-  if (!ready || navigating) return;
+  if (!layoutChanged || !ready || navigating) return;
   const epoch = ++generation;
   for (const number of sections.keys()) if (!wanted(section).includes(number)) remove(number);
   arrange(saved); report(); neighbors(epoch);
@@ -356,7 +365,11 @@ viewport.addEventListener('keydown', event => {
 });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') send('escape');
+  else if (event.key === 'Tab' && presentation.chromeHidden) {
+    event.preventDefault(); focusControls = true; send('reveal-controls');
+  }
 });
+const removeChrome = trackReaderChrome(chromeContainer, state => { if (port && !disposed) send('chrome-interaction', state); });
 const removeTouch = touchNavigation(viewport, turn);
 const observer = new ResizeObserver(() => {
   if (ready && !navigating && (geometry.width !== viewport.clientWidth || geometry.height !== viewport.clientHeight ||
@@ -365,7 +378,7 @@ const observer = new ResizeObserver(() => {
 observer.observe(viewport); observer.observe(host);
 document.addEventListener('visibilitychange', () => report(true));
 window.addEventListener('pagehide', () => {
-  report(true); disposed = true; generation++; observer.disconnect(); removeTouch();
+  report(true); disposed = true; generation++; observer.disconnect(); removeTouch(); removeChrome();
   for (const number of sections.keys()) remove(number);
   for (const value of requests.values()) value.reject(new Error('Reader closed'));
   requests.clear(); port?.close();

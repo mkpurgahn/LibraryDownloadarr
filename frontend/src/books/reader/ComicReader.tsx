@@ -5,6 +5,7 @@ import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
 import { ProgressiveComicSource } from './progressiveComic';
 import { ReadingMode } from './presentation';
+import { applyReaderChrome, CHROME_INTERACTION_EVENT, pageLabel, trackReaderChrome } from './readerOverlays';
 
 type Fit = 'page' | 'width' | 'manual';
 const clamp = (value: number) => Math.max(0, Math.min(1, value));
@@ -12,8 +13,8 @@ const clamp = (value: number) => Math.max(0, Math.min(1, value));
 export const ComicReader: React.FC<{
   descriptor: ComicDescriptor; target: BookTarget; progress: ProgressClient;
   source?: ProgressiveComicSource; initialLocator?: ComicLocator; onRendered?: (locator: ComicLocator) => Promise<void>;
-  mode: ReadingMode; chromeHidden: boolean;
-}> = ({ descriptor, target, progress, source, initialLocator, onRendered, mode, chromeHidden }) => {
+  mode: ReadingMode; chromeHidden: boolean; overlay: boolean; chromeTop: number;
+}> = ({ descriptor, target, progress, source, initialLocator, onRendered, mode, chromeHidden, overlay, chromeTop }) => {
   const initial = initialLocator ?? (progress.location?.kind === 'cbz' ? progress.location :
     { kind: 'cbz' as const, page: 1, offset: 0, horizontal: 0, policyVersion: descriptor.policyVersion });
   const [page, setPage] = useState(initial.page);
@@ -26,11 +27,12 @@ export const ComicReader: React.FC<{
   const [resource, setResource] = useState<ComicResource>();
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const viewport = useRef<HTMLDivElement>(null);
+  const chrome = useRef<HTMLDivElement>(null);
   const slot = useRef<HTMLDivElement>(null);
   const image = useRef<HTMLImageElement>();
   const manifest = useRef(descriptor);
   const anchor = useRef<ComicLocator>(initial);
-  const pages = useRef(new Map<number, { entry: ComicResource; image: HTMLImageElement; url: string; element: HTMLDivElement }>());
+  const pages = useRef(new Map<number, { entry: ComicResource; image: HTMLImageElement; url: string; element: HTMLDivElement; removeLabel(): void }>());
   const layoutMode = useRef(mode);
   const snapshot = useRef<{
     image: HTMLImageElement; top: number; left: number;
@@ -88,7 +90,7 @@ export const ComicReader: React.FC<{
   function removePage(number: number) {
     const value = pages.current.get(number);
     if (!value) return;
-    value.image.removeAttribute('src'); value.element.remove(); URL.revokeObjectURL(value.url);
+    value.removeLabel(); value.image.removeAttribute('src'); value.element.remove(); URL.revokeObjectURL(value.url);
     pages.current.delete(number);
   }
   function arrange() {
@@ -126,6 +128,14 @@ export const ComicReader: React.FC<{
   }
   const arrangeLatest = useRef(arrange);
   arrangeLatest.current = arrange;
+  useLayoutEffect(() => {
+    if (chrome.current) applyReaderChrome(chrome.current, { mode, chromeHidden, overlay, chromeTop });
+  }, [mode, chromeHidden, overlay, chromeTop]);
+  useEffect(() => {
+    const element = chrome.current!;
+    return trackReaderChrome(element, detail =>
+      element.dispatchEvent(new CustomEvent(CHROME_INTERACTION_EVENT, { detail, bubbles: true })));
+  }, []);
 
   useEffect(() => {
     const element = viewport.current!;
@@ -259,7 +269,8 @@ export const ComicReader: React.FC<{
         const element = document.createElement('div');
         element.dataset.page = String(number); element.className = 'mx-auto w-fit';
         element.append(decoded);
-        const value = { entry, image: decoded, url, element };
+        const value = { entry, image: decoded, url, element,
+          removeLabel: pageLabel(element, viewport.current!, `Page ${number} of ${total}`) };
         pages.current.set(number, value); url = undefined; decoded = undefined;
         return value;
       } catch (error) {
@@ -300,7 +311,7 @@ export const ComicReader: React.FC<{
     if (!element || !current || !resource || !element.clientWidth) return;
     position();
     arrange();
-  }, [resource, fit, zoom, viewportSize, options, mode, chromeHidden]);
+  }, [resource, fit, zoom, viewportSize, options, mode, overlay]);
 
   const go = (next: number) => {
     if ((loading && !source) || blocked.current || next === page || next < 1 || next > total || !Number.isSafeInteger(next)) return;
@@ -374,8 +385,9 @@ export const ComicReader: React.FC<{
     </button>;
   };
 
-  return <section aria-label="CBZ reader" className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
-    <div role="group" aria-label="Page navigation" className={chromeHidden ? 'hidden' : 'flex items-center gap-2'}>
+  return <section aria-label="CBZ reader" className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+    <div ref={chrome} data-reader-chrome className={`flex flex-col gap-2 bg-dark ${overlay ? 'p-2' : 'pb-2'}`}>
+    <div role="group" aria-label="Page navigation" className="flex items-center gap-2">
       {mode === 'paged' && pageButton('left')}
       <form className="flex min-w-0 flex-1 items-center justify-center gap-1 text-sm tabular-nums" onSubmit={event => {
         event.preventDefault();
@@ -396,7 +408,7 @@ export const ComicReader: React.FC<{
         className="min-h-11 min-w-11 shrink-0 rounded-lg px-2 text-sm text-gray-300 hover:bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300"
         onClick={() => { position(); setOptions(value => !value); }}>View</button>
     </div>
-    {options && !chromeHidden && <div id="comic-view-options" role="region" aria-label="Reading options" className="grid grid-cols-2 items-end gap-2 text-sm">
+    {options && <div id="comic-view-options" role="region" aria-label="Reading options" className="grid grid-cols-2 items-end gap-2 text-sm">
       <label className="min-w-0">Page fit
         <select className="input mt-1 min-h-11 px-2" style={{ colorScheme: 'dark' }} value={fit}
           onChange={event => { position(); setFit(event.target.value as Fit); }}>
@@ -410,12 +422,13 @@ export const ComicReader: React.FC<{
         </select>
       </label>
     </div>}
-    <p id="comic-navigation-help" className={chromeHidden ? 'hidden' : 'text-xs text-gray-400'}>
+    <p id="comic-navigation-help" className="text-xs text-gray-400">
       {total === 1 ? 'This original has one page.' : mode === 'continuous' ?
         'Scroll vertically to read. Scrolling stops at the end of this original.' :
         'Left: previous. Right: next. First and last pages connect within this original.'}
     </p>
-    {error && <p role="alert" className="rounded bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
+    </div>
+    {error && <p role="alert" className={`rounded bg-dark p-3 text-sm text-red-200 ${overlay ? 'absolute inset-x-12 bottom-0 z-40' : ''}`}>{error}</p>}
     <div ref={viewport} role="region" aria-label="Comic page" aria-busy={loading} tabIndex={0}
       aria-describedby="comic-navigation-help"
       className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300"

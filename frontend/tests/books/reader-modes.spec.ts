@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import type { Page } from '@playwright/test';
-import { test, expect, signIn, capture } from './harness';
+import { test, expect, signIn, capture, revealReaderControls } from './harness';
 import { parseBookItem, parseProgress } from '../../src/books/types';
 
 test.use({ cbzFixtures: true, hasTouch: true });
@@ -45,13 +45,13 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) {
     expect(await page.locator('main').evaluate(element => element.getBoundingClientRect().height)).toBe(await page.evaluate(() => innerHeight));
     const native = await page.evaluate(() => Boolean(document.fullscreenElement));
     if (browserName === 'chromium' && supported) expect(native).toBe(true);
-    if (!native) await expect(page.getByText('Viewport-only view', { exact: true })).toBeVisible();
+    if (!native) await expect(page.getByRole('status').getByText('Viewport-only view', { exact: true })).toBeVisible();
+    await capture(page, `${format}-fullscreen`, info);
+    await revealReaderControls(page);
     const exit = page.getByRole('button', { name: 'Exit full screen', exact: true });
     const bounds = await exit.boundingBox();
     expect(bounds!.height).toBeGreaterThanOrEqual(44);
     expect(bounds!.width).toBeGreaterThanOrEqual(44);
-    await capture(page, `${format}-fullscreen`, info);
-    await page.getByRole('button', { name: 'Show controls', exact: true }).click();
     await expect(controls).toBeVisible();
     await exit.click();
     await expect(page.getByRole('button', { name: 'Full screen', exact: true })).toBeFocused();
@@ -82,7 +82,7 @@ test('fullscreen preserves active audio without reserving hidden player height a
   await expect.poll(() => audio.evaluate(element => !(element as HTMLAudioElement).paused)).toBe(true);
   const before = await audio.evaluate(element => (element as HTMLAudioElement).currentTime);
   await page.getByRole('button', { name: 'Full screen', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Exit full screen', exact: true })).toBeVisible();
+  await expect(page.locator('main')).not.toHaveAttribute('data-reader-fullscreen', 'normal');
   expect(await page.locator('main').evaluate(element => element.getBoundingClientRect().height)).toBe(await page.evaluate(() => innerHeight));
   await expect.poll(() => audio.evaluate(element => (element as HTMLAudioElement).currentTime)).toBeGreaterThan(before);
   const second = await context.newPage();
@@ -188,7 +188,7 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) test(`${format} denied nat
   await signIn(page, app);
   await open(page, format);
   await page.getByRole('button', { name: 'Full screen', exact: true }).click();
-  await expect(page.getByText('Viewport-only view', { exact: true })).toBeVisible();
+  await expect(page.getByRole('status').getByText('Viewport-only view', { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.fullscreenElement)).toBeNull();
   if (format === 'epub') await page.frameLocator('iframe').locator('#viewport').focus();
   await page.keyboard.press('Escape');
@@ -251,9 +251,13 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) test(`${format} denied nat
       await page.getByRole('link', { name: 'Read', exact: true }).click();
       await page.getByRole('button', { name: 'Resume saved position' }).click();
       await expect(viewport).toBeVisible();
+      if (format === 'cbz') {
+        await expect(viewport).toHaveAttribute('aria-busy', 'false');
+        await expect(page.getByRole('img', { name: 'Comic page 1 of 3', exact: true })).toBeVisible();
+      }
       for (const mode of ['paged', 'continuous', 'paged', 'continuous']) await page.getByLabel('Reading mode').selectOption(mode);
       await page.getByRole('button', { name: 'Full screen', exact: true }).click();
-      await expect(page.getByRole('button', { name: 'Exit full screen' })).toBeVisible();
+      await revealReaderControls(page);
       await page.getByRole('button', { name: 'Exit full screen' }).click();
       await page.setViewportSize({ width: page.viewportSize()!.width, height: 1100 });
       await page.waitForTimeout(400);

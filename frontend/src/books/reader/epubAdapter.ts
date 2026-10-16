@@ -4,6 +4,7 @@ import { ReaderDescriptor, parseLocator, record } from '../types';
 import { ProgressClient } from '../progress';
 import { SESSION_CHANGED_EVENT } from '../../stores/authStore';
 import { DEFAULT_PRESENTATION, PRESENTATION_EVENT, ReaderPresentation } from './presentation';
+import { CHROME_INTERACTION_EVENT, REVEAL_CONTROLS_EVENT } from './readerOverlays';
 
 export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDescriptor, progress: ProgressClient,
   initialPresentation: ReaderPresentation = DEFAULT_PRESENTATION): () => void {
@@ -13,6 +14,10 @@ export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDesc
   let connected = false;
   let active = 0;
   let presentation = initialPresentation;
+  let chrome = { hovered: false, focused: false };
+  const reportChrome = () => frame.dispatchEvent(new CustomEvent(CHROME_INTERACTION_EVENT, {
+    detail: { hovered: chrome.hovered, focused: chrome.focused && document.activeElement === frame }, bubbles: true,
+  }));
   const outstanding = new Set<number>();
   const error = (message: string) => frame.dispatchEvent(new CustomEvent('reader-error', { detail: message }));
   const save = () => {
@@ -26,6 +31,12 @@ export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDesc
     try { value = record(event.data); } catch { error('Reader sent an invalid message.'); return; }
     if (value.instance !== instance) return;
     if (value.type === 'escape') { window.dispatchEvent(new Event('reader-exit-fullscreen')); return; }
+    if (value.type === 'reveal-controls') { frame.dispatchEvent(new Event(REVEAL_CONTROLS_EVENT, { bubbles: true })); return; }
+    if (value.type === 'chrome-interaction') {
+      if (typeof value.hovered !== 'boolean' || typeof value.focused !== 'boolean') { error('Reader sent invalid control state.'); return; }
+      chrome = { hovered: value.hovered, focused: value.focused }; reportChrome();
+      return;
+    }
     if (value.type === 'error') { error('Cannot read safely here; download original.'); return; }
     if (value.type === 'location') {
       try {
@@ -66,6 +77,7 @@ export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDesc
   const cancelGesture = () => { if (connected) channel.port1.postMessage({ type: 'cancel-gesture', instance }); };
   frame.addEventListener(PRESENTATION_EVENT, update);
   document.addEventListener('touchstart', cancelGesture, { capture: true, passive: true });
+  document.addEventListener('focusin', reportChrome);
   window.addEventListener('message', boot);
   const visibility = () => { if (document.visibilityState === 'hidden') save(); };
   document.addEventListener('visibilitychange', visibility);
@@ -74,11 +86,13 @@ export function mountEpubReader(frame: HTMLIFrameElement, descriptor: ReaderDesc
   frame.setAttribute('sandbox', 'allow-scripts');
   frame.srcdoc = shell;
   const dispose = () => {
+    frame.dispatchEvent(new CustomEvent(CHROME_INTERACTION_EVENT, { detail: { hovered: false, focused: false }, bubbles: true }));
     controller.abort(); channel.port1.close(); channel.port2.close();
     window.clearInterval(interval);
     window.removeEventListener('message', boot);
     frame.removeEventListener(PRESENTATION_EVENT, update);
     document.removeEventListener('touchstart', cancelGesture, true);
+    document.removeEventListener('focusin', reportChrome);
     window.removeEventListener('pagehide', save);
     document.removeEventListener('visibilitychange', visibility);
     window.removeEventListener(SESSION_CHANGED_EVENT, dispose);
