@@ -13,7 +13,8 @@ test.describe('durable reader lifecycle', () => {
     const initial = await (await firstPrepared).json() as ReaderDescriptor;
     const frame = page.frameLocator('iframe[title="EPUB reader"]');
     await expect(frame.getByRole('heading', { name: 'First section' })).toBeVisible();
-    await frame.getByRole('button', { name: 'Next section', exact: true }).click();
+    await page.getByLabel('Reading mode').selectOption('paged');
+    await frame.getByLabel('Contents').selectOption('1');
     await expect(frame.getByRole('heading', { name: 'Second section' })).toBeVisible();
     const saved = page.waitForResponse(response => response.request().method() === 'PUT' &&
       new URL(response.url()).pathname.endsWith('/progress/ebook') && response.request().postDataJSON()?.locator?.textOffset > 0);

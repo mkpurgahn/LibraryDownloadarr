@@ -47,8 +47,9 @@ test('a held initial claim cannot rewind the rendered page on leave and durable 
     await page.getByLabel('Reading mode').selectOption('continuous');
     // Finish layout, then hold periodic/animation sampling through claim acknowledgement and cleanup.
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-    await page.clock.install();
-    await page.clock.pauseAt(new Date());
+    const clockStart = Date.now();
+    await page.clock.install({ time: clockStart });
+    await page.clock.pauseAt(clockStart + 1000);
     const saved = page.waitForResponse(response => response.request().method() === 'PUT' &&
       response.url().endsWith('/progress/ebook') && response.status() === 200 &&
       response.request().postDataJSON().op === 'save' && response.request().postDataJSON().locator.page === 2);
