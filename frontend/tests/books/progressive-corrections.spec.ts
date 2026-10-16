@@ -38,8 +38,9 @@ test('a held initial claim cannot rewind the rendered page on leave and durable 
     await page.getByRole('link', { name: 'Read', exact: true }).click();
     await expect(page.getByRole('img', { name: 'Comic page 1 of 3', exact: true })).toBeVisible();
     await expect.poll(() => held).toBe(true);
-    await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled();
-    await page.getByRole('button', { name: 'Next page', exact: true }).click();
+    await expect(page.getByRole('region', { name: 'Comic page', exact: true })).toHaveAttribute('aria-busy', 'false');
+    await page.getByLabel('Page number').fill('2');
+    await page.getByRole('button', { name: 'Go to page', exact: true }).click();
     const second = page.getByRole('img', { name: 'Comic page 2 of 3', exact: true });
     await expect(second).toBeVisible();
     await expect.poll(() => second.evaluate(image => image instanceof HTMLImageElement && image.naturalWidth)).toBe(480);

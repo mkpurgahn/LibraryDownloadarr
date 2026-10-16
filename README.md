@@ -148,6 +148,9 @@ reading across page or spine-section boundaries. **Reading mode** switches to
 browser. Continuous scrolling stops at the end of the selected original; it
 does not repeat the book or open another original. A small current/neighbor
 window is retained, not the whole book's DOM, decoded images or canvases.
+Previous/next page buttons appear only in Paged mode. Continuous keeps direct
+page jumps or Contents, page counts, view options and fullscreen controls;
+keyboard and touch navigation remain available in both modes.
 Short trailing CBZ pages and EPUB sections get enough trailing scroll space to
 reach the top and load the next neighbor, without expanding that window or
 preventing backwards scrolling.

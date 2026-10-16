@@ -173,6 +173,7 @@ test('EPUB fallback Escape from embedded navigation exits and restores trigger f
   await signIn(page, app); await open(page, 'epub');
   const frame = page.frameLocator('iframe');
   await expect(frame.getByRole('heading', { name: 'First section' })).toBeVisible();
+  await page.getByLabel('Reading mode').selectOption('paged');
   await page.getByRole('button', { name: 'Full screen', exact: true }).click();
   await expect(page.getByText('Viewport-only view', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Show controls', exact: true }).click();

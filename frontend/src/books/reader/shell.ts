@@ -162,6 +162,11 @@ function restore(locator: EbookLocator): void {
     locator.fraction * Math.max(0, value.element.offsetHeight - viewport.clientHeight);
   logical = locator; measure();
 }
+function showChrome(): void {
+  chrome.style.display = presentation.chromeHidden ? 'none' : '';
+  previous.hidden = next.hidden = presentation.mode !== 'paged';
+  status.style.display = presentation.chromeHidden && status.getAttribute('role') !== 'alert' ? 'none' : '';
+}
 function controls(): void {
   previous.disabled = section === 0 && viewport.scrollTop <= 1;
   const value = sections.get(section);
@@ -170,9 +175,8 @@ function controls(): void {
   contents.disabled = false;
   contents.value = String(Math.max(0, descriptor.toc.findIndex(entry => entry.resourceId === descriptor.spine[section])));
   previous.textContent = 'Previous page'; next.textContent = 'Next page';
-  chrome.style.display = presentation.chromeHidden ? 'none' : '';
+  showChrome();
   if (status.getAttribute('role') !== 'alert') {
-    status.style.display = presentation.chromeHidden ? 'none' : '';
     status.textContent = `Section ${section + 1} of ${descriptor.spine.length}`;
   }
   host.dataset.sections = String(sections.size);
@@ -268,8 +272,7 @@ function navigate(index: number, saved?: EbookLocator, fragment?: string, end = 
 function reflow(nextPresentation?: ReaderPresentation): void {
   const saved = logical ?? (ready ? location() : undefined);
   if (nextPresentation) presentation = nextPresentation;
-  chrome.style.display = presentation.chromeHidden ? 'none' : '';
-  status.style.display = presentation.chromeHidden && status.getAttribute('role') !== 'alert' ? 'none' : '';
+  showChrome();
   if (!ready || navigating) return;
   const epoch = ++generation;
   for (const number of sections.keys()) if (!wanted(section).includes(number)) remove(number);
@@ -290,6 +293,7 @@ window.addEventListener('message', function boot(event: MessageEvent) {
     if (descriptor.state !== 'ready' || typeof event.data.instance !== 'string') return;
     instance = event.data.instance; port = event.ports[0];
     presentation = event.data.presentation ?? DEFAULT_PRESENTATION;
+    showChrome();
     port.onmessage = message => {
       const raw = record(message.data);
       if (raw.instance !== instance) return;
@@ -366,4 +370,5 @@ window.addEventListener('pagehide', () => {
   for (const value of requests.values()) value.reject(new Error('Reader closed'));
   requests.clear(); port?.close();
 });
+showChrome();
 parent.postMessage({ type: 'epub-shell-ready' }, '*');

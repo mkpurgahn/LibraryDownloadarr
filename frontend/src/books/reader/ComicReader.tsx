@@ -376,7 +376,7 @@ export const ComicReader: React.FC<{
 
   return <section aria-label="CBZ reader" className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
     <div role="group" aria-label="Page navigation" className={chromeHidden ? 'hidden' : 'flex items-center gap-2'}>
-      {pageButton('left')}
+      {mode === 'paged' && pageButton('left')}
       <form className="flex min-w-0 flex-1 items-center justify-center gap-1 text-sm tabular-nums" onSubmit={event => {
         event.preventDefault();
         const next = Number(jump);
@@ -391,7 +391,7 @@ export const ComicReader: React.FC<{
         <button type="submit" aria-label="Go to page" disabled={(loading && !source) || blocked.current}
           className="min-h-11 min-w-11 rounded-lg px-2 text-gray-300 hover:bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300 disabled:opacity-40">Go</button>
       </form>
-      {pageButton('right')}
+      {mode === 'paged' && pageButton('right')}
       <button type="button" aria-label="View options" aria-expanded={options} aria-controls="comic-view-options"
         className="min-h-11 min-w-11 shrink-0 rounded-lg px-2 text-sm text-gray-300 hover:bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300"
         onClick={() => { position(); setOptions(value => !value); }}>View</button>
@@ -411,7 +411,9 @@ export const ComicReader: React.FC<{
       </label>
     </div>}
     <p id="comic-navigation-help" className={chromeHidden ? 'hidden' : 'text-xs text-gray-400'}>
-      {total === 1 ? 'This original has one page.' : 'Left: previous. Right: next. First and last pages connect within this original.'}
+      {total === 1 ? 'This original has one page.' : mode === 'continuous' ?
+        'Scroll vertically to read. Scrolling stops at the end of this original.' :
+        'Left: previous. Right: next. First and last pages connect within this original.'}
     </p>
     {error && <p role="alert" className="rounded bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
     <div ref={viewport} role="region" aria-label="Comic page" aria-busy={loading} tabIndex={0}

@@ -15,7 +15,8 @@ test('new CBZ client falls back to the actual legacy complete server without han
   expect(legacy.status()).toBe(200);
   expect((await legacy.json()).state).toBe('ready');
   await expect(page.getByRole('img', { name: 'Comic page 1 of 3', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await page.getByLabel('Page number').fill('2');
+  await page.getByRole('button', { name: 'Go to page', exact: true }).click();
   await expect(page.getByRole('img', { name: 'Comic page 2 of 3', exact: true })).toBeVisible();
   await expect(page.getByText('Position saved', { exact: true })).toBeVisible();
   await capture(page, 'new-client-legacy-server', info);

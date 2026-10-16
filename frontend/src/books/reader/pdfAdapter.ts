@@ -80,6 +80,7 @@ export async function mountPdfReader(
   const chrome = shadow.querySelector<HTMLElement>('nav')!;
   const showChrome = () => {
     chrome.style.display = presentation.chromeHidden ? 'none' : '';
+    previous.hidden = next.hidden = presentation.mode !== 'paged';
     status.style.display = presentation.chromeHidden && !status.textContent?.includes('limited') ? 'none' : '';
     viewport.style.paddingBottom = presentation.mode === 'continuous' ? '70vh' : '0';
   };

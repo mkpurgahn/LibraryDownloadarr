@@ -34,8 +34,8 @@ test('pdf_range_render_and_resume', async ({ page, app }, info) => {
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expect(page.getByRole('region', { name: 'PDF pages' })).toBeVisible();
   await expect(page.getByText('Generated PDF page 1', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Next page', exact: true }).click();
-  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await page.getByLabel('Page number').fill('3');
+  await page.getByLabel('Page number').press('Enter');
   await expect(page.getByLabel('Page number')).toHaveValue('3');
   await page.getByLabel('Zoom').selectOption('1.5');
   await expect(page.getByText('Generated PDF page 3', { exact: true })).toBeVisible();
@@ -228,7 +228,8 @@ test('pdf_documents_in_other_tabs_remain_independent_and_private', async ({ page
   await page.getByLabel('Ebook original').selectOption({ label: 'A Tale in Two Formats 2.pdf' });
   await page.getByRole('link', { name: 'Read', exact: true }).click();
   await expect(page.getByText('Generated PDF page 1', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await page.getByLabel('Page number').fill('2');
+  await page.getByLabel('Page number').press('Enter');
   await expect(page.getByLabel('Page number')).toHaveValue('2');
   const context = await browser.newContext({ baseURL: app.origin, viewport: page.viewportSize(), ignoreHTTPSErrors: true });
   await context.route('**/*', route => new URL(route.request().url()).origin === app.origin ? route.continue() : route.abort());
@@ -258,7 +259,8 @@ test.describe('isolated ABS PDF', () => {
     await expect(page.getByRole('region', { name: 'PDF pages' })).toBeVisible();
     await expect(page.getByTestId('pdf-reader').locator('canvas')).toHaveCount(2);
     await expect(page.getByTestId('pdf-reader').locator('.textLayer')).toContainText(['LDA PDF', 'LDA PDF']);
-    await page.getByRole('button', { name: 'Next page', exact: true }).click();
+    await page.getByLabel('Page number').fill('2');
+    await page.getByLabel('Page number').press('Enter');
     await expect(page.getByLabel('Page number')).toHaveValue('2');
     await capture(page, 'real-abs-pdf', info);
   });
