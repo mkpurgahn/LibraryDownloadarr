@@ -37,6 +37,7 @@ test('pdf_range_render_and_resume', async ({ page, app }, info) => {
   await page.getByLabel('Page number').fill('3');
   await page.getByLabel('Page number').press('Enter');
   await expect(page.getByLabel('Page number')).toHaveValue('3');
+  await expect(page.getByTestId('pdf-reader').getByRole('status')).toContainText('Page 3 of');
   await page.getByLabel('Zoom').selectOption('1.5');
   await expect(page.getByText('Generated PDF page 3', { exact: true })).toBeVisible();
   expect(ranges.length).toBeGreaterThan(0);
@@ -231,6 +232,7 @@ test('pdf_documents_in_other_tabs_remain_independent_and_private', async ({ page
   await page.getByLabel('Page number').fill('2');
   await page.getByLabel('Page number').press('Enter');
   await expect(page.getByLabel('Page number')).toHaveValue('2');
+  await expect(page.getByTestId('pdf-reader').getByRole('status')).toContainText('Page 2 of');
   const context = await browser.newContext({ baseURL: app.origin, viewport: page.viewportSize(), ignoreHTTPSErrors: true });
   await context.route('**/*', route => new URL(route.request().url()).origin === app.origin ? route.continue() : route.abort());
   try {
@@ -262,6 +264,7 @@ test.describe('isolated ABS PDF', () => {
     await page.getByLabel('Page number').fill('2');
     await page.getByLabel('Page number').press('Enter');
     await expect(page.getByLabel('Page number')).toHaveValue('2');
+    await expect(page.getByTestId('pdf-reader').getByRole('status')).toContainText('Page 2 of');
     await capture(page, 'real-abs-pdf', info);
   });
 });
