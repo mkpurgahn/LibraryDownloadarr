@@ -221,7 +221,11 @@ async function load(index: number, epoch: number): Promise<void> {
     const content = await safeDocument(text, reference => asset(reference, used), reference => stylesheet(reference, used));
     if (disposed || epoch !== generation) return;
     const element = document.createElement('section'); element.dataset.section = String(index);
-    const root = element.attachShadow({ mode: 'open' });
+    const overlayRoot = element.attachShadow({ mode: 'open' });
+    // Book styles stay below this boundary; reader labels are siblings of the book host.
+    const book = document.createElement('div'); book.dataset.readerBook = '';
+    const root = book.attachShadow({ mode: 'open' });
+    overlayRoot.append(book);
     const base = document.createElement('style');
     base.textContent = ':host{display:block;color:#222;background:#faf8f1;line-height:1.65;font-family:Georgia,serif}.book-content{max-width:48rem;margin:0 auto;padding:1rem 1.25rem;overflow-wrap:anywhere}img,svg{max-width:100%;height:auto}a{color:#614100}';
     root.append(base, content);

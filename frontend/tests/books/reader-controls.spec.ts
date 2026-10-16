@@ -149,7 +149,8 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) {
         return Math.abs(element.scrollTop - current.offsetTop - length * locator.offset);
       }
       const current = document.getElementById('book')!.shadowRoot!.querySelector<HTMLElement>('[data-section="1"]')!;
-      const walker = document.createTreeWalker(current.shadowRoot!.querySelector('article')!, NodeFilter.SHOW_TEXT);
+      const article = current.shadowRoot!.querySelector('[data-reader-book]')!.shadowRoot!.querySelector('article')!;
+      const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
       let remaining = locator.textOffset, node: Node | null;
       while ((node = walker.nextNode())) {
         if (node.parentElement?.closest('style,script')) continue;

@@ -222,7 +222,8 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) {
       if (locator.kind !== 'epub') return 999;
       const section = document.getElementById('book')!.shadowRoot!.querySelector<HTMLElement>('[data-section="0"]');
       if (!section) return 999;
-      const walker = document.createTreeWalker(section.shadowRoot!.querySelector('article')!, NodeFilter.SHOW_TEXT);
+      const article = section.shadowRoot!.querySelector('[data-reader-book]')!.shadowRoot!.querySelector('article')!;
+      const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
       let remaining = locator.textOffset, node: Node | null;
       while ((node = walker.nextNode())) {
         if (node.parentElement?.closest('style,script')) continue;

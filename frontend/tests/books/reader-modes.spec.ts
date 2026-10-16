@@ -283,8 +283,7 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) test(`${format} denied nat
           return current ? Math.abs(element.scrollTop - current.offsetTop - current.offsetHeight * offset) : 999;
         }, before.offset)).toBeLessThanOrEqual(1);
       } else if (before.kind === 'epub') {
-        await expect.poll(() => frame.locator('[data-section="0"]').evaluate((element, textOffset) => {
-          const article = element.shadowRoot!.querySelector('article')!;
+        await expect.poll(() => frame.locator('[data-section="0"] article').evaluate((article, textOffset) => {
           const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
           let remaining = textOffset, node: Node | null;
           while ((node = walker.nextNode())) {
