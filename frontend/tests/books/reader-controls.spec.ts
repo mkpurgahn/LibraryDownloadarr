@@ -165,10 +165,12 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) {
   });
 
   test(`${format} pending initial content follows the latest mode before and after completion`, async ({ page, app }, info) => {
-    let release!: () => void, held = false;
-    const gate = new Promise<void>(resolve => { release = resolve; });
+    let release!: () => void, held = false, released = false, requests = 0;
+    const gate = new Promise<void>(resolve => { release = () => { released = true; resolve(); }; });
     await page.route(format === 'pdf' ? '**/content?*' : '**/readers/*/resources/*', async route => {
-      if (route.request().method() === 'GET' && !held) { held = true; await gate; }
+      // Mode changes can cancel and restart the foreground request. Keep every
+      // attempt pending so completion cannot race the visibility assertions.
+      if (route.request().method() === 'GET' && !released) { requests++; held = true; await gate; }
       await route.continue();
     });
     try {
@@ -179,6 +181,8 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) {
       for (const mode of ['paged', 'continuous', 'paged', 'continuous']) {
         await page.getByLabel('Reading mode').selectOption(mode);
         await turnVisibility(ui.turns, mode === 'paged');
+        await expect(format === 'cbz' ? ui.viewport.locator('img') : format === 'pdf' ?
+          ui.viewport.locator('canvas') : page.frameLocator('iframe').locator('article')).toHaveCount(0);
         counts.push(await ui.turns.count());
       }
       await capture(page, `${format}-pending-continuous`, info);
@@ -186,7 +190,7 @@ for (const format of ['cbz', 'pdf', 'epub'] as const) {
       await turnVisibility(ui.turns, false);
       await expect(ui.direct).toBeVisible(); await expect(ui.view).toBeVisible();
       counts.push(await ui.turns.count());
-      await fs.writeFile(info.outputPath(`${format}-pending-controls.json`), JSON.stringify({ counts }, null, 2));
+      await fs.writeFile(info.outputPath(`${format}-pending-controls.json`), JSON.stringify({ counts, heldRequests: requests }, null, 2));
     } finally { release(); }
   });
 }
