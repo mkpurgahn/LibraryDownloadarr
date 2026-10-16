@@ -247,6 +247,8 @@ function navigate(index: number, saved?: EbookLocator, fragment?: string, end = 
     for (const number of sections.keys()) if (!wanted(index).includes(number)) remove(number);
     await load(index, epoch);
     if (disposed || epoch !== generation) return;
+    // Presentation can change while the section request is in flight.
+    for (const number of sections.keys()) if (!wanted(index).includes(number)) remove(number);
     section = index; restoredAnchor = undefined; logical = undefined;
     arrange();
     const value = sections.get(index)!;
