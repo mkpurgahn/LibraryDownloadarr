@@ -151,6 +151,9 @@ window is retained, not the whole book's DOM, decoded images or canvases.
 Previous/next page buttons appear only in Paged mode. Continuous keeps direct
 page jumps or Contents, page counts, view options and fullscreen controls;
 keyboard and touch navigation remain available in both modes.
+CBZ image clicks and taps turn pages only in **Paged** mode. **Continuous** mode
+has no click-to-turn action or paging hand cursor; deliberate horizontal swipes,
+keyboard navigation and direct page jumps remain available.
 Short trailing CBZ pages and EPUB sections get enough trailing scroll space to
 reach the top and load the next neighbor, without expanding that window or
 preventing backwards scrolling.

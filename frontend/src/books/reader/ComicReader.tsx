@@ -342,7 +342,7 @@ export const ComicReader: React.FC<{
     (target === viewport.current || target === slot.current || target === pages.current.get(page)?.element));
   const edgeAt = (x: number, y: number): 'left' | 'right' | undefined => {
     const current = image.current; const element = viewport.current;
-    if (!current?.isConnected || !current.naturalWidth || !element) return;
+    if (mode !== 'paged' || !current?.isConnected || !current.naturalWidth || !element) return;
     const pageBounds = current.getBoundingClientRect(); const viewBounds = element.getBoundingClientRect();
     const left = Math.max(pageBounds.left, viewBounds.left); const right = Math.min(pageBounds.right, viewBounds.right);
     const top = Math.max(pageBounds.top, viewBounds.top); const bottom = Math.min(pageBounds.bottom, viewBounds.bottom);
