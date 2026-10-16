@@ -171,6 +171,9 @@ native fullscreen uses an honestly labeled **Viewport-only view**. Errors and pa
 warnings remain visible. Active audio keeps playing without reserving space for
 its hidden outside toolbar. Mode, font, zoom and fullscreen changes preserve
 logical positions rather than saving layout-clamped offsets.
+In fullscreen Paged CBZ reading, the left/right image-edge click areas extend
+through the blank margins of the reading viewport. The center stays neutral;
+the four corners still reveal controls without turning a page.
 PDF presentation changes also retain the pending page/fraction while neighbors
 render; an unrendered navigation target does not become saved progress. EPUB
 Escape works from both the reading viewport and embedded controls.

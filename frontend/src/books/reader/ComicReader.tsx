@@ -140,6 +140,7 @@ export const ComicReader: React.FC<{
   useEffect(() => {
     const element = viewport.current!;
     const observer = new ResizeObserver(() => {
+      cancelGesture();
       position();
       setViewportSize({ width: element.clientWidth, height: element.clientHeight });
     });
@@ -329,46 +330,62 @@ export const ComicReader: React.FC<{
 
   function cancelGesture() {
     touchCancelled.current = true; pointer.current = undefined; touch.current = undefined;
+    viewport.current?.style.removeProperty('cursor');
   }
+  useLayoutEffect(() => {
+    cancelGesture();
+  }, [mode, overlay, page, descriptor, source, fit, zoom, viewportSize, loading]);
+
   const hasSelection = () => window.getSelection()?.isCollapsed === false;
+  const readingTarget = (target: EventTarget) => target === image.current || (mode === 'paged' && overlay &&
+    (target === viewport.current || target === slot.current || target === pages.current.get(page)?.element));
   const edgeAt = (x: number, y: number): 'left' | 'right' | undefined => {
     const current = image.current; const element = viewport.current;
-    if (!current || !element) return;
+    if (!current?.isConnected || !current.naturalWidth || !element) return;
     const pageBounds = current.getBoundingClientRect(); const viewBounds = element.getBoundingClientRect();
     const left = Math.max(pageBounds.left, viewBounds.left); const right = Math.min(pageBounds.right, viewBounds.right);
     const top = Math.max(pageBounds.top, viewBounds.top); const bottom = Math.min(pageBounds.bottom, viewBounds.bottom);
+    if (mode === 'paged' && overlay) {
+      if (x < viewBounds.left || x >= viewBounds.left + element.clientWidth ||
+          y < viewBounds.top || y >= viewBounds.top + element.clientHeight || right <= left) return;
+      // Extend the existing visible-image quarters into the surrounding reading surface.
+      return x <= left + (right - left) * 0.25 ? 'left' : x >= right - (right - left) * 0.25 ? 'right' : undefined;
+    }
     if (x < left || x > right || y < top || y > bottom || right <= left) return;
     const fraction = (x - left) / (right - left);
     return fraction <= 0.25 ? 'left' : fraction >= 0.75 ? 'right' : undefined;
   };
   const pointerDown = (event: React.PointerEvent) => {
     pointer.current = undefined;
-    if (loading || blocked.current || !event.isPrimary || event.button !== 0 ||
-        event.target !== image.current || hasSelection()) return;
+    if (loading || blocked.current || total === 1 || !event.isPrimary || event.button !== 0 ||
+        !readingTarget(event.target) || hasSelection()) return;
     const side = edgeAt(event.clientX, event.clientY);
     if (side && image.current) pointer.current = {
       id: event.pointerId, x: event.clientX, y: event.clientY, time: event.timeStamp,
       side, image: image.current, page, ready: false,
     };
   };
-  const pointerMove = (event: React.PointerEvent) => {
+  const pointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const side = edgeAt(event.clientX, event.clientY);
-    if (image.current) image.current.style.cursor = side && !loading && !blocked.current && total > 1 ? 'pointer' : 'default';
+    event.currentTarget.style.cursor = side && readingTarget(event.target) && !loading && !blocked.current &&
+      total > 1 && !hasSelection() ? 'pointer' : 'default';
     const start = pointer.current;
     if (start && (event.pointerId !== start.id || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8)) {
       pointer.current = undefined;
     }
   };
-  const pointerUp = (event: React.PointerEvent) => {
+  const pointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     pointerMove(event);
     const start = pointer.current;
-    if (!start || event.timeStamp - start.time > 500 || hasSelection() ||
+    if (!start || !event.isPrimary || event.button !== 0 || loading || blocked.current ||
+        !readingTarget(event.target) || event.timeStamp - start.time > 500 || hasSelection() ||
         edgeAt(event.clientX, event.clientY) !== start.side) { pointer.current = undefined; return; }
     start.ready = true;
   };
   const clickEdge = (event: React.MouseEvent) => {
     const start = pointer.current; pointer.current = undefined;
-    if (!start?.ready || start.page !== page || start.image !== image.current || event.target !== image.current ||
+    if (!start?.ready || start.page !== page || start.image !== image.current || !readingTarget(event.target) ||
+        loading || blocked.current || event.button !== 0 || event.timeStamp - start.time > 500 ||
         event.detail === 0 || hasSelection() || edgeAt(event.clientX, event.clientY) !== start.side) return;
     turn(start.side === 'right' ? 1 : -1);
   };
@@ -434,6 +451,10 @@ export const ComicReader: React.FC<{
       className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-dark-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-300"
       onKeyDown={key}
       onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}
+      onPointerLeave={event => {
+        if (event.pointerType !== 'touch') pointer.current = undefined;
+        viewport.current?.style.removeProperty('cursor');
+      }}
       // Native touch scrolling/swiping may cancel the pointer stream without cancelling the touch.
       onPointerCancel={() => { pointer.current = undefined; }} onClick={clickEdge}
       onContextMenu={cancelGesture} onWheel={cancelGesture}

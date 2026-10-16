@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { CDPSession, Locator, Page, Route } from '@playwright/test';
-import { test, expect, signIn, capture, originalDownload } from './harness';
-import { parseBookItem, parseReader } from '../../src/books/types';
+import { test, expect, signIn, capture, originalDownload, revealReaderControls } from './harness';
+import { parseBookItem, parseProgressiveComic } from '../../src/books/types';
 
 test.use({ cbzFixtures: true, controlledReaderClock: true, reverseProxy: true });
 
@@ -708,19 +708,28 @@ test('CBZ edge activation ignores center margins drag scroll selection and long 
 
 test.describe('actual-clock page selection', () => {
   test.use({ controlledReaderClock: false });
-  test('CBZ Next and edge remain selected through delayed real saves resources and autosave', async ({ page, app }, info) => {
+  for (const fullscreen of [false, true]) test(`CBZ Next and edge remain selected through delayed real saves resources and autosave${fullscreen ? ' with fullscreen gutters' : ''}`, async ({ page, app }, info) => {
     test.setTimeout(115000);
     await signIn(page, app);
     await openComic(page);
     const prepared = page.waitForResponse(response => response.request().method() === 'POST' &&
-      new URL(response.url()).pathname.endsWith('/reader'));
+      new URL(response.url()).pathname.endsWith('/reader-progressive'));
     const firstSaved = page.waitForResponse(response => response.request().method() === 'PUT' &&
       response.url().endsWith('/progress/ebook') && response.status() === 200 &&
       response.request().postDataJSON().op === 'save');
     await page.getByRole('link', { name: 'Read', exact: true }).click();
-    const descriptor = parseReader(await (await prepared).json());
-    expect(descriptor.policyVersion).toBe('cbz-pages-v1');
+    const started = parseProgressiveComic(await (await prepared).json());
+    expect(started.policyVersion).toBe('cbz-pages-v1');
     await expectPanel(page, 1, 1); await firstSaved;
+    const status = await page.request.get(`${app.origin}/api/books/readers/${started.readerId}/status`);
+    expect(status.status()).toBe(200);
+    const descriptor = parseProgressiveComic(await status.json());
+    expect(descriptor.spine).toHaveLength(3);
+    if (fullscreen) {
+      await page.getByRole('button', { name: 'Full screen', exact: true }).click();
+      await expect(page.locator('[data-reader-fullscreen]')).not.toHaveAttribute('data-reader-fullscreen', 'normal');
+      await revealReaderControls(page);
+    }
     const observations: object[] = [];
     for (const [from, to, action] of [[1, 2, 'next'], [2, 1, 'left'], [1, 3, 'previous'], [3, 1, 'right']] as const) {
       let heldSave: Route | undefined; let heldResource: Route | undefined;
@@ -746,10 +755,18 @@ test.describe('actual-clock page selection', () => {
         await page.getByRole('button', { name: action === 'next' ? 'Next page' : 'Previous page', exact: true }).click();
       }
       else {
-        const edge = await pageEdge(page, action); await page.mouse.click(edge.x, edge.y);
+        const edge = await pageEdge(page, action);
+        if (fullscreen) {
+          const view = (await page.getByRole('region', { name: 'Comic page', exact: true }).boundingBox())!;
+          const image = (await page.getByRole('img', { name: /Comic page/ }).boundingBox())!;
+          expect(image.width).toBeLessThan(view.width * 0.75);
+          edge.x = action === 'left' ? (view.x + image.x) / 2 : (image.x + image.width + view.x + view.width) / 2;
+        }
+        await page.mouse.click(edge.x, edge.y);
       }
       await expect.poll(() => Boolean(heldSave && heldResource)).toBe(true);
       await expect(page.getByRole('region', { name: 'Comic page', exact: true })).toHaveAttribute('aria-busy', 'true');
+      if (fullscreen) await revealReaderControls(page);
       await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeDisabled();
       await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeDisabled();
       await heldResource!.continue();
@@ -769,7 +786,14 @@ test.describe('actual-clock page selection', () => {
       observations.push({ action, from, selectedPage: to,
         delayedOldSaveReleasedAfterNewImage: true, realPeriodicSavePage: to });
     }
-    await fs.writeFile(info.outputPath('actual-clock-turns.json'), JSON.stringify(observations, null, 2));
+    if (fullscreen) await page.keyboard.press('Escape');
+    await page.getByRole('link', { name: 'Back to book', exact: true }).click();
+    await app.restart(); await page.reload();
+    await page.getByRole('link', { name: 'Read', exact: true }).click();
+    await page.getByRole('button', { name: 'Resume saved position', exact: true }).click();
+    await expectPanel(page, 1, 1);
+    expect(await savedComicPage(page)).toBe(1);
+    await fs.writeFile(info.outputPath('actual-clock-turns.json'), JSON.stringify({ fullscreen, observations, durableReopenedPage: 1 }, null, 2));
   });
 });
 
